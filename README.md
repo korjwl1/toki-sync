@@ -1,6 +1,8 @@
 <p align="center">
-  <h1 align="center">toki-sync</h1>
+  <img src="assets/logo.png" alt="toki-sync logo" width="160" />
 </p>
+
+<h1 align="center">toki-sync</h1>
 
 <p align="center">
   <b>Multi-device token usage sync server</b><br>
@@ -9,6 +11,10 @@
 
 <p align="center">
   Part of the <a href="https://github.com/korjwl1/toki">toki</a> ecosystem.
+</p>
+
+<p align="center">
+  <a href="README.ko.md">🇰🇷 한국어</a>
 </p>
 
 ---
@@ -379,6 +385,15 @@ All HTTP endpoints are served on port 9091. JWT-authenticated endpoints require 
 | `GET` | `/` | Redirect to `/dashboard` |
 | `GET` | `/dashboard` | Web dashboard (HTML) |
 | `GET` | `/login` | Login page (HTML) |
+
+---
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| **[Configuration Reference](docs/CONFIGURATION.md)** | All TOML sections, fields, defaults, environment variables |
+| **[HTTP API Reference](docs/API.md)** | All endpoints, request/response examples, authentication |
 
 ---
 
