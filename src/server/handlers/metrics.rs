@@ -90,7 +90,20 @@ pub fn escape_label_value(s: &str) -> String {
 /// All injected values are escaped; no string interpolation from user input.
 pub fn inject_user_label(expr: &str, user_id: &str) -> String {
     let escaped = escape_label_value(user_id);
-    let injection = format!("user=\"{escaped}\"");
+    inject_label_filter(expr, &format!("user=\"{escaped}\""))
+}
+
+/// Inject an arbitrary label filter (e.g. `user="alice"` or `user=~"a|b"`) into
+/// a PromQL expression by rewriting metric selectors. This is the shared core
+/// used by both `inject_user_label` and team query injection.
+///
+/// Strategy: find the first `{` in each metric selector and insert the label
+/// before the first existing label. If no `{` exists, find each bare metric
+/// name token and inject `{<injection>}` after it.
+///
+/// NOTE: This is a string-level transformation, not a full PromQL parse.
+/// Handles the common patterns used by toki-monitor and toki CLI.
+pub fn inject_label_filter(expr: &str, injection: &str) -> String {
     let selector = format!("{{{injection}}}");
 
     // ── Path A: expression already has `{...}` selectors ──────────────────
@@ -119,9 +132,9 @@ pub fn inject_user_label(expr: &str, user_id: &str) -> String {
             if ch == '{' {
                 result.push(chars.next().unwrap());
                 if chars.peek() == Some(&'}') {
-                    result.push_str(&injection);
+                    result.push_str(injection);
                 } else {
-                    result.push_str(&injection);
+                    result.push_str(injection);
                     result.push(',');
                 }
                 continue;
@@ -132,21 +145,10 @@ pub fn inject_user_label(expr: &str, user_id: &str) -> String {
     }
 
     // ── Path B: no `{` -- inject after bare metric name tokens ───────────
-    //
-    // A metric name token is `[a-zA-Z_:][a-zA-Z0-9_:]*` that is:
-    //   - NOT immediately followed by `(` (which would make it a function name)
-    //   - NOT a PromQL keyword (aggregation modifier, binary operator, etc.)
-    //   - NOT inside an aggregation-modifier label list `by(...)` / `without(...)`
-    //
-    // We track parenthesis depth and whether we're inside a modifier label list.
-    // Modifier label lists are `(...)` that directly follow `by`, `without`,
-    // `on`, or `ignoring` keywords.
 
     const KEYWORDS: &[&str] = &[
-        // aggregation operators (always followed by `(` or modifier keyword)
         "sum", "min", "max", "avg", "count", "stddev", "stdvar",
         "bottomk", "topk", "count_values", "quantile",
-        // range/instant functions
         "rate", "irate", "increase", "delta", "idelta",
         "resets", "changes", "deriv", "predict_linear", "holt_winters",
         "label_replace", "label_join", "histogram_quantile",
@@ -154,15 +156,10 @@ pub fn inject_user_label(expr: &str, user_id: &str) -> String {
         "exp", "sqrt", "ln", "log2", "log10",
         "vector", "scalar", "sort", "sort_desc",
         "time", "minute", "hour", "day_of_month", "day_of_week", "month", "year",
-        // modifier keywords -- their `(label, ...)` list must not get injected
         "by", "without", "on", "ignoring", "group_left", "group_right",
-        // binary-operator keywords
         "and", "or", "unless", "bool", "offset",
     ];
 
-    // Pre-scan: find byte ranges that are inside modifier-label lists.
-    // A modifier-label list is `(...)` that immediately follows (with optional
-    // whitespace) one of: `by`, `without`, `on`, `ignoring`.
     let bytes = expr.as_bytes();
     let len = bytes.len();
     let mut skip_range: Vec<(usize, usize)> = Vec::new();
@@ -177,14 +174,11 @@ pub fn inject_user_label(expr: &str, user_id: &str) -> String {
                 }
                 let tok = &expr[start..i];
                 if modifier_kw.contains(&tok) {
-                    // skip whitespace
                     let mut j = i;
                     while j < len && (bytes[j] == b' ' || bytes[j] == b'\t') {
                         j += 1;
                     }
                     if j < len && bytes[j] == b'(' {
-                        // find matching ')'
-                        let open = j;
                         let mut depth = 1usize;
                         let mut k = j + 1;
                         while k < len && depth > 0 {
@@ -192,7 +186,7 @@ pub fn inject_user_label(expr: &str, user_id: &str) -> String {
                             else if bytes[k] == b')' { depth -= 1; }
                             k += 1;
                         }
-                        skip_range.push((open, k)); // k points past ')'
+                        skip_range.push((j, k));
                     }
                 }
             } else {
@@ -205,7 +199,7 @@ pub fn inject_user_label(expr: &str, user_id: &str) -> String {
 
     let mut result = String::with_capacity(expr.len() + selector.len() * 2);
     let mut i = 0;
-    let mut bracket_depth = 0u32; // depth inside `[...]` range vectors
+    let mut bracket_depth = 0u32;
     while i < len {
         let b = bytes[i];
         if b == b'[' {
@@ -224,7 +218,6 @@ pub fn inject_user_label(expr: &str, user_id: &str) -> String {
             let tok = &expr[start..i];
             result.push_str(tok);
 
-            // Never inject inside `[...]` (duration suffixes like `5m`, `1h`)
             if bracket_depth == 0 {
                 let next = bytes.get(i).copied();
                 let is_fn   = next == Some(b'(');

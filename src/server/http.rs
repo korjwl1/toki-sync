@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::auth::{BruteForceGuard, JwtManager};
-use crate::auth::oidc::OidcStateStore;
+use crate::auth::oidc::{OidcDiscovery, OidcStateStore};
 use crate::db::DatabaseRepo;
 use crate::metrics::vm::VictoriaMetrics;
 
@@ -28,6 +28,8 @@ pub struct AppState {
     pub oidc_client_secret: String,
     pub oidc_redirect_uri: String,
     pub oidc_state_store: Arc<OidcStateStore>,
+    /// Cached OIDC discovery result (fetched once, reused).
+    pub oidc_discovery: Arc<tokio::sync::OnceCell<OidcDiscovery>>,
     /// External URL for JWT `iss` claim and OIDC redirect derivation.
     pub external_url: String,
 }

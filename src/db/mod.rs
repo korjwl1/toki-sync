@@ -41,6 +41,7 @@ pub trait DatabaseRepo: Send + Sync {
     async fn create_team(&self, id: &str, name: &str) -> Result<()>;
     async fn get_team(&self, id: &str) -> Result<Option<Team>>;
     async fn list_teams(&self) -> Result<Vec<Team>>;
+    async fn list_teams_with_member_count(&self) -> Result<Vec<TeamWithCount>>;
     async fn delete_team(&self, id: &str) -> Result<bool>;
     async fn list_user_teams(&self, user_id: &str) -> Result<Vec<TeamMembership>>;
 
@@ -60,6 +61,9 @@ pub trait DatabaseRepo: Send + Sync {
     async fn revoke_refresh_token(&self, jti: &str) -> Result<()>;
     async fn revoke_user_refresh_tokens(&self, user_id: &str) -> Result<()>;
     async fn rotate_refresh_token(&self, old_jti: &str, new_jti: &str, user_id: &str, device_id: Option<&str>, expires_at: i64) -> Result<()>;
+
+    // Cleanup
+    async fn cleanup_expired_tokens(&self) -> Result<u64>;
 }
 
 pub async fn open_database(config: &StorageConfig) -> Result<Arc<dyn DatabaseRepo>> {

@@ -56,6 +56,13 @@ pub struct Team {
     pub updated_at: i64,
 }
 
+pub struct TeamWithCount {
+    pub id: String,
+    pub name: String,
+    pub member_count: i64,
+    pub created_at: i64,
+}
+
 pub struct TeamMembership {
     pub team_id: String,
     pub team_name: String,

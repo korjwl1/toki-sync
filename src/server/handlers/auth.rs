@@ -219,10 +219,10 @@ pub async fn oidc_authorize(
         return Err(AppError { status: StatusCode::NOT_FOUND, message: "OIDC not configured".into() });
     }
 
-    // Discover OIDC provider endpoints
-    let discovery = crate::auth::oidc::discover(&state.oidc_issuer)
-        .await
-        .map_err(AppError::internal)?;
+    // Discover OIDC provider endpoints (cached)
+    let discovery = state.oidc_discovery.get_or_init(|| async {
+        crate::auth::oidc::discover(&state.oidc_issuer).await.expect("OIDC discovery failed")
+    }).await.clone();
 
     // Generate CSRF state token and nonce
     let csrf_state = uuid::Uuid::new_v4().to_string();
@@ -275,10 +275,10 @@ pub async fn oidc_callback(
     let (client_redirect, stored_nonce) = state.oidc_state_store.validate(&params.state)
         .ok_or_else(|| AppError { status: StatusCode::BAD_REQUEST, message: "invalid or expired state parameter".into() })?;
 
-    // Discover provider endpoints
-    let discovery = crate::auth::oidc::discover(&state.oidc_issuer)
-        .await
-        .map_err(AppError::internal)?;
+    // Discover provider endpoints (cached)
+    let discovery = state.oidc_discovery.get_or_init(|| async {
+        crate::auth::oidc::discover(&state.oidc_issuer).await.expect("OIDC discovery failed")
+    }).await.clone();
 
     // Exchange code for tokens
     let token_resp = crate::auth::oidc::exchange_code(
@@ -358,16 +358,25 @@ pub async fn oidc_callback(
 
     tracing::info!(user_id = %user_id, "OIDC login successful");
 
-    // If client provided a redirect_uri (CLI flow), redirect with tokens
+    // If client provided a redirect_uri (CLI flow), redirect with tokens.
+    // Only allow localhost redirects with tokens in query params (safe: localhost
+    // traffic is not proxied or logged externally). Reject non-localhost redirects.
     if !client_redirect.is_empty() {
-        let redirect_url = format!(
-            "{}?access_token={}&refresh_token={}&token_type=Bearer&expires_in={}",
-            client_redirect,
-            urlencoding::encode(&access),
-            urlencoding::encode(&refresh),
-            state.access_token_ttl_secs,
-        );
-        return Ok(Redirect::temporary(&redirect_url).into_response());
+        if client_redirect.starts_with("http://127.0.0.1") || client_redirect.starts_with("http://localhost") {
+            let redirect_url = format!(
+                "{}?access_token={}&refresh_token={}&token_type=Bearer&expires_in={}",
+                client_redirect,
+                urlencoding::encode(&access),
+                urlencoding::encode(&refresh),
+                state.access_token_ttl_secs,
+            );
+            return Ok(Redirect::temporary(&redirect_url).into_response());
+        } else {
+            return Err(AppError {
+                status: StatusCode::BAD_REQUEST,
+                message: "OIDC CLI redirect must be localhost (http://127.0.0.1 or http://localhost)".into(),
+            });
+        }
     }
 
     // Browser flow: redirect to dashboard with tokens in URL fragment

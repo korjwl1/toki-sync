@@ -41,6 +41,13 @@ async fn main() -> Result<()> {
     // Ensure admin account exists (TOKI_ADMIN_PASSWORD env)
     ensure_admin(&*db).await?;
 
+    // Cleanup expired/revoked refresh tokens
+    let cleaned = db.cleanup_expired_tokens().await
+        .context("failed to cleanup expired tokens")?;
+    if cleaned > 0 {
+        tracing::info!("cleaned up {cleaned} expired/revoked refresh tokens");
+    }
+
     // Build shared state
     let jwt_manager = JwtManager::new(
         &config.auth.jwt_secret,
@@ -84,6 +91,7 @@ async fn main() -> Result<()> {
         oidc_client_secret: config.auth.oidc_client_secret.clone(),
         oidc_redirect_uri,
         oidc_state_store,
+        oidc_discovery: Arc::new(tokio::sync::OnceCell::new()),
         external_url: config.server.external_url.clone(),
     };
 

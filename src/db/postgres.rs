@@ -457,6 +457,21 @@ impl DatabaseRepo for PostgresRepo {
         }).collect())
     }
 
+    async fn list_teams_with_member_count(&self) -> Result<Vec<TeamWithCount>> {
+        let rows: Vec<(String, String, i64, i64)> = sqlx::query_as(
+            "SELECT t.id, t.name, COUNT(tm.user_id)::BIGINT as member_count, t.created_at \
+             FROM teams t LEFT JOIN team_members tm ON t.id = tm.team_id \
+             GROUP BY t.id ORDER BY t.created_at",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("list_teams_with_member_count")?;
+
+        Ok(rows.into_iter().map(|(id, name, member_count, created_at)| TeamWithCount {
+            id, name, member_count, created_at,
+        }).collect())
+    }
+
     async fn delete_team(&self, id: &str) -> Result<bool> {
         let affected = sqlx::query("DELETE FROM teams WHERE id = $1")
             .bind(id)
@@ -665,5 +680,15 @@ impl DatabaseRepo for PostgresRepo {
 
         tx.commit().await.context("failed to commit rotation transaction")?;
         Ok(())
+    }
+
+    async fn cleanup_expired_tokens(&self) -> Result<u64> {
+        let now = chrono::Utc::now().timestamp();
+        let result = sqlx::query("DELETE FROM refresh_tokens WHERE expires_at < $1 OR revoked != 0")
+            .bind(now)
+            .execute(&self.pool)
+            .await
+            .context("cleanup_expired_tokens")?;
+        Ok(result.rows_affected())
     }
 }
