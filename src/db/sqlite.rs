@@ -34,50 +34,71 @@ impl SqliteRepo {
     }
 
     async fn migrate(&self) -> Result<()> {
+        // NOTE: SQLx's execute() on SQLite only runs the first statement in a
+        // multi-statement string, so each DDL statement must be executed separately.
         sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS users (
+            "CREATE TABLE IF NOT EXISTS users (
                 id          TEXT PRIMARY KEY,
                 username    TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
                 role        TEXT NOT NULL DEFAULT 'user',
                 created_at  INTEGER NOT NULL,
                 updated_at  INTEGER NOT NULL
-            );
+            )",
+        )
+        .execute(&self.pool)
+        .await
+        .context("migrate: create users")?;
 
-            CREATE TABLE IF NOT EXISTS devices (
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS devices (
                 id          TEXT PRIMARY KEY,
                 user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 name        TEXT NOT NULL,
                 created_at  INTEGER NOT NULL,
                 last_seen_at INTEGER NOT NULL
-            );
+            )",
+        )
+        .execute(&self.pool)
+        .await
+        .context("migrate: create devices")?;
 
-            CREATE INDEX IF NOT EXISTS idx_devices_user_id ON devices(user_id);
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_devices_user_id ON devices(user_id)")
+            .execute(&self.pool)
+            .await
+            .context("migrate: idx_devices_user_id")?;
 
-            CREATE TABLE IF NOT EXISTS cursors (
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS cursors (
                 device_id   TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
                 provider    TEXT NOT NULL DEFAULT '',
                 last_ts     INTEGER NOT NULL DEFAULT 0,
                 updated_at  INTEGER NOT NULL,
                 PRIMARY KEY (device_id, provider)
-            );
+            )",
+        )
+        .execute(&self.pool)
+        .await
+        .context("migrate: create cursors")?;
 
-            CREATE TABLE IF NOT EXISTS refresh_tokens (
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS refresh_tokens (
                 jti         TEXT PRIMARY KEY,
                 user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 device_id   TEXT,
                 expires_at  INTEGER NOT NULL,
                 revoked     INTEGER NOT NULL DEFAULT 0,
                 created_at  INTEGER NOT NULL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens(user_id);
-            "#,
+            )",
         )
         .execute(&self.pool)
         .await
-        .context("migration failed")?;
+        .context("migrate: create refresh_tokens")?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens(user_id)")
+            .execute(&self.pool)
+            .await
+            .context("migrate: idx_refresh_tokens_user")?;
 
         // Migration: recreate cursors table with composite PK (device_id, provider)
         let provider_in_pk: bool = sqlx::query_scalar(
@@ -590,11 +611,12 @@ impl DatabaseRepo for SqliteRepo {
     async fn create_oidc_user(&self, user: &NewOidcUser) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
         sqlx::query(
-            "INSERT INTO users (id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer) VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT INTO users (id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer) \
+             VALUES (?, ?, '', ?, ?, ?, ?, ?) \
+             ON CONFLICT (oidc_issuer, oidc_sub) DO UPDATE SET updated_at = excluded.updated_at",
         )
         .bind(&user.id)
         .bind(&user.username)
-        .bind("")  // no password for OIDC users
         .bind(&user.role)
         .bind(now)
         .bind(now)

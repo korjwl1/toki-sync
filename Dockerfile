@@ -7,6 +7,7 @@ RUN apk add --no-cache musl-dev pkgconfig openssl-dev openssl-libs-static
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY static ./static
 
 ENV RUSTFLAGS="-C target-feature=+crt-static"
 RUN cargo build --release

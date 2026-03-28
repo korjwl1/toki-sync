@@ -9,7 +9,7 @@ services:
     environment:
       TOKI_ADMIN_PASSWORD: ${TOKI_ADMIN_PASSWORD}
       TOKI_JWT_SECRET: ${TOKI_JWT_SECRET}
-      TOKI_CONFIG_PATH: /etc/toki-sync/config.toml
+      TOKI_SYNC_CONFIG: /etc/toki-sync/config.toml
     volumes:
       - ./config/toki-sync.toml:/etc/toki-sync/config.toml:ro
       - toki-data:/data

@@ -163,13 +163,22 @@ pub async fn exchange_code(
 /// Extract user info from the id_token (JWT payload, no signature verification against
 /// provider keys -- we trust it because we just received it over TLS from the token endpoint).
 /// Falls back to the userinfo endpoint if id_token is empty or parsing fails.
+///
+/// When an id_token is present, basic claim validation is performed:
+/// - `iss` must match the configured issuer
+/// - `aud` must contain the configured client_id
+/// - `exp` must be in the future
 pub async fn extract_user_info(
     token_resp: &TokenResponse,
     discovery: &OidcDiscovery,
+    issuer_url: &str,
+    client_id: &str,
 ) -> Result<OidcUserInfo> {
     // Try id_token first
     if !token_resp.id_token.is_empty() {
         if let Ok(info) = parse_id_token_claims(&token_resp.id_token) {
+            // Validate basic claims
+            validate_id_token_claims(&token_resp.id_token, issuer_url, client_id)?;
             return Ok(info);
         }
     }
@@ -180,6 +189,44 @@ pub async fn extract_user_info(
     }
 
     Err(anyhow!("no id_token and no userinfo endpoint available"))
+}
+
+/// Validate basic claims (iss, aud, exp) of an id_token JWT.
+fn validate_id_token_claims(id_token: &str, issuer_url: &str, client_id: &str) -> Result<()> {
+    let parts: Vec<&str> = id_token.split('.').collect();
+    if parts.len() != 3 {
+        return Ok(()); // Not a valid JWT structure; skip validation (parse already failed above)
+    }
+
+    let payload_bytes = base64_decode::decode_url_safe(parts[1])?;
+    let claims: serde_json::Value = serde_json::from_slice(&payload_bytes)
+        .context("failed to parse id_token claims for validation")?;
+
+    if let Some(iss) = claims.get("iss").and_then(|v| v.as_str()) {
+        if iss != issuer_url {
+            anyhow::bail!("id_token issuer mismatch: expected {issuer_url}, got {iss}");
+        }
+    }
+
+    if let Some(aud) = claims.get("aud") {
+        let valid = match aud {
+            serde_json::Value::String(s) => s == client_id,
+            serde_json::Value::Array(arr) => arr.iter().any(|v| v.as_str() == Some(client_id)),
+            _ => false,
+        };
+        if !valid {
+            anyhow::bail!("id_token audience does not contain client_id {client_id}");
+        }
+    }
+
+    if let Some(exp) = claims.get("exp").and_then(|v| v.as_i64()) {
+        let now = chrono::Utc::now().timestamp();
+        if exp < now {
+            anyhow::bail!("id_token expired");
+        }
+    }
+
+    Ok(())
 }
 
 /// Parse the payload of a JWT id_token without cryptographic verification.

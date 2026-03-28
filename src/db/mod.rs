@@ -65,6 +65,9 @@ pub trait DatabaseRepo: Send + Sync {
 pub async fn open_database(config: &StorageConfig) -> Result<Arc<dyn DatabaseRepo>> {
     match config.backend.as_str() {
         "postgres" => {
+            if config.postgres_url.is_empty() {
+                anyhow::bail!("storage.backend is 'postgres' but postgres_url is not configured");
+            }
             let repo = postgres::PostgresRepo::open(&config.postgres_url).await?;
             Ok(Arc::new(repo))
         }

@@ -559,11 +559,12 @@ impl DatabaseRepo for PostgresRepo {
     async fn create_oidc_user(&self, user: &NewOidcUser) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
         sqlx::query(
-            "INSERT INTO users (id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+            "INSERT INTO users (id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer) \
+             VALUES ($1, $2, '', $3, $4, $5, $6, $7) \
+             ON CONFLICT (oidc_issuer, oidc_sub) DO UPDATE SET updated_at = excluded.updated_at",
         )
         .bind(&user.id)
         .bind(&user.username)
-        .bind("")  // no password for OIDC users
         .bind(&user.role)
         .bind(now)
         .bind(now)

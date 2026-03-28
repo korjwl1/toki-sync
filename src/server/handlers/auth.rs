@@ -79,6 +79,10 @@ pub async fn login(
     let user_id = user.id;
     let password_hash = user.password_hash;
 
+    if password_hash.is_empty() {
+        return Err(AppError::unauthorized("this account uses OIDC login"));
+    }
+
     let pw = body.password.clone();
     let hash = password_hash;
     let valid = tokio::task::spawn_blocking(move || bcrypt::verify(&pw, &hash))
@@ -286,7 +290,12 @@ pub async fn oidc_callback(
     .map_err(AppError::internal)?;
 
     // Extract user info
-    let user_info = crate::auth::oidc::extract_user_info(&token_resp, &discovery)
+    let user_info = crate::auth::oidc::extract_user_info(
+        &token_resp,
+        &discovery,
+        &state.oidc_issuer,
+        &state.oidc_client_id,
+    )
         .await
         .map_err(AppError::internal)?;
 
@@ -311,9 +320,26 @@ pub async fn oidc_callback(
                 oidc_sub: user_info.sub.clone(),
                 oidc_issuer: state.oidc_issuer.clone(),
             };
-            state.db.create_oidc_user(&new_user).await.map_err(AppError::internal)?;
-            tracing::info!(oidc_sub = %user_info.sub, "OIDC user created");
-            id
+            match state.db.create_oidc_user(&new_user).await {
+                Ok(()) => {
+                    tracing::info!(oidc_sub = %user_info.sub, "OIDC user created");
+                    id
+                }
+                Err(e) => {
+                    // On UNIQUE constraint violation (concurrent creation), retry find
+                    if e.to_string().contains("UNIQUE") {
+                        let retry_user = state.db.find_user_by_oidc(&state.oidc_issuer, &user_info.sub)
+                            .await
+                            .map_err(AppError::internal)?
+                            .ok_or_else(|| AppError::internal(anyhow::anyhow!(
+                                "OIDC user creation conflict but user not found on retry"
+                            )))?;
+                        retry_user.id
+                    } else {
+                        return Err(AppError::internal(e));
+                    }
+                }
+            }
         }
     };
 
