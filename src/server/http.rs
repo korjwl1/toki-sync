@@ -761,4 +761,58 @@ mod tests {
         let result = inject_user_label("increase(toki_tokens_total[1h])", "grace");
         assert_eq!(result, "increase(toki_tokens_total{user_id=\"grace\"}[1h])", "got: {result}");
     }
+
+    #[test]
+    fn test_inject_nested_sum_by_increase() {
+        // toki-monitor primary pattern: sum by (model) (increase(metric[step]))
+        let result = inject_user_label(
+            "sum by (model) (increase(toki_tokens_total[15m]))", "hana");
+        assert_eq!(
+            result,
+            "sum by (model) (increase(toki_tokens_total{user_id=\"hana\"}[15m]))",
+            "got: {result}",
+        );
+        // model inside by(...) must NOT get a selector
+        assert!(!result.contains("model{"), "label in by() must not be injected, got: {result}");
+    }
+
+    #[test]
+    fn test_inject_nested_sum_by_increase_with_filter() {
+        // toki-monitor with provider filter: Path A (expr contains `{`)
+        let result = inject_user_label(
+            "sum by (model) (increase(toki_tokens_total{provider=\"claude_code\"}[1h]))", "ivan");
+        assert!(result.contains("user_id=\"ivan\""), "got: {result}");
+        assert!(result.contains("provider=\"claude_code\""), "existing label preserved, got: {result}");
+        // injection must be inside the `{...}`, not appended at end
+        assert!(result.contains("toki_tokens_total{"), "got: {result}");
+        assert!(!result.contains("}[1h]){"), "selector must not appear after closing paren, got: {result}");
+    }
+
+    #[test]
+    fn test_inject_multi_label_by() {
+        // sum by (model, provider)(metric) — multi-label modifier list
+        let result = inject_user_label(
+            "sum by (model, provider) (increase(toki_tokens_total[1h]))", "judy");
+        assert!(result.contains("toki_tokens_total{user_id=\"judy\"}"), "got: {result}");
+        assert!(!result.contains("model{"), "model label must not be injected, got: {result}");
+        assert!(!result.contains("provider{"), "provider label must not be injected, got: {result}");
+    }
+
+    #[test]
+    fn test_inject_without_clause() {
+        // sum without (session)(metric)
+        let result = inject_user_label(
+            "sum without (session) (increase(toki_tokens_total[1h]))", "ken");
+        assert!(result.contains("toki_tokens_total{user_id=\"ken\"}"), "got: {result}");
+        assert!(!result.contains("session{"), "session label must not be injected, got: {result}");
+    }
+
+    #[test]
+    fn test_inject_trailing_by_syntax() {
+        // sum(increase(metric[1h])) by (model) — alternative PromQL syntax (by after closing paren)
+        let result = inject_user_label(
+            "sum(increase(toki_tokens_total[1h])) by (model)", "leo");
+        assert!(result.contains("toki_tokens_total{user_id=\"leo\"}"), "got: {result}");
+        assert!(!result.contains("model{"), "model label must not be injected, got: {result}");
+    }
 }
