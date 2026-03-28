@@ -125,6 +125,13 @@ impl Database {
         .execute(&self.pool)
         .await;
 
+        // Ensure device_key is unique (partial index: only non-NULL values).
+        let _ = sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_device_key ON devices(device_key) WHERE device_key IS NOT NULL"
+        )
+        .execute(&self.pool)
+        .await;
+
         Ok(())
     }
 }

@@ -31,6 +31,7 @@ impl BruteForceGuard {
 
     /// Returns Ok(()) if allowed, Err(seconds_remaining) if locked out.
     pub fn check(&self, ip: &str, username: &str) -> Result<(), u64> {
+        self.sweep(); // Clean up expired entries first
         let key = Self::key(ip, username);
         let map = self.inner.lock().unwrap();
         let now = Instant::now();
@@ -83,7 +84,6 @@ impl BruteForceGuard {
     }
 
     /// Sweep expired entries (call periodically to avoid unbounded growth).
-    #[allow(dead_code)]
     pub fn sweep(&self) {
         let mut map = self.inner.lock().unwrap();
         let now = Instant::now();

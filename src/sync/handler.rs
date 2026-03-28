@@ -116,6 +116,8 @@ pub async fn handle_connection(
                     payload
                 };
                 let batch: SyncBatchPayload = bincode::deserialize(&raw)?;
+                // Ensure cursor exists for this batch's provider (may differ from auth provider)
+                ensure_cursor(&db, &device_id, &batch.provider).await?;
                 match handle_sync_batch(&batch, &user_id, &device_id, &batch.provider, &db, &vm).await {
                     Ok(last_ts) => {
                         let ack = SyncAckPayload { last_ts_ms: last_ts };

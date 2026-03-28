@@ -121,7 +121,7 @@ impl MetricsBackend for VictoriaMetrics {
             urlencoding::encode(expr),
             start,
             end,
-            step,
+            urlencoding::encode(step),
         );
 
         let base_url = self.base_url.clone();

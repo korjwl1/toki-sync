@@ -691,6 +691,12 @@ async fn admin_create_user(
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().timestamp();
     let role = body.role.as_deref().unwrap_or("user");
+    if role != "user" && role != "admin" {
+        return Err(AppError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            message: "role must be 'user' or 'admin'".into(),
+        });
+    }
 
     sqlx::query(
         "INSERT INTO users (id, username, password_hash, role, created_at, updated_at) VALUES (?,?,?,?,?,?)",
@@ -824,7 +830,9 @@ async fn admin_delete_device(
     require_admin(&headers, &state.jwt, &state.db).await?;
 
     // Delete the device's time-series data from VictoriaMetrics before removing from DB
-    state.vm.delete_device_series(&device_id).await.map_err(AppError::internal)?;
+    if let Err(e) = state.vm.delete_device_series(&device_id).await {
+        tracing::warn!("failed to delete VM series for device {device_id}: {e}");
+    }
 
     let affected = sqlx::query("DELETE FROM devices WHERE id = ?")
         .bind(&device_id)
