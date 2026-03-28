@@ -287,16 +287,16 @@ impl DatabaseRepo for PostgresRepo {
     }
 
     async fn list_user_devices(&self, user_id: &str) -> Result<Vec<DeviceSummary>> {
-        let rows: Vec<(String, String, i64)> = sqlx::query_as(
-            "SELECT id, name, last_seen_at FROM devices WHERE user_id = $1 ORDER BY last_seen_at DESC",
+        let rows: Vec<(String, String, String, i64)> = sqlx::query_as(
+            "SELECT id, name, device_key, last_seen_at FROM devices WHERE user_id = $1 ORDER BY last_seen_at DESC",
         )
         .bind(user_id)
         .fetch_all(&self.pool)
         .await
         .context("list_user_devices")?;
 
-        Ok(rows.into_iter().map(|(id, name, last_seen_at)| DeviceSummary {
-            id, name, last_seen_at,
+        Ok(rows.into_iter().map(|(id, name, device_key, last_seen_at)| DeviceSummary {
+            id, name, device_key, last_seen_at,
         }).collect())
     }
 

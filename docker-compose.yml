@@ -8,14 +8,14 @@ services:
     restart: unless-stopped
     environment:
       TOKI_ADMIN_PASSWORD: ${TOKI_ADMIN_PASSWORD}
-      TOKI_JWT_SECRET: ${TOKI_JWT_SECRET}
+      JWT_SECRET: ${JWT_SECRET}
       TOKI_SYNC_CONFIG: /etc/toki-sync/config.toml
     volumes:
       - ./config/toki-sync.toml:/etc/toki-sync/config.toml:ro
       - toki-data:/data
     networks:
       - internal
-      - external
+    # For Scenario B (no Caddy): add `ports: ["9090:9090", "9091:9091"]` and `networks: [internal, external]`
     depends_on:
       victoriametrics:
         condition: service_healthy

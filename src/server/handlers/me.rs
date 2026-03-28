@@ -17,7 +17,7 @@ pub async fn me_devices(
     let rows = state.db.list_user_devices(&claims.sub).await.map_err(AppError::internal)?;
 
     let devices: Vec<_> = rows.into_iter().map(|d| {
-        serde_json::json!({ "id": d.id, "name": d.name, "last_seen_at": d.last_seen_at })
+        serde_json::json!({ "id": d.id, "name": d.name, "device_key": d.device_key, "last_seen_at": d.last_seen_at })
     }).collect();
 
     Ok(Json(serde_json::json!({ "devices": devices })))

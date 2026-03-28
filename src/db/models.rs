@@ -37,6 +37,7 @@ pub struct UserSummary {
 pub struct DeviceSummary {
     pub id: String,
     pub name: String,
+    pub device_key: String,
     pub last_seen_at: i64,
 }
 
