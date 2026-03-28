@@ -1,1 +1,2 @@
-// db module
+pub mod sqlite;
+pub use sqlite::Database;
