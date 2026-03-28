@@ -98,8 +98,8 @@ pub async fn me_change_password(
         return Err(AppError::unauthorized("current password incorrect"));
     }
 
-    if body.new_password.len() < 8 || body.new_password.len() > 72 {
-        return Err(AppError { status: StatusCode::UNPROCESSABLE_ENTITY, message: "password must be 8-72 characters".into() });
+    if body.new_password.len() < 8 || body.new_password.len() > 128 {
+        return Err(AppError { status: StatusCode::UNPROCESSABLE_ENTITY, message: "password must be 8-128 characters".into() });
     }
 
     let new_pw = body.new_password.clone();

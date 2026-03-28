@@ -10,10 +10,10 @@ use std::net::SocketAddr;
 use super::super::http::{AppError, AppState, extract_client_ip, get_oidc_discovery};
 
 fn validate_username(username: &str) -> Result<(), AppError> {
-    if username.len() < 2 || username.len() > 128 {
+    if username.len() < 3 || username.len() > 32 {
         return Err(AppError {
             status: StatusCode::UNPROCESSABLE_ENTITY,
-            message: "username must be 2-128 characters".into(),
+            message: "username must be 3-32 characters".into(),
         });
     }
     if !username.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.') {
@@ -151,8 +151,8 @@ pub async fn register(
 
     validate_username(&body.username)?;
 
-    if body.password.len() < 8 || body.password.len() > 72 {
-        return Err(AppError { status: StatusCode::UNPROCESSABLE_ENTITY, message: "password must be 8-72 characters".into() });
+    if body.password.len() < 8 || body.password.len() > 128 {
+        return Err(AppError { status: StatusCode::UNPROCESSABLE_ENTITY, message: "password must be 8-128 characters".into() });
     }
 
     let pw = body.password.clone();
