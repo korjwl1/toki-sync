@@ -223,7 +223,8 @@ async fn handle_sync_batch(
     vm: &VictoriaMetrics,
 ) -> Result<i64> {
     if batch.items.is_empty() {
-        return Ok(0);
+        let current = get_last_ts(db, device_id, provider).await?;
+        return Ok(current);
     }
 
     // Build VM metric points from batch

@@ -105,24 +105,27 @@ impl JwtManager {
     ) -> Result<(String, String)> {
         let claims = self.verify_refresh(old_token)?;
 
+        let mut tx = db.pool.begin().await.context("failed to begin transaction")?;
+
         // Check not already revoked
         let revoked: bool = sqlx::query_scalar(
             "SELECT revoked FROM refresh_tokens WHERE jti = ?",
         )
         .bind(&claims.jti)
-        .fetch_optional(&db.pool)
+        .fetch_optional(&mut *tx)
         .await
         .context("db error checking revocation")?
         .unwrap_or(true); // not found → treat as revoked
 
         if revoked {
+            tx.rollback().await.ok();
             return Err(anyhow!("refresh token already used or revoked"));
         }
 
         // Revoke old token
         sqlx::query("UPDATE refresh_tokens SET revoked = 1 WHERE jti = ?")
             .bind(&claims.jti)
-            .execute(&db.pool)
+            .execute(&mut *tx)
             .await
             .context("failed to revoke old refresh token")?;
 
@@ -141,9 +144,11 @@ impl JwtManager {
         .bind(device_id)
         .bind(new_claims.exp)
         .bind(now)
-        .execute(&db.pool)
+        .execute(&mut *tx)
         .await
         .context("failed to store new refresh token")?;
+
+        tx.commit().await.context("failed to commit rotation transaction")?;
 
         Ok((access, refresh))
     }

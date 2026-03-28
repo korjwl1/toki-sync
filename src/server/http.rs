@@ -49,6 +49,18 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
+// ─── Client IP extraction ───────────────────────────────────────────────────
+
+/// Extract the real client IP from X-Forwarded-For header (first entry),
+/// falling back to the direct connection address.
+fn extract_client_ip(headers: &HeaderMap, addr: &SocketAddr) -> String {
+    headers.get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| addr.ip().to_string())
+}
+
 // ─── JWT extraction helper ───────────────────────────────────────────────────
 
 /// Extract and verify the Bearer JWT from the Authorization header.
@@ -115,10 +127,11 @@ struct TokenResponse {
 
 async fn login(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     State(state): State<AppState>,
     Json(body): Json<LoginRequest>,
 ) -> Result<Json<TokenResponse>, AppError> {
-    let ip = addr.ip().to_string();
+    let ip = extract_client_ip(&headers, &addr);
 
     state.brute.check(&ip, &body.username).map_err(AppError::locked_out)?;
 
@@ -438,11 +451,16 @@ struct RegisterRequest {
 
 async fn register(
     ConnectInfo(_addr): ConnectInfo<SocketAddr>,
+    _headers: HeaderMap,
     State(state): State<AppState>,
     Json(body): Json<RegisterRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
     if !state.allow_registration {
         return Err(AppError { status: StatusCode::FORBIDDEN, message: "registration is disabled".into() });
+    }
+
+    if body.password.len() < 8 {
+        return Err(AppError { status: StatusCode::UNPROCESSABLE_ENTITY, message: "password must be at least 8 characters".into() });
     }
 
     let pw = body.password.clone();
@@ -540,20 +558,32 @@ async fn me_delete_device(
 ) -> Result<StatusCode, AppError> {
     let claims = extract_jwt(&headers, &state.jwt)?;
 
-    // Delete the device's time-series data from VictoriaMetrics before removing from DB
-    state.vm.delete_device_series(&device_id).await.map_err(AppError::internal)?;
+    // Verify ownership first
+    let exists: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM devices WHERE id = ? AND user_id = ?"
+    )
+    .bind(&device_id)
+    .bind(&claims.sub)
+    .fetch_one(&state.db.pool)
+    .await
+    .map_err(AppError::internal)?;
 
-    let affected = sqlx::query("DELETE FROM devices WHERE id = ? AND user_id = ?")
+    if !exists {
+        return Err(AppError::not_found("device not found"));
+    }
+
+    // Ownership confirmed — safe to delete VM data
+    if let Err(e) = state.vm.delete_device_series(&device_id).await {
+        tracing::warn!("failed to delete VM series for device {device_id}: {e}");
+    }
+
+    sqlx::query("DELETE FROM devices WHERE id = ? AND user_id = ?")
         .bind(&device_id)
         .bind(&claims.sub)
         .execute(&state.db.pool)
         .await
-        .map_err(AppError::internal)?
-        .rows_affected();
+        .map_err(AppError::internal)?;
 
-    if affected == 0 {
-        return Err(AppError::not_found("device not found"));
-    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -586,6 +616,10 @@ async fn me_change_password(
 
     if !valid {
         return Err(AppError::unauthorized("current password incorrect"));
+    }
+
+    if body.new_password.len() < 8 {
+        return Err(AppError { status: StatusCode::UNPROCESSABLE_ENTITY, message: "password must be at least 8 characters".into() });
     }
 
     let new_pw = body.new_password.clone();
@@ -644,6 +678,10 @@ async fn admin_create_user(
 ) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
     require_admin(&headers, &state.jwt, &state.db).await?;
 
+    if body.password.len() < 8 {
+        return Err(AppError { status: StatusCode::UNPROCESSABLE_ENTITY, message: "password must be at least 8 characters".into() });
+    }
+
     let pw = body.password.clone();
     let hash = tokio::task::spawn_blocking(move || bcrypt::hash(&pw, bcrypt::DEFAULT_COST))
         .await
@@ -683,6 +721,21 @@ async fn admin_delete_user(
 ) -> Result<StatusCode, AppError> {
     require_admin(&headers, &state.jwt, &state.db).await?;
 
+    // Delete VM series for all user's devices before cascade
+    let device_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM devices WHERE user_id = ?"
+    )
+    .bind(&user_id)
+    .fetch_all(&state.db.pool)
+    .await
+    .map_err(AppError::internal)?;
+
+    for did in &device_ids {
+        if let Err(e) = state.vm.delete_device_series(did).await {
+            tracing::warn!("failed to delete VM series for device {did}: {e}");
+        }
+    }
+
     let affected = sqlx::query("DELETE FROM users WHERE id = ?")
         .bind(&user_id)
         .execute(&state.db.pool)
@@ -718,6 +771,10 @@ async fn admin_change_user_password(
 
     if exists.is_none() {
         return Err(AppError::not_found("user not found"));
+    }
+
+    if body.password.len() < 8 {
+        return Err(AppError { status: StatusCode::UNPROCESSABLE_ENTITY, message: "password must be at least 8 characters".into() });
     }
 
     let pw = body.password.clone();

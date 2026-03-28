@@ -77,15 +77,15 @@ impl Database {
         .context("migration failed")?;
 
         // Migration: recreate cursors table with composite PK (device_id, provider)
-        // Only needed if the old single-PK schema exists.
-        let has_old_schema: bool = sqlx::query_scalar(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('cursors') WHERE name = 'device_id' AND pk = 1"
+        // Only needed if the old single-PK schema exists (provider not part of PK).
+        let provider_in_pk: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('cursors') WHERE name = 'provider' AND pk > 0"
         )
         .fetch_one(&self.pool)
         .await
         .unwrap_or(false);
 
-        if has_old_schema {
+        if !provider_in_pk {
             // Check if provider column already exists (from previous migration)
             let has_provider: bool = sqlx::query_scalar(
                 "SELECT COUNT(*) > 0 FROM pragma_table_info('cursors') WHERE name = 'provider'"

@@ -27,15 +27,13 @@ impl VictoriaMetrics {
             urlencoding::encode(&selector),
         );
         let client = self.client.clone();
-        let base_url = self.base_url.clone();
         tokio::task::spawn_blocking(move || {
-            if let Err(e) = client.post(&url).call() {
-                tracing::warn!("VM delete_series failed for {base_url}: {e}");
-            }
+            client.post(&url).call()
+                .map_err(|e| anyhow::anyhow!("VM delete_series failed: {e}"))?;
+            Ok(())
         })
         .await
-        .context("spawn_blocking panicked")?;
-        Ok(())
+        .context("spawn_blocking panicked")?
     }
 
     #[allow(dead_code)]
