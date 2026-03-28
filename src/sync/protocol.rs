@@ -163,3 +163,61 @@ where
     }
     Ok((msg_type, payload))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Craft a raw frame with the given msg_type_u32 and payload_len_u32.
+    fn make_raw_frame(msg_type: u32, payload_len: u32) -> Vec<u8> {
+        let mut v = Vec::with_capacity(8);
+        v.extend_from_slice(&msg_type.to_le_bytes());
+        v.extend_from_slice(&payload_len.to_le_bytes());
+        v
+    }
+
+    #[tokio::test]
+    async fn test_read_frame_max_payload_rejected() {
+        // Build a frame header claiming MAX_PAYLOAD_SIZE + 1 bytes
+        let oversized = MAX_PAYLOAD_SIZE + 1;
+        let raw = make_raw_frame(MsgType::Ping as u32, oversized);
+        let mut cursor = std::io::Cursor::new(raw);
+        let result = read_frame(&mut cursor).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn test_read_frame_exactly_max_payload_accepted() {
+        // Build a frame with exactly MAX_PAYLOAD_SIZE bytes — should not be rejected by size check
+        // (it would fail on read_exact since we only provide 8-byte header, but size guard passes)
+        let raw = make_raw_frame(MsgType::Ping as u32, MAX_PAYLOAD_SIZE);
+        let mut cursor = std::io::Cursor::new(raw);
+        // read_exact of MAX_PAYLOAD_SIZE bytes will fail with UnexpectedEof (only header provided)
+        // but the important thing is it's NOT InvalidData from the size guard
+        let result = read_frame(&mut cursor).await;
+        assert!(result.is_err());
+        assert_ne!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn test_read_frame_unknown_msg_type_rejected() {
+        let raw = make_raw_frame(999, 0);
+        let mut cursor = std::io::Cursor::new(raw);
+        let result = read_frame(&mut cursor).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn test_write_then_read_frame_roundtrip() {
+        let mut buf = Vec::new();
+        let payload = b"hello world";
+        write_frame(&mut buf, MsgType::Ping, payload).await.unwrap();
+
+        let mut cursor = std::io::Cursor::new(buf);
+        let (msg, data) = read_frame(&mut cursor).await.unwrap();
+        assert_eq!(msg, MsgType::Ping);
+        assert_eq!(data, payload);
+    }
+}
