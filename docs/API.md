@@ -465,4 +465,4 @@ The TCP port is **not** HTTP. It uses a custom binary protocol (bincode serializ
 4. Client sends batches of `SyncBatch` (events, zstd-compressed if >= 100 items)
 5. Server responds with `SyncAck` per batch
 
-This protocol is implemented in the `toki-sync-protocol` shared crate and is not intended for direct use. Use the toki CLI (`toki sync enable`) to connect.
+This protocol is implemented in the `toki-sync-protocol` shared crate and is not intended for direct use. Use the toki CLI (`toki settings sync enable`) to connect.

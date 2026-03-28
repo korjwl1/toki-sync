@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use tokio::sync::{watch, Semaphore};
@@ -31,7 +32,14 @@ pub async fn run_tcp_server(
     loop {
         tokio::select! {
             result = listener.accept() => {
-                let (stream, peer_addr) = result?;
+                let (stream, peer_addr) = match result {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::error!("TCP accept error: {e}");
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+                };
                 let permit = match semaphore.clone().try_acquire_owned() {
                     Ok(p) => p,
                     Err(_) => {
@@ -45,12 +53,19 @@ pub async fn run_tcp_server(
                 let vm  = vm.clone();
                 let batch_sem = batch_semaphore.clone();
 
-                tokio::spawn(async move {
+                let handle = tokio::spawn(async move {
                     tracing::debug!("TCP connection from {peer_addr}");
                     if let Err(e) = handle_connection(stream, db, jwt, vm, batch_sem).await {
                         tracing::warn!("TCP connection error from {peer_addr}: {e}");
                     }
                     drop(permit); // released when connection closes
+                });
+
+                // Monitor task: detect panics in the handler
+                tokio::spawn(async move {
+                    if let Err(e) = handle.await {
+                        tracing::error!("TCP handler task panicked for {peer_addr}: {e}");
+                    }
                 });
             }
             _ = shutdown_rx.changed() => {
