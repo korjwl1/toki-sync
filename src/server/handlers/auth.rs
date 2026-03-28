@@ -224,16 +224,17 @@ pub async fn oidc_authorize(
         .await
         .map_err(AppError::internal)?;
 
-    // Generate CSRF state token
+    // Generate CSRF state token and nonce
     let csrf_state = uuid::Uuid::new_v4().to_string();
+    let nonce = uuid::Uuid::new_v4().to_string();
 
-    // Store the state token with the client's desired redirect_uri (for CLI flow)
+    // Store the state token with the client's desired redirect_uri and nonce (for CLI flow)
     let client_redirect = if params.redirect_uri.is_empty() {
         String::new()
     } else {
         params.redirect_uri.clone()
     };
-    state.oidc_state_store.insert(csrf_state.clone(), client_redirect);
+    state.oidc_state_store.insert(csrf_state.clone(), client_redirect, nonce.clone());
 
     // Build the authorization URL
     let auth_url = crate::auth::oidc::build_auth_url(
@@ -241,6 +242,7 @@ pub async fn oidc_authorize(
         &state.oidc_client_id,
         &state.oidc_redirect_uri,
         &csrf_state,
+        &nonce,
     );
 
     Ok(Redirect::temporary(&auth_url))
@@ -269,8 +271,8 @@ pub async fn oidc_callback(
         return Err(AppError { status: StatusCode::BAD_REQUEST, message: format!("OIDC error: {err}") });
     }
 
-    // Validate CSRF state
-    let client_redirect = state.oidc_state_store.validate(&params.state)
+    // Validate CSRF state and retrieve nonce
+    let (client_redirect, stored_nonce) = state.oidc_state_store.validate(&params.state)
         .ok_or_else(|| AppError { status: StatusCode::BAD_REQUEST, message: "invalid or expired state parameter".into() })?;
 
     // Discover provider endpoints
@@ -289,12 +291,14 @@ pub async fn oidc_callback(
     .await
     .map_err(AppError::internal)?;
 
-    // Extract user info
+    // Extract user info (with nonce validation)
+    let nonce_ref = if stored_nonce.is_empty() { None } else { Some(stored_nonce.as_str()) };
     let user_info = crate::auth::oidc::extract_user_info(
         &token_resp,
         &discovery,
         &state.oidc_issuer,
         &state.oidc_client_id,
+        nonce_ref,
     )
         .await
         .map_err(AppError::internal)?;

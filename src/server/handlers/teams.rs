@@ -193,8 +193,17 @@ pub async fn team_query_range(
     Path(team_id): Path<String>,
     Query(params): Query<QueryRangeParams>,
 ) -> Result<Response, AppError> {
-    // Require admin for team-level queries
-    require_admin(&headers, &state.jwt, &*state.db).await?;
+    // Allow admin or team member
+    let claims = extract_jwt(&headers, &state.jwt)?;
+    let user_id = claims.sub;
+    let is_admin = state.db.user_is_admin(&user_id).await.map_err(AppError::internal)?;
+    if !is_admin {
+        let role = state.db.get_team_member_role(&team_id, &user_id).await
+            .map_err(AppError::internal)?;
+        if role.is_none() {
+            return Err(AppError::forbidden("must be team member or admin"));
+        }
+    }
 
     // Get all user_ids in the team
     let members = state.db.list_team_members(&team_id).await.map_err(AppError::internal)?;

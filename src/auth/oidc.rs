@@ -55,9 +55,9 @@ struct UserinfoResponse {
 }
 
 /// OIDC state store for CSRF protection.
-/// Maps state token -> (redirect_uri, created_at) with TTL.
+/// Maps state token -> (redirect_uri, nonce, created_at) with TTL.
 pub struct OidcStateStore {
-    states: Mutex<HashMap<String, (String, Instant)>>,
+    states: Mutex<HashMap<String, (String, String, Instant)>>,
     ttl: Duration,
 }
 
@@ -69,22 +69,22 @@ impl OidcStateStore {
         }
     }
 
-    /// Store a state token with its associated redirect_uri. Returns the state string.
-    pub fn insert(&self, state: String, redirect_uri: String) {
+    /// Store a state token with its associated redirect_uri and nonce.
+    pub fn insert(&self, state: String, redirect_uri: String, nonce: String) {
         let mut map = self.states.lock().unwrap();
         // Cleanup expired entries
         let now = Instant::now();
-        map.retain(|_, (_, created)| now.duration_since(*created) < self.ttl);
-        map.insert(state, (redirect_uri, now));
+        map.retain(|_, (_, _, created)| now.duration_since(*created) < self.ttl);
+        map.insert(state, (redirect_uri, nonce, now));
     }
 
-    /// Validate and consume a state token. Returns the redirect_uri if valid.
-    pub fn validate(&self, state: &str) -> Option<String> {
+    /// Validate and consume a state token. Returns (redirect_uri, nonce) if valid.
+    pub fn validate(&self, state: &str) -> Option<(String, String)> {
         let mut map = self.states.lock().unwrap();
-        if let Some((redirect_uri, created)) = map.remove(state) {
+        if let Some((redirect_uri, nonce, created)) = map.remove(state) {
             let now = Instant::now();
             if now.duration_since(created) < self.ttl {
-                return Some(redirect_uri);
+                return Some((redirect_uri, nonce));
             }
         }
         None
@@ -116,14 +116,16 @@ pub fn build_auth_url(
     client_id: &str,
     redirect_uri: &str,
     state: &str,
+    nonce: &str,
 ) -> String {
     format!(
-        "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}",
+        "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}&nonce={}",
         discovery.authorization_endpoint,
         urlencoding::encode(client_id),
         urlencoding::encode(redirect_uri),
         urlencoding::encode("openid email profile"),
         urlencoding::encode(state),
+        urlencoding::encode(nonce),
     )
 }
 
@@ -173,12 +175,17 @@ pub async fn extract_user_info(
     discovery: &OidcDiscovery,
     issuer_url: &str,
     client_id: &str,
+    expected_nonce: Option<&str>,
 ) -> Result<OidcUserInfo> {
     // Try id_token first
     if !token_resp.id_token.is_empty() {
         if let Ok(info) = parse_id_token_claims(&token_resp.id_token) {
             // Validate basic claims
             validate_id_token_claims(&token_resp.id_token, issuer_url, client_id)?;
+            // Validate nonce if provided
+            if let Some(expected) = expected_nonce {
+                validate_id_token_nonce(&token_resp.id_token, expected)?;
+            }
             return Ok(info);
         }
     }
@@ -223,6 +230,26 @@ fn validate_id_token_claims(id_token: &str, issuer_url: &str, client_id: &str) -
         let now = chrono::Utc::now().timestamp();
         if exp < now {
             anyhow::bail!("id_token expired");
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate that the nonce claim in the id_token matches the expected nonce.
+fn validate_id_token_nonce(id_token: &str, expected_nonce: &str) -> Result<()> {
+    let parts: Vec<&str> = id_token.split('.').collect();
+    if parts.len() != 3 {
+        return Ok(());
+    }
+
+    let payload_bytes = base64_decode::decode_url_safe(parts[1])?;
+    let claims: serde_json::Value = serde_json::from_slice(&payload_bytes)
+        .context("failed to parse id_token claims for nonce validation")?;
+
+    if let Some(token_nonce) = claims.get("nonce").and_then(|v| v.as_str()) {
+        if token_nonce != expected_nonce {
+            anyhow::bail!("nonce mismatch");
         }
     }
 
