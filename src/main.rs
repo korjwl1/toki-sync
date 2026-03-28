@@ -14,7 +14,7 @@ use crate::auth::{BruteForceGuard, JwtManager};
 use crate::config::Config;
 use crate::db::Database;
 use crate::metrics::VictoriaMetrics;
-use crate::server::{build_router, http::AppState};
+use crate::server::{build_router, http::AppState, tcp::run_tcp_server};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -54,19 +54,40 @@ async fn main() -> Result<()> {
     let vm = Arc::new(VictoriaMetrics::new(&config.backend.vm_url));
 
     let state = AppState { db, jwt, brute, vm };
+
+    // ── TCP sync server ─────────────────────────────────────────────────────
+    let tcp_addr: SocketAddr = format!("{}:{}", config.server.bind, config.server.tcp_port)
+        .parse()
+        .context("invalid TCP bind address")?;
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let tcp_db  = state.db.clone();
+    let tcp_jwt = state.jwt.clone();
+    let tcp_vm  = state.vm.clone();
+
+    tokio::spawn(async move {
+        if let Err(e) = run_tcp_server(tcp_db, tcp_jwt, tcp_vm, tcp_addr, shutdown_rx).await {
+            tracing::error!("TCP server error: {e}");
+        }
+    });
+
+    // ── HTTP server ──────────────────────────────────────────────────────────
     let router = build_router(state).into_make_service_with_connect_info::<SocketAddr>();
 
-    let addr: SocketAddr = format!("{}:{}", config.server.bind, config.server.http_port)
+    let http_addr: SocketAddr = format!("{}:{}", config.server.bind, config.server.http_port)
         .parse()
-        .context("invalid bind address")?;
+        .context("invalid HTTP bind address")?;
 
-    tracing::info!("HTTP server listening on {addr}");
+    tracing::info!("HTTP server listening on {http_addr}");
 
-    let listener = tokio::net::TcpListener::bind(addr).await
-        .with_context(|| format!("failed to bind to {addr}"))?;
+    let listener = tokio::net::TcpListener::bind(http_addr).await
+        .with_context(|| format!("failed to bind to {http_addr}"))?;
 
     axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            let _ = shutdown_tx.send(true);
+        })
         .await
         .context("HTTP server error")?;
 

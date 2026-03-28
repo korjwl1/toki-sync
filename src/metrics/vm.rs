@@ -18,6 +18,26 @@ impl VictoriaMetrics {
         }
     }
 
+    /// Delete all VM series matching a provider label (used on schema mismatch reset).
+    pub async fn delete_user_series(&self, provider: &str) -> Result<()> {
+        let selector = format!("{{provider=\"{provider}\"}}");
+        let url = format!(
+            "{}/api/v1/admin/tsdb/delete_series?match[]={}",
+            self.base_url,
+            urlencoding::encode(&selector),
+        );
+        let client = self.client.clone();
+        let base_url = self.base_url.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = client.post(&url).call() {
+                tracing::warn!("VM delete_series failed for {base_url}: {e}");
+            }
+        })
+        .await
+        .context("spawn_blocking panicked")?;
+        Ok(())
+    }
+
     #[allow(dead_code)]
     fn format_prometheus_text(batch: &MetricBatch) -> String {
         let mut out = String::new();

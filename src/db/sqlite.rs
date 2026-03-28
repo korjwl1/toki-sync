@@ -74,6 +74,23 @@ impl Database {
         .await
         .context("migration failed")?;
 
+        // Migration: add provider column to cursors for multi-provider support.
+        // ALTER TABLE fails silently on subsequent runs (column already exists).
+        let _ = sqlx::query(
+            "ALTER TABLE cursors ADD COLUMN provider TEXT NOT NULL DEFAULT ''",
+        )
+        .execute(&self.pool)
+        .await;
+
+        // Unique index enables (device_id, provider) cursor per provider per device.
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_cursors_device_provider \
+             ON cursors(device_id, provider)",
+        )
+        .execute(&self.pool)
+        .await
+        .context("failed to create cursor index")?;
+
         Ok(())
     }
 }
