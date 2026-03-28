@@ -124,6 +124,7 @@ toki daemon   toki daemon   toki daemon
 
 | 문서 | 설명 |
 |------|------|
+| **[아키텍처 & 설계](docs/DESIGN.ko.md)** | Sync 프로토콜, 커서 관리, 보안 모델, 스케일링 가이드 |
 | **[설정 레퍼런스](docs/CONFIGURATION.ko.md)** | 전체 TOML 섹션, 필드, 기본값, 환경변수 |
 | **[HTTP API 레퍼런스](docs/API.ko.md)** | 전체 엔드포인트, 요청/응답 예시, 인증 |
 

@@ -124,6 +124,7 @@ See also: [Backup & Restore](docs/backup.md) | [Troubleshooting](docs/troublesho
 
 | Document | Description |
 |----------|-------------|
+| **[Architecture & Design](docs/DESIGN.md)** | Sync protocol, cursor management, security model, scaling guide |
 | **[Configuration Reference](docs/CONFIGURATION.md)** | All TOML sections, fields, defaults, environment variables |
 | **[HTTP API Reference](docs/API.md)** | All endpoints, request/response examples, authentication |
 
