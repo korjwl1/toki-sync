@@ -73,13 +73,12 @@ impl MetricsBackend for VictoriaMetrics {
 
         let base_url = self.base_url.clone();
         let client = self.client.clone();
-        let body_clone = body.clone();
 
         tokio::task::spawn_blocking(move || {
             client
                 .post(&url)
                 .set("Content-Type", "text/plain")
-                .send_string(&body_clone)
+                .send_string(&body)
                 .with_context(|| format!("VM write_batch failed: {base_url}"))
         })
         .await

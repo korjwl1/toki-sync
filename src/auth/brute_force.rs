@@ -13,6 +13,7 @@ pub struct BruteForceGuard {
     max_attempts: u32,
     window: Duration,
     lockout: Duration,
+    last_sweep: Mutex<Instant>,
 }
 
 impl BruteForceGuard {
@@ -22,6 +23,7 @@ impl BruteForceGuard {
             max_attempts,
             window: Duration::from_secs(window_secs),
             lockout: Duration::from_secs(lockout_secs),
+            last_sweep: Mutex::new(Instant::now()),
         }
     }
 
@@ -31,7 +33,15 @@ impl BruteForceGuard {
 
     /// Returns Ok(()) if allowed, Err(seconds_remaining) if locked out.
     pub fn check(&self, ip: &str, username: &str) -> Result<(), u64> {
-        self.sweep(); // Clean up expired entries first
+        // Sweep at most every 60 seconds
+        {
+            let last = self.last_sweep.lock().unwrap();
+            if last.elapsed() > Duration::from_secs(60) {
+                drop(last);
+                self.sweep();
+                *self.last_sweep.lock().unwrap() = Instant::now();
+            }
+        }
         let key = Self::key(ip, username);
         let map = self.inner.lock().unwrap();
         let now = Instant::now();

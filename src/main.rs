@@ -30,6 +30,10 @@ async fn main() -> Result<()> {
     tracing::info!("toki-sync starting (http=:{}, tcp=:{})",
         config.server.http_port, config.server.tcp_port);
 
+    if config.auth.jwt_secret == "change-me-in-production" {
+        tracing::warn!("Using default JWT secret -- set JWT_SECRET env var for production!");
+    }
+
     // Open database
     let db = Arc::new(
         Database::open(&config.storage.db_path)

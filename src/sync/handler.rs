@@ -285,6 +285,11 @@ fn build_metric_points(
     let empty = String::new();
     let mut points = Vec::with_capacity(batch.items.len() * 4);
 
+    // Pre-escape values that are constant across the entire batch
+    let esc_provider  = escape_prom_value(provider);
+    let esc_user_id   = escape_prom_value(user_id);
+    let esc_device_id = escape_prom_value(device_id);
+
     for item in &batch.items {
         let model   = batch.dict.get(&item.event.model_id).unwrap_or(&empty);
         let session = batch.dict.get(&item.event.session_id).unwrap_or(&empty);
@@ -297,9 +302,9 @@ fn build_metric_points(
         let base: Vec<(String, String)> = vec![
             ("model".into(),    escape_prom_value(model)),
             ("session".into(),  escape_prom_value(session)),
-            ("provider".into(), escape_prom_value(provider)),
-            ("user".into(),     escape_prom_value(user_id)),
-            ("device".into(),   escape_prom_value(device_id)),
+            ("provider".into(), esc_provider.clone()),
+            ("user".into(),     esc_user_id.clone()),
+            ("device".into(),   esc_device_id.clone()),
             ("project".into(),  escape_prom_value(project)),
         ];
 
@@ -315,7 +320,8 @@ fn build_metric_points(
         for (count, type_label) in &token_types {
             if *count == 0 { continue; }
             let mut labels = base.clone();
-            labels.push(("type".into(), escape_prom_value(type_label)));
+            // type_label is static known-safe ASCII — no escaping needed
+            labels.push(("type".into(), type_label.to_string()));
             points.push(MetricPoint {
                 name: "toki_tokens_total".to_string(),
                 labels,

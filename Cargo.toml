@@ -13,7 +13,7 @@ path = "src/main.rs"
 # HTTP server
 axum = { version = "0.7", features = ["macros"] }
 tower = "0.4"
-tower-http = { version = "0.5", features = ["trace", "cors"] }
+tower-http = { version = "0.5", features = ["trace"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
