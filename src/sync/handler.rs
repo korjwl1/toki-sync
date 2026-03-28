@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -9,6 +10,8 @@ use crate::metrics::backend::MetricPoint;
 use crate::metrics::backend::MetricsBackend;
 use crate::metrics::VictoriaMetrics;
 use super::protocol::*;
+
+const MAX_DECOMPRESSED_SIZE: usize = 64 * 1024 * 1024; // 64 MiB
 
 /// Handle a single TCP client connection.
 pub async fn handle_connection(
@@ -116,8 +119,15 @@ pub async fn handle_connection(
 
             MsgType::SyncBatch | MsgType::SyncBatchZstd => {
                 let raw = if msg_type == MsgType::SyncBatchZstd {
-                    zstd::decode_all(payload.as_slice())
-                        .map_err(|e| anyhow::anyhow!("zstd decompress failed: {e}"))?
+                    let decoder = zstd::stream::Decoder::new(payload.as_slice())
+                        .map_err(|e| anyhow::anyhow!("zstd decoder init failed: {e}"))?;
+                    let mut buf = Vec::new();
+                    decoder.take(MAX_DECOMPRESSED_SIZE as u64 + 1).read_to_end(&mut buf)
+                        .map_err(|e| anyhow::anyhow!("zstd decompress failed: {e}"))?;
+                    if buf.len() > MAX_DECOMPRESSED_SIZE {
+                        anyhow::bail!("decompressed payload exceeds {MAX_DECOMPRESSED_SIZE} bytes");
+                    }
+                    buf
                 } else {
                     payload
                 };

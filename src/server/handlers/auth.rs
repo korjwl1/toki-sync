@@ -7,7 +7,23 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
-use super::super::http::{AppError, AppState, extract_client_ip};
+use super::super::http::{AppError, AppState, extract_client_ip, get_oidc_discovery};
+
+fn validate_username(username: &str) -> Result<(), AppError> {
+    if username.len() < 2 || username.len() > 128 {
+        return Err(AppError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            message: "username must be 2-128 characters".into(),
+        });
+    }
+    if !username.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.') {
+        return Err(AppError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            message: "username may only contain letters, digits, _, -, .".into(),
+        });
+    }
+    Ok(())
+}
 
 // ─── /health ────────────────────────────────────────────────────────────────
 
@@ -133,8 +149,10 @@ pub async fn register(
         return Err(AppError { status: StatusCode::FORBIDDEN, message: "registration is disabled".into() });
     }
 
-    if body.password.len() < 8 {
-        return Err(AppError { status: StatusCode::UNPROCESSABLE_ENTITY, message: "password must be at least 8 characters".into() });
+    validate_username(&body.username)?;
+
+    if body.password.len() < 8 || body.password.len() > 72 {
+        return Err(AppError { status: StatusCode::UNPROCESSABLE_ENTITY, message: "password must be 8-72 characters".into() });
     }
 
     let pw = body.password.clone();
@@ -219,10 +237,8 @@ pub async fn oidc_authorize(
         return Err(AppError { status: StatusCode::NOT_FOUND, message: "OIDC not configured".into() });
     }
 
-    // Discover OIDC provider endpoints (cached)
-    let discovery = state.oidc_discovery.get_or_init(|| async {
-        crate::auth::oidc::discover(&state.oidc_issuer).await.expect("OIDC discovery failed")
-    }).await.clone();
+    // Discover OIDC provider endpoints (cached with TTL)
+    let discovery = get_oidc_discovery(&state).await?;
 
     // Generate CSRF state token and nonce
     let csrf_state = uuid::Uuid::new_v4().to_string();
@@ -275,10 +291,8 @@ pub async fn oidc_callback(
     let (client_redirect, stored_nonce) = state.oidc_state_store.validate(&params.state)
         .ok_or_else(|| AppError { status: StatusCode::BAD_REQUEST, message: "invalid or expired state parameter".into() })?;
 
-    // Discover provider endpoints (cached)
-    let discovery = state.oidc_discovery.get_or_init(|| async {
-        crate::auth::oidc::discover(&state.oidc_issuer).await.expect("OIDC discovery failed")
-    }).await.clone();
+    // Discover provider endpoints (cached with TTL)
+    let discovery = get_oidc_discovery(&state).await?;
 
     // Exchange code for tokens
     let token_resp = crate::auth::oidc::exchange_code(
@@ -287,6 +301,7 @@ pub async fn oidc_callback(
         &state.oidc_client_secret,
         &state.oidc_redirect_uri,
         &params.code,
+        &state.oidc_http_client,
     )
     .await
     .map_err(AppError::internal)?;
@@ -299,6 +314,7 @@ pub async fn oidc_callback(
         &state.oidc_issuer,
         &state.oidc_client_id,
         nonce_ref,
+        &state.oidc_http_client,
     )
         .await
         .map_err(AppError::internal)?;

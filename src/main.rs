@@ -91,7 +91,8 @@ async fn main() -> Result<()> {
         oidc_client_secret: config.auth.oidc_client_secret.clone(),
         oidc_redirect_uri,
         oidc_state_store,
-        oidc_discovery: Arc::new(tokio::sync::OnceCell::new()),
+        oidc_discovery_cache: Arc::new(tokio::sync::RwLock::new(None)),
+        oidc_http_client: reqwest::Client::new(),
         external_url: config.server.external_url.clone(),
     };
 

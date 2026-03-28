@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use sqlx::PgPool;
+use sqlx::postgres::PgPoolOptions;
 
 use super::models::*;
 use super::DatabaseRepo;
@@ -10,7 +11,10 @@ pub struct PostgresRepo {
 
 impl PostgresRepo {
     pub async fn open(url: &str) -> Result<Self> {
-        let pool = PgPool::connect(url).await
+        let pool = PgPoolOptions::new()
+            .max_connections(30)
+            .connect(url)
+            .await
             .with_context(|| format!("failed to connect to PostgreSQL: {url}"))?;
 
         let db = Self { pool };

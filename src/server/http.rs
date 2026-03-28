@@ -7,6 +7,8 @@ use axum::{
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use std::time::{Duration, Instant};
+
 use crate::auth::{BruteForceGuard, JwtManager};
 use crate::auth::oidc::{OidcDiscovery, OidcStateStore};
 use crate::db::DatabaseRepo;
@@ -28,10 +30,35 @@ pub struct AppState {
     pub oidc_client_secret: String,
     pub oidc_redirect_uri: String,
     pub oidc_state_store: Arc<OidcStateStore>,
-    /// Cached OIDC discovery result (fetched once, reused).
-    pub oidc_discovery: Arc<tokio::sync::OnceCell<OidcDiscovery>>,
+    /// Cached OIDC discovery result with TTL.
+    pub oidc_discovery_cache: Arc<tokio::sync::RwLock<Option<(OidcDiscovery, Instant)>>>,
+    /// Shared HTTP client for OIDC requests.
+    pub oidc_http_client: reqwest::Client,
     /// External URL for JWT `iss` claim and OIDC redirect derivation.
     pub external_url: String,
+}
+
+pub async fn get_oidc_discovery(state: &AppState) -> Result<OidcDiscovery, AppError> {
+    const CACHE_TTL: Duration = Duration::from_secs(3600); // 1 hour
+
+    // Check cache
+    {
+        let cache = state.oidc_discovery_cache.read().await;
+        if let Some((ref disc, ref cached_at)) = *cache {
+            if cached_at.elapsed() < CACHE_TTL {
+                return Ok(disc.clone());
+            }
+        }
+    }
+
+    // Fetch fresh
+    let disc = crate::auth::oidc::discover(&state.oidc_issuer, &state.oidc_http_client)
+        .await
+        .map_err(AppError::internal)?;
+
+    let mut cache = state.oidc_discovery_cache.write().await;
+    *cache = Some((disc.clone(), Instant::now()));
+    Ok(disc)
 }
 
 pub fn build_router(state: AppState) -> Router {

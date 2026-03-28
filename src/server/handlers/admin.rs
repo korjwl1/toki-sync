@@ -7,6 +7,22 @@ use serde::Deserialize;
 
 use super::super::http::{AppError, AppState, require_admin};
 
+fn validate_username(username: &str) -> Result<(), AppError> {
+    if username.len() < 2 || username.len() > 128 {
+        return Err(AppError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            message: "username must be 2-128 characters".into(),
+        });
+    }
+    if !username.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.') {
+        return Err(AppError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            message: "username may only contain letters, digits, _, -, .".into(),
+        });
+    }
+    Ok(())
+}
+
 // --- /admin/users ----------------------------------------------------------
 
 pub async fn admin_list_users(
@@ -38,8 +54,10 @@ pub async fn admin_create_user(
 ) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
     require_admin(&headers, &state.jwt, &*state.db).await?;
 
-    if body.password.len() < 8 {
-        return Err(AppError { status: StatusCode::UNPROCESSABLE_ENTITY, message: "password must be at least 8 characters".into() });
+    validate_username(&body.username)?;
+
+    if body.password.len() < 8 || body.password.len() > 72 {
+        return Err(AppError { status: StatusCode::UNPROCESSABLE_ENTITY, message: "password must be 8-72 characters".into() });
     }
 
     let pw = body.password.clone();
@@ -116,8 +134,8 @@ pub async fn admin_change_user_password(
         return Err(AppError::not_found("user not found"));
     }
 
-    if body.password.len() < 8 {
-        return Err(AppError { status: StatusCode::UNPROCESSABLE_ENTITY, message: "password must be at least 8 characters".into() });
+    if body.password.len() < 8 || body.password.len() > 72 {
+        return Err(AppError { status: StatusCode::UNPROCESSABLE_ENTITY, message: "password must be 8-72 characters".into() });
     }
 
     let pw = body.password.clone();

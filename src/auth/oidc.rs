@@ -118,9 +118,8 @@ impl OidcStateStore {
 }
 
 /// Fetch the OIDC discovery document from the issuer's well-known endpoint.
-pub async fn discover(issuer: &str) -> Result<OidcDiscovery> {
+pub async fn discover(issuer: &str, client: &reqwest::Client) -> Result<OidcDiscovery> {
     let url = format!("{}/.well-known/openid-configuration", issuer.trim_end_matches('/'));
-    let client = reqwest::Client::new();
     let resp = client.get(&url)
         .timeout(Duration::from_secs(10))
         .send()
@@ -137,8 +136,7 @@ pub async fn discover(issuer: &str) -> Result<OidcDiscovery> {
 }
 
 /// Fetch the JWKS (JSON Web Key Set) from the provider's jwks_uri.
-pub async fn fetch_jwks(jwks_uri: &str) -> Result<Vec<JwkKey>> {
-    let client = reqwest::Client::new();
+pub async fn fetch_jwks(jwks_uri: &str, client: &reqwest::Client) -> Result<Vec<JwkKey>> {
     let resp = client.get(jwks_uri)
         .timeout(Duration::from_secs(10))
         .send()
@@ -180,8 +178,8 @@ pub async fn exchange_code(
     client_secret: &str,
     redirect_uri: &str,
     code: &str,
+    client: &reqwest::Client,
 ) -> Result<TokenResponse> {
-    let client = reqwest::Client::new();
     let resp = client.post(&discovery.token_endpoint)
         .timeout(Duration::from_secs(10))
         .form(&[
@@ -224,6 +222,7 @@ pub async fn extract_user_info(
     issuer_url: &str,
     client_id: &str,
     expected_nonce: Option<&str>,
+    client: &reqwest::Client,
 ) -> Result<OidcUserInfo> {
     // Try id_token first
     if !token_resp.id_token.is_empty() {
@@ -235,6 +234,7 @@ pub async fn extract_user_info(
                 issuer_url,
                 client_id,
                 expected_nonce,
+                client,
             ).await {
                 Ok(info) => return Ok(info),
                 Err(e) => {
@@ -256,7 +256,7 @@ pub async fn extract_user_info(
 
     // Fall back to userinfo endpoint
     if !discovery.userinfo_endpoint.is_empty() {
-        return fetch_userinfo(&token_resp.access_token, &discovery.userinfo_endpoint).await;
+        return fetch_userinfo(&token_resp.access_token, &discovery.userinfo_endpoint, client).await;
     }
 
     Err(anyhow!("no id_token and no userinfo endpoint available"))
@@ -269,6 +269,7 @@ async fn verify_id_token_with_jwks(
     issuer_url: &str,
     client_id: &str,
     expected_nonce: Option<&str>,
+    http_client: &reqwest::Client,
 ) -> Result<OidcUserInfo> {
     use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 
@@ -280,7 +281,7 @@ async fn verify_id_token_with_jwks(
         .ok_or_else(|| anyhow!("id_token JWT header missing kid"))?;
 
     // Fetch JWKS
-    let keys = fetch_jwks(jwks_uri).await?;
+    let keys = fetch_jwks(jwks_uri, http_client).await?;
 
     // Find the matching key
     let jwk = keys.iter()
@@ -432,8 +433,7 @@ fn parse_id_token_claims(id_token: &str) -> Result<OidcUserInfo> {
 }
 
 /// Fetch user info from the OIDC provider's userinfo endpoint.
-async fn fetch_userinfo(access_token: &str, userinfo_endpoint: &str) -> Result<OidcUserInfo> {
-    let client = reqwest::Client::new();
+async fn fetch_userinfo(access_token: &str, userinfo_endpoint: &str, client: &reqwest::Client) -> Result<OidcUserInfo> {
     let resp = client.get(userinfo_endpoint)
         .timeout(Duration::from_secs(10))
         .bearer_auth(access_token)
