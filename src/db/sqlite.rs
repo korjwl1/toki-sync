@@ -340,7 +340,7 @@ impl DatabaseRepo for SqliteRepo {
 
     async fn list_user_devices(&self, user_id: &str) -> Result<Vec<DeviceSummary>> {
         let rows: Vec<(String, String, String, i64)> = sqlx::query_as(
-            "SELECT id, name, device_key, last_seen_at FROM devices WHERE user_id = ? ORDER BY last_seen_at DESC",
+            "SELECT id, name, COALESCE(device_key, '') AS device_key, last_seen_at FROM devices WHERE user_id = ? ORDER BY last_seen_at DESC",
         )
         .bind(user_id)
         .fetch_all(&self.pool)
