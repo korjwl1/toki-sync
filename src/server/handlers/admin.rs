@@ -7,23 +7,18 @@ use serde::Deserialize;
 
 use super::super::http::{AppError, AppState, require_admin};
 
-// ─── /admin/users ──────────────────────────────────────────────────────────
+// --- /admin/users ----------------------------------------------------------
 
 pub async fn admin_list_users(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_admin(&headers, &state.jwt, &state.db).await?;
+    require_admin(&headers, &state.jwt, &*state.db).await?;
 
-    let rows: Vec<(String, String, String, i64)> = sqlx::query_as(
-        "SELECT id, username, role, created_at FROM users ORDER BY created_at",
-    )
-    .fetch_all(&state.db.pool)
-    .await
-    .map_err(AppError::internal)?;
+    let rows = state.db.list_users().await.map_err(AppError::internal)?;
 
-    let users: Vec<_> = rows.into_iter().map(|(id, username, role, created_at)| {
-        serde_json::json!({ "id": id, "username": username, "role": role, "created_at": created_at })
+    let users: Vec<_> = rows.into_iter().map(|u| {
+        serde_json::json!({ "id": u.id, "username": u.username, "role": u.role, "created_at": u.created_at })
     }).collect();
 
     Ok(Json(serde_json::json!({ "users": users })))
@@ -41,7 +36,7 @@ pub async fn admin_create_user(
     State(state): State<AppState>,
     Json(body): Json<CreateUserRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
-    require_admin(&headers, &state.jwt, &state.db).await?;
+    require_admin(&headers, &state.jwt, &*state.db).await?;
 
     if body.password.len() < 8 {
         return Err(AppError { status: StatusCode::UNPROCESSABLE_ENTITY, message: "password must be at least 8 characters".into() });
@@ -54,7 +49,6 @@ pub async fn admin_create_user(
         .map_err(AppError::internal)?;
 
     let id = uuid::Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().timestamp();
     let role = body.role.as_deref().unwrap_or("user");
     if role != "user" && role != "admin" {
         return Err(AppError {
@@ -63,18 +57,13 @@ pub async fn admin_create_user(
         });
     }
 
-    sqlx::query(
-        "INSERT INTO users (id, username, password_hash, role, created_at, updated_at) VALUES (?,?,?,?,?,?)",
-    )
-    .bind(&id)
-    .bind(&body.username)
-    .bind(&hash)
-    .bind(role)
-    .bind(now)
-    .bind(now)
-    .execute(&state.db.pool)
-    .await
-    .map_err(|e| {
+    let new_user = crate::db::models::NewUser {
+        id: id.clone(),
+        username: body.username.clone(),
+        password_hash: hash,
+        role: role.to_string(),
+    };
+    state.db.create_user(&new_user).await.map_err(|e| {
         if e.to_string().contains("UNIQUE") {
             AppError::conflict("username already exists")
         } else {
@@ -90,16 +79,10 @@ pub async fn admin_delete_user(
     State(state): State<AppState>,
     axum::extract::Path(user_id): axum::extract::Path<String>,
 ) -> Result<StatusCode, AppError> {
-    require_admin(&headers, &state.jwt, &state.db).await?;
+    require_admin(&headers, &state.jwt, &*state.db).await?;
 
     // Delete VM series for all user's devices before cascade
-    let device_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT id FROM devices WHERE user_id = ?"
-    )
-    .bind(&user_id)
-    .fetch_all(&state.db.pool)
-    .await
-    .map_err(AppError::internal)?;
+    let device_ids = state.db.get_user_device_ids(&user_id).await.map_err(AppError::internal)?;
 
     for did in &device_ids {
         if let Err(e) = state.vm.delete_device_series(did).await {
@@ -107,14 +90,8 @@ pub async fn admin_delete_user(
         }
     }
 
-    let affected = sqlx::query("DELETE FROM users WHERE id = ?")
-        .bind(&user_id)
-        .execute(&state.db.pool)
-        .await
-        .map_err(AppError::internal)?
-        .rows_affected();
-
-    if affected == 0 {
+    let deleted = state.db.delete_user(&user_id).await.map_err(AppError::internal)?;
+    if !deleted {
         return Err(AppError::not_found("user not found"));
     }
     Ok(StatusCode::NO_CONTENT)
@@ -131,16 +108,11 @@ pub async fn admin_change_user_password(
     axum::extract::Path(user_id): axum::extract::Path<String>,
     Json(body): Json<AdminChangePasswordRequest>,
 ) -> Result<StatusCode, AppError> {
-    require_admin(&headers, &state.jwt, &state.db).await?;
+    require_admin(&headers, &state.jwt, &*state.db).await?;
 
     // Verify user exists
-    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM users WHERE id = ?")
-        .bind(&user_id)
-        .fetch_optional(&state.db.pool)
-        .await
-        .map_err(AppError::internal)?;
-
-    if exists.is_none() {
+    let user = state.db.get_user_by_id(&user_id).await.map_err(AppError::internal)?;
+    if user.is_none() {
         return Err(AppError::not_found("user not found"));
     }
 
@@ -154,21 +126,10 @@ pub async fn admin_change_user_password(
         .map_err(AppError::internal)?
         .map_err(AppError::internal)?;
 
-    let now = chrono::Utc::now().timestamp();
-    sqlx::query("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?")
-        .bind(&new_hash)
-        .bind(now)
-        .bind(&user_id)
-        .execute(&state.db.pool)
-        .await
-        .map_err(AppError::internal)?;
+    state.db.update_password(&user_id, &new_hash).await.map_err(AppError::internal)?;
 
     // Revoke all refresh tokens -- password change invalidates existing sessions
-    sqlx::query("UPDATE refresh_tokens SET revoked = 1 WHERE user_id = ? AND revoked = 0")
-        .bind(&user_id)
-        .execute(&state.db.pool)
-        .await
-        .map_err(AppError::internal)?;
+    state.db.revoke_user_refresh_tokens(&user_id).await.map_err(AppError::internal)?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -177,18 +138,12 @@ pub async fn admin_list_devices(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_admin(&headers, &state.jwt, &state.db).await?;
+    require_admin(&headers, &state.jwt, &*state.db).await?;
 
-    let rows: Vec<(String, String, String, i64)> = sqlx::query_as(
-        "SELECT d.id, d.name, u.username, d.last_seen_at FROM devices d
-         JOIN users u ON d.user_id = u.id ORDER BY d.last_seen_at DESC",
-    )
-    .fetch_all(&state.db.pool)
-    .await
-    .map_err(AppError::internal)?;
+    let rows = state.db.list_all_devices().await.map_err(AppError::internal)?;
 
-    let devices: Vec<_> = rows.into_iter().map(|(id, name, username, last_seen)| {
-        serde_json::json!({ "id": id, "name": name, "username": username, "last_seen_at": last_seen })
+    let devices: Vec<_> = rows.into_iter().map(|d| {
+        serde_json::json!({ "id": d.id, "name": d.name, "username": d.username, "last_seen_at": d.last_seen_at })
     }).collect();
 
     Ok(Json(serde_json::json!({ "devices": devices })))
@@ -199,21 +154,15 @@ pub async fn admin_delete_device(
     State(state): State<AppState>,
     axum::extract::Path(device_id): axum::extract::Path<String>,
 ) -> Result<StatusCode, AppError> {
-    require_admin(&headers, &state.jwt, &state.db).await?;
+    require_admin(&headers, &state.jwt, &*state.db).await?;
 
     // Delete the device's time-series data from VictoriaMetrics before removing from DB
     if let Err(e) = state.vm.delete_device_series(&device_id).await {
         tracing::warn!("failed to delete VM series for device {device_id}: {e}");
     }
 
-    let affected = sqlx::query("DELETE FROM devices WHERE id = ?")
-        .bind(&device_id)
-        .execute(&state.db.pool)
-        .await
-        .map_err(AppError::internal)?
-        .rows_affected();
-
-    if affected == 0 {
+    let deleted = state.db.delete_device(&device_id).await.map_err(AppError::internal)?;
+    if !deleted {
         return Err(AppError::not_found("device not found"));
     }
     Ok(StatusCode::NO_CONTENT)

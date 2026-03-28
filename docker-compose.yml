@@ -1,88 +1,78 @@
 services:
   toki-sync-server:
+    image: ghcr.io/korjwl1/toki-sync-server:${TOKI_VERSION:-latest}
     build:
       context: .
       dockerfile: Dockerfile
-    image: toki-sync:${TOKI_VERSION:-latest}
     container_name: toki-sync-server
     restart: unless-stopped
     environment:
-      TOKI_SYNC_CONFIG: /app/config/config.toml
       TOKI_ADMIN_PASSWORD: ${TOKI_ADMIN_PASSWORD}
-      JWT_SECRET: ${TOKI_JWT_SECRET}
-    ports:
-      - "9091:9091"   # HTTP (direct access or behind Caddy)
-      - "9090:9090"   # TCP sync (direct access or via Caddy L4)
+      TOKI_JWT_SECRET: ${TOKI_JWT_SECRET}
+      TOKI_CONFIG_PATH: /etc/toki-sync/config.toml
     volumes:
-      - ./config:/app/config:ro
-      - toki-data:/app/data
+      - ./config/toki-sync.toml:/etc/toki-sync/config.toml:ro
+      - toki-data:/data
     networks:
-      - toki-internal
-      - toki-external
+      - internal
+      - external
     depends_on:
       victoriametrics:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:9091/health"]
-      interval: 15s
+      interval: 10s
       timeout: 5s
       retries: 3
-      start_period: 10s
 
   victoriametrics:
     image: victoriametrics/victoria-metrics:v1.101.0
     restart: unless-stopped
     command:
-      - "-storageDataPath=/storage"
-      - "-retentionPeriod=12"
-      - "-dedup.minScrapeInterval=1ms"
-      - "-httpListenAddr=:8428"
+      - -retentionPeriod=12
+      - -storageDataPath=/vm-data
+      - -dedup.minScrapeInterval=1ms
     volumes:
-      - vm-data:/storage
+      - vm-data:/vm-data
     networks:
-      - toki-internal
-    # VM intentionally NOT exposed on host — accessed only via toki-sync proxy
+      - internal
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8428/health"]
-      interval: 15s
+      interval: 10s
       timeout: 5s
       retries: 3
-      start_period: 10s
 
   caddy:
+    profiles: ["caddy"]
     build:
       context: ./caddy
       dockerfile: Dockerfile
     container_name: toki-caddy
     restart: unless-stopped
-    profiles: ["caddy"]
-    environment:
-      TOKI_DOMAIN: ${TOKI_DOMAIN:-localhost}
-      DUCKDNS_TOKEN: ${DUCKDNS_TOKEN:-}
     ports:
-      - "80:80"
       - "443:443"
+      - "9090:9090"
+    environment:
+      TOKI_DOMAIN: ${TOKI_EXTERNAL_URL}
+      DUCKDNS_TOKEN: ${DUCKDNS_TOKEN:-}
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
-      - caddy-config:/config
     networks:
-      - toki-internal
-      - toki-external
+      - internal
+      - external
     depends_on:
       toki-sync-server:
         condition: service_healthy
 
-volumes:
-  toki-data:
-  vm-data:
-  caddy-data:
-  caddy-config:
-
 networks:
-  toki-internal:
+  internal:
     driver: bridge
-    internal: true    # VM is isolated: no direct host exposure
-  toki-external:
+    internal: true
+  external:
     driver: bridge
-    internal: false   # toki-sync and Caddy need outbound connectivity
+
+volumes:
+  toki-data:      # SQLite: user/device/cursor state. Loss requires re-login + full re-sync
+  vm-data:        # VictoriaMetrics: all token usage history. Loss is unrecoverable
+  caddy-data:     # Let's Encrypt certificates. Loss triggers auto-reissue (rate limit: 5/week)

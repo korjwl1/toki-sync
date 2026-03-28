@@ -5,7 +5,7 @@ use anyhow::Result;
 use tokio::sync::watch;
 
 use crate::auth::JwtManager;
-use crate::db::Database;
+use crate::db::DatabaseRepo;
 use crate::metrics::VictoriaMetrics;
 use crate::sync::handler::handle_connection;
 
@@ -14,7 +14,7 @@ use crate::sync::handler::handle_connection;
 /// Listens on `addr`, accepts connections, and spawns a handler task per client.
 /// Shuts down cleanly when `shutdown_rx` receives `true`.
 pub async fn run_tcp_server(
-    db:  Arc<Database>,
+    db:  Arc<dyn DatabaseRepo>,
     jwt: Arc<JwtManager>,
     vm:  Arc<VictoriaMetrics>,
     addr: SocketAddr,

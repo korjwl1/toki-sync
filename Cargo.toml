@@ -19,7 +19,8 @@ tower-http = { version = "0.5", features = ["trace"] }
 tokio = { version = "1", features = ["full"] }
 
 # Database
-sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "macros", "migrate"] }
+sqlx = { version = "0.8", features = ["sqlite", "postgres", "runtime-tokio", "macros", "migrate"] }
+async-trait = "0.1"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

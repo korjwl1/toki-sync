@@ -8,14 +8,14 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::auth::{BruteForceGuard, JwtManager};
-use crate::db::Database;
+use crate::db::DatabaseRepo;
 use crate::metrics::vm::VictoriaMetrics;
 
 use super::handlers::{admin, auth, me, metrics};
 
 #[derive(Clone)]
 pub struct AppState {
-    pub db: Arc<Database>,
+    pub db: Arc<dyn DatabaseRepo>,
     pub jwt: Arc<JwtManager>,
     pub brute: Arc<BruteForceGuard>,
     pub vm: Arc<VictoriaMetrics>,
@@ -76,16 +76,13 @@ pub fn extract_jwt(headers: &HeaderMap, jwt: &JwtManager) -> Result<crate::auth:
         .map_err(|_| AppError::unauthorized("invalid or expired token"))
 }
 
-pub async fn require_admin<'a>(headers: &'a HeaderMap, jwt: &'a JwtManager, db: &'a Database) -> Result<String, AppError> {
+pub async fn require_admin(headers: &HeaderMap, jwt: &JwtManager, db: &dyn DatabaseRepo) -> Result<String, AppError> {
     let claims = extract_jwt(headers, jwt)?;
-    let role: Option<String> = sqlx::query_scalar("SELECT role FROM users WHERE id = ?")
-        .bind(&claims.sub)
-        .fetch_optional(&db.pool)
-        .await
-        .map_err(AppError::internal)?;
-    match role.as_deref() {
-        Some("admin") => Ok(claims.sub),
-        _ => Err(AppError::forbidden("admin role required")),
+    let is_admin = db.user_is_admin(&claims.sub).await.map_err(AppError::internal)?;
+    if is_admin {
+        Ok(claims.sub)
+    } else {
+        Err(AppError::forbidden("admin role required"))
     }
 }
 

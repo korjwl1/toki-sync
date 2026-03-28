@@ -1,0 +1,9 @@
+target/
+.git/
+*.md
+specs/
+.spec-mix/
+.env
+.env.*
+!.env.example
+data/

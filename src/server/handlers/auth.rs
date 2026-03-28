@@ -54,24 +54,21 @@ pub async fn login(
 
     state.brute.check(&ip, &body.username).map_err(AppError::locked_out)?;
 
-    let row: Option<(String, String, String)> = sqlx::query_as(
-        "SELECT id, password_hash, role FROM users WHERE username = ?",
-    )
-    .bind(&body.username)
-    .fetch_optional(&state.db.pool)
-    .await
-    .map_err(AppError::internal)?;
+    let user = state.db.get_user_by_username(&body.username).await.map_err(AppError::internal)?;
 
-    let (user_id, password_hash, _role) = match row {
-        Some(r) => r,
+    let user = match user {
+        Some(u) => u,
         None => {
             let _ = state.brute.record_failure(&ip, &body.username);
             return Err(AppError::unauthorized("invalid credentials"));
         }
     };
 
+    let user_id = user.id;
+    let password_hash = user.password_hash;
+
     let pw = body.password.clone();
-    let hash = password_hash.clone();
+    let hash = password_hash;
     let valid = tokio::task::spawn_blocking(move || bcrypt::verify(&pw, &hash))
         .await
         .map_err(AppError::internal)?
@@ -88,7 +85,7 @@ pub async fn login(
     let (refresh, refresh_claims) = state.jwt
         .issue_refresh_token(&user_id, body.device_id.as_deref())
         .map_err(AppError::internal)?;
-    state.jwt.store_refresh_token(&state.db, &refresh_claims).await.map_err(AppError::internal)?;
+    state.jwt.store_refresh_token(&*state.db, &refresh_claims).await.map_err(AppError::internal)?;
 
     tracing::info!(user_id = %user_id, "login successful");
     Ok(Json(TokenResponse {
@@ -131,21 +128,15 @@ pub async fn register(
         .map_err(AppError::internal)?;
 
     let id = uuid::Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().timestamp();
 
     let username = body.username.clone();
-    sqlx::query(
-        "INSERT INTO users (id, username, password_hash, role, created_at, updated_at) VALUES (?,?,?,?,?,?)",
-    )
-    .bind(&id)
-    .bind(&username)
-    .bind(&hash)
-    .bind("user")
-    .bind(now)
-    .bind(now)
-    .execute(&state.db.pool)
-    .await
-    .map_err(|e| {
+    let new_user = crate::db::models::NewUser {
+        id: id.clone(),
+        username: username.clone(),
+        password_hash: hash,
+        role: "user".to_string(),
+    };
+    state.db.create_user(&new_user).await.map_err(|e| {
         if e.to_string().contains("UNIQUE") {
             state.brute.record_failure(&ip, "__register__").ok();
             AppError::conflict("username already exists")
@@ -176,7 +167,7 @@ pub async fn token_refresh(
     state.brute.check(&ip, "__refresh__").map_err(AppError::locked_out)?;
 
     let result = state.jwt
-        .rotate(&state.db, &body.refresh_token, body.device_id.as_deref())
+        .rotate(&*state.db, &body.refresh_token, body.device_id.as_deref())
         .await;
 
     match result {

@@ -2081,6 +2081,7 @@ name = "toki-sync"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "bcrypt",
  "bincode",

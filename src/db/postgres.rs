@@ -1,32 +1,17 @@
 use anyhow::{Context, Result};
-use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
-use std::str::FromStr;
+use sqlx::PgPool;
 
 use super::models::*;
 use super::DatabaseRepo;
 
-pub struct SqliteRepo {
-    pub pool: SqlitePool,
+pub struct PostgresRepo {
+    pool: PgPool,
 }
 
-impl SqliteRepo {
-    pub async fn open(db_path: &str) -> Result<Self> {
-        // Create parent directories if needed
-        if let Some(parent) = std::path::Path::new(db_path).parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("failed to create db dir: {}", parent.display()))?;
-            }
-        }
-
-        let opts = SqliteConnectOptions::from_str(db_path)?
-            .create_if_missing(true)
-            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
-            .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
-            .foreign_keys(true);
-
-        let pool = SqlitePool::connect_with(opts).await
-            .with_context(|| format!("failed to open SQLite: {db_path}"))?;
+impl PostgresRepo {
+    pub async fn open(url: &str) -> Result<Self> {
+        let pool = PgPool::connect(url).await
+            .with_context(|| format!("failed to connect to PostgreSQL: {url}"))?;
 
         let db = Self { pool };
         db.migrate().await?;
@@ -37,111 +22,95 @@ impl SqliteRepo {
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS users (
-                id          TEXT PRIMARY KEY,
-                username    TEXT NOT NULL UNIQUE,
+                id            TEXT PRIMARY KEY,
+                username      TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
-                role        TEXT NOT NULL DEFAULT 'user',
-                created_at  INTEGER NOT NULL,
-                updated_at  INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS devices (
-                id          TEXT PRIMARY KEY,
-                user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                name        TEXT NOT NULL,
-                created_at  INTEGER NOT NULL,
-                last_seen_at INTEGER NOT NULL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_devices_user_id ON devices(user_id);
-
-            CREATE TABLE IF NOT EXISTS cursors (
-                device_id   TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
-                provider    TEXT NOT NULL DEFAULT '',
-                last_ts     INTEGER NOT NULL DEFAULT 0,
-                updated_at  INTEGER NOT NULL,
-                PRIMARY KEY (device_id, provider)
-            );
-
-            CREATE TABLE IF NOT EXISTS refresh_tokens (
-                jti         TEXT PRIMARY KEY,
-                user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                device_id   TEXT,
-                expires_at  INTEGER NOT NULL,
-                revoked     INTEGER NOT NULL DEFAULT 0,
-                created_at  INTEGER NOT NULL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens(user_id);
+                role          TEXT NOT NULL DEFAULT 'user',
+                created_at    BIGINT NOT NULL,
+                updated_at    BIGINT NOT NULL
+            )
             "#,
         )
         .execute(&self.pool)
         .await
-        .context("migration failed")?;
+        .context("migrate: create users")?;
 
-        // Migration: recreate cursors table with composite PK (device_id, provider)
-        let provider_in_pk: bool = sqlx::query_scalar(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('cursors') WHERE name = 'provider' AND pk > 0"
-        )
-        .fetch_one(&self.pool)
-        .await
-        .unwrap_or(false);
-
-        if !provider_in_pk {
-            let has_provider: bool = sqlx::query_scalar(
-                "SELECT COUNT(*) > 0 FROM pragma_table_info('cursors') WHERE name = 'provider'"
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS devices (
+                id            TEXT PRIMARY KEY,
+                user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                name          TEXT NOT NULL,
+                device_key    TEXT,
+                created_at    BIGINT NOT NULL,
+                last_seen_at  BIGINT NOT NULL
             )
-            .fetch_one(&self.pool)
-            .await
-            .unwrap_or(false);
-
-            sqlx::query("ALTER TABLE cursors RENAME TO cursors_old").execute(&self.pool).await.ok();
-
-            sqlx::query(
-                "CREATE TABLE IF NOT EXISTS cursors (
-                    device_id   TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
-                    provider    TEXT NOT NULL DEFAULT '',
-                    last_ts     INTEGER NOT NULL DEFAULT 0,
-                    updated_at  INTEGER NOT NULL,
-                    PRIMARY KEY (device_id, provider)
-                )"
-            ).execute(&self.pool).await?;
-
-            if has_provider {
-                sqlx::query("INSERT OR IGNORE INTO cursors SELECT device_id, provider, last_ts, updated_at FROM cursors_old")
-                    .execute(&self.pool).await.ok();
-            } else {
-                sqlx::query("INSERT OR IGNORE INTO cursors SELECT device_id, '', last_ts, updated_at FROM cursors_old")
-                    .execute(&self.pool).await.ok();
-            }
-
-            sqlx::query("DROP TABLE IF EXISTS cursors_old").execute(&self.pool).await.ok();
-        }
-
-        // Migration: add device_key column to devices
-        let _ = sqlx::query(
-            "ALTER TABLE devices ADD COLUMN device_key TEXT",
+            "#,
         )
         .execute(&self.pool)
-        .await;
+        .await
+        .context("migrate: create devices")?;
 
-        let _ = sqlx::query(
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_devices_user_id ON devices(user_id)")
+            .execute(&self.pool)
+            .await
+            .context("migrate: idx_devices_user_id")?;
+
+        // Partial unique index on device_key (only non-NULL values)
+        sqlx::query(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_device_key ON devices(device_key) WHERE device_key IS NOT NULL"
         )
         .execute(&self.pool)
-        .await;
+        .await
+        .context("migrate: idx_devices_device_key")?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS cursors (
+                device_id   TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+                provider    TEXT NOT NULL DEFAULT '',
+                last_ts     BIGINT NOT NULL DEFAULT 0,
+                updated_at  BIGINT NOT NULL,
+                PRIMARY KEY (device_id, provider)
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await
+        .context("migrate: create cursors")?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS refresh_tokens (
+                jti         TEXT PRIMARY KEY,
+                user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                device_id   TEXT,
+                expires_at  BIGINT NOT NULL,
+                revoked     SMALLINT NOT NULL DEFAULT 0,
+                created_at  BIGINT NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await
+        .context("migrate: create refresh_tokens")?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens(user_id)")
+            .execute(&self.pool)
+            .await
+            .context("migrate: idx_refresh_tokens_user")?;
 
         Ok(())
     }
 }
 
 #[async_trait::async_trait]
-impl DatabaseRepo for SqliteRepo {
+impl DatabaseRepo for PostgresRepo {
     // ── Users ───────────────────────────────────────────────────────────────
 
     async fn get_user_by_username(&self, username: &str) -> Result<Option<User>> {
         let row: Option<(String, String, String, String, i64, i64)> = sqlx::query_as(
-            "SELECT id, username, password_hash, role, created_at, updated_at FROM users WHERE username = ?",
+            "SELECT id, username, password_hash, role, created_at, updated_at FROM users WHERE username = $1",
         )
         .bind(username)
         .fetch_optional(&self.pool)
@@ -155,7 +124,7 @@ impl DatabaseRepo for SqliteRepo {
 
     async fn get_user_by_id(&self, id: &str) -> Result<Option<User>> {
         let row: Option<(String, String, String, String, i64, i64)> = sqlx::query_as(
-            "SELECT id, username, password_hash, role, created_at, updated_at FROM users WHERE id = ?",
+            "SELECT id, username, password_hash, role, created_at, updated_at FROM users WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -170,7 +139,7 @@ impl DatabaseRepo for SqliteRepo {
     async fn create_user(&self, user: &NewUser) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
         sqlx::query(
-            "INSERT INTO users (id, username, password_hash, role, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+            "INSERT INTO users (id, username, password_hash, role, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6)",
         )
         .bind(&user.id)
         .bind(&user.username)
@@ -185,7 +154,7 @@ impl DatabaseRepo for SqliteRepo {
     }
 
     async fn delete_user(&self, id: &str) -> Result<bool> {
-        let affected = sqlx::query("DELETE FROM users WHERE id = ?")
+        let affected = sqlx::query("DELETE FROM users WHERE id = $1")
             .bind(id)
             .execute(&self.pool)
             .await
@@ -196,7 +165,7 @@ impl DatabaseRepo for SqliteRepo {
 
     async fn update_password(&self, user_id: &str, password_hash: &str) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
-        sqlx::query("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?")
+        sqlx::query("UPDATE users SET password_hash = $1, updated_at = $2 WHERE id = $3")
             .bind(password_hash)
             .bind(now)
             .bind(user_id)
@@ -220,7 +189,7 @@ impl DatabaseRepo for SqliteRepo {
     }
 
     async fn user_is_admin(&self, user_id: &str) -> Result<bool> {
-        let role: Option<String> = sqlx::query_scalar("SELECT role FROM users WHERE id = ?")
+        let role: Option<String> = sqlx::query_scalar("SELECT role FROM users WHERE id = $1")
             .bind(user_id)
             .fetch_optional(&self.pool)
             .await
@@ -232,7 +201,7 @@ impl DatabaseRepo for SqliteRepo {
 
     async fn find_device_by_key_and_user(&self, device_key: &str, user_id: &str) -> Result<Option<String>> {
         let id: Option<String> = sqlx::query_scalar(
-            "SELECT id FROM devices WHERE device_key = ? AND user_id = ?",
+            "SELECT id FROM devices WHERE device_key = $1 AND user_id = $2",
         )
         .bind(device_key)
         .bind(user_id)
@@ -245,7 +214,7 @@ impl DatabaseRepo for SqliteRepo {
     async fn create_device(&self, id: &str, user_id: &str, name: &str, device_key: &str) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
         sqlx::query(
-            "INSERT INTO devices (id, user_id, name, device_key, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO devices (id, user_id, name, device_key, created_at, last_seen_at) VALUES ($1, $2, $3, $4, $5, $6)",
         )
         .bind(id)
         .bind(user_id)
@@ -261,7 +230,7 @@ impl DatabaseRepo for SqliteRepo {
 
     async fn update_device_seen(&self, id: &str, name: &str) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
-        sqlx::query("UPDATE devices SET last_seen_at = ?, name = ? WHERE id = ?")
+        sqlx::query("UPDATE devices SET last_seen_at = $1, name = $2 WHERE id = $3")
             .bind(now)
             .bind(name)
             .bind(id)
@@ -273,7 +242,7 @@ impl DatabaseRepo for SqliteRepo {
 
     async fn list_user_devices(&self, user_id: &str) -> Result<Vec<DeviceSummary>> {
         let rows: Vec<(String, String, i64)> = sqlx::query_as(
-            "SELECT id, name, last_seen_at FROM devices WHERE user_id = ? ORDER BY last_seen_at DESC",
+            "SELECT id, name, last_seen_at FROM devices WHERE user_id = $1 ORDER BY last_seen_at DESC",
         )
         .bind(user_id)
         .fetch_all(&self.pool)
@@ -300,7 +269,7 @@ impl DatabaseRepo for SqliteRepo {
     }
 
     async fn delete_device(&self, id: &str) -> Result<bool> {
-        let affected = sqlx::query("DELETE FROM devices WHERE id = ?")
+        let affected = sqlx::query("DELETE FROM devices WHERE id = $1")
             .bind(id)
             .execute(&self.pool)
             .await
@@ -310,7 +279,7 @@ impl DatabaseRepo for SqliteRepo {
     }
 
     async fn delete_user_device(&self, id: &str, user_id: &str) -> Result<bool> {
-        let affected = sqlx::query("DELETE FROM devices WHERE id = ? AND user_id = ?")
+        let affected = sqlx::query("DELETE FROM devices WHERE id = $1 AND user_id = $2")
             .bind(id)
             .bind(user_id)
             .execute(&self.pool)
@@ -322,7 +291,7 @@ impl DatabaseRepo for SqliteRepo {
 
     async fn device_belongs_to_user(&self, device_id: &str, user_id: &str) -> Result<bool> {
         let exists: bool = sqlx::query_scalar(
-            "SELECT COUNT(*) > 0 FROM devices WHERE id = ? AND user_id = ?"
+            "SELECT COUNT(*) > 0 FROM devices WHERE id = $1 AND user_id = $2"
         )
         .bind(device_id)
         .bind(user_id)
@@ -334,7 +303,7 @@ impl DatabaseRepo for SqliteRepo {
 
     async fn rename_device(&self, device_id: &str, user_id: &str, name: &str) -> Result<bool> {
         let affected = sqlx::query(
-            "UPDATE devices SET name = ? WHERE id = ? AND user_id = ?",
+            "UPDATE devices SET name = $1 WHERE id = $2 AND user_id = $3",
         )
         .bind(name)
         .bind(device_id)
@@ -348,7 +317,7 @@ impl DatabaseRepo for SqliteRepo {
 
     async fn get_user_device_ids(&self, user_id: &str) -> Result<Vec<String>> {
         let ids: Vec<String> = sqlx::query_scalar(
-            "SELECT id FROM devices WHERE user_id = ?"
+            "SELECT id FROM devices WHERE user_id = $1"
         )
         .bind(user_id)
         .fetch_all(&self.pool)
@@ -362,7 +331,7 @@ impl DatabaseRepo for SqliteRepo {
     async fn ensure_cursor(&self, device_id: &str, provider: &str) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
         sqlx::query(
-            "INSERT OR IGNORE INTO cursors (device_id, provider, last_ts, updated_at) VALUES (?, ?, 0, ?)",
+            "INSERT INTO cursors (device_id, provider, last_ts, updated_at) VALUES ($1, $2, 0, $3) ON CONFLICT DO NOTHING",
         )
         .bind(device_id)
         .bind(provider)
@@ -375,7 +344,7 @@ impl DatabaseRepo for SqliteRepo {
 
     async fn get_last_ts(&self, device_id: &str, provider: &str) -> Result<i64> {
         let ts: Option<i64> = sqlx::query_scalar(
-            "SELECT last_ts FROM cursors WHERE device_id = ? AND provider = ?",
+            "SELECT last_ts FROM cursors WHERE device_id = $1 AND provider = $2",
         )
         .bind(device_id)
         .bind(provider)
@@ -388,7 +357,7 @@ impl DatabaseRepo for SqliteRepo {
     async fn advance_cursor(&self, device_id: &str, provider: &str, ts: i64) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
         sqlx::query(
-            "UPDATE cursors SET last_ts = MAX(last_ts, ?), updated_at = ? WHERE device_id = ? AND provider = ?",
+            "UPDATE cursors SET last_ts = GREATEST(last_ts, $1), updated_at = $2 WHERE device_id = $3 AND provider = $4",
         )
         .bind(ts)
         .bind(now)
@@ -405,7 +374,7 @@ impl DatabaseRepo for SqliteRepo {
     async fn store_refresh_token(&self, jti: &str, user_id: &str, device_id: Option<&str>, expires_at: i64) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
         sqlx::query(
-            "INSERT INTO refresh_tokens (jti, user_id, device_id, expires_at, revoked, created_at) VALUES (?, ?, ?, ?, 0, ?)",
+            "INSERT INTO refresh_tokens (jti, user_id, device_id, expires_at, revoked, created_at) VALUES ($1, $2, $3, $4, 0, $5)",
         )
         .bind(jti)
         .bind(user_id)
@@ -420,18 +389,17 @@ impl DatabaseRepo for SqliteRepo {
 
     async fn is_refresh_token_revoked(&self, jti: &str) -> Result<bool> {
         let revoked: Option<bool> = sqlx::query_scalar(
-            "SELECT revoked FROM refresh_tokens WHERE jti = ?",
+            "SELECT revoked != 0 FROM refresh_tokens WHERE jti = $1",
         )
         .bind(jti)
         .fetch_optional(&self.pool)
         .await
         .context("is_refresh_token_revoked")?;
-        // Not found → treat as revoked
         Ok(revoked.unwrap_or(true))
     }
 
     async fn revoke_refresh_token(&self, jti: &str) -> Result<()> {
-        sqlx::query("UPDATE refresh_tokens SET revoked = 1 WHERE jti = ?")
+        sqlx::query("UPDATE refresh_tokens SET revoked = 1 WHERE jti = $1")
             .bind(jti)
             .execute(&self.pool)
             .await
@@ -440,7 +408,7 @@ impl DatabaseRepo for SqliteRepo {
     }
 
     async fn revoke_user_refresh_tokens(&self, user_id: &str) -> Result<()> {
-        sqlx::query("UPDATE refresh_tokens SET revoked = 1 WHERE user_id = ? AND revoked = 0")
+        sqlx::query("UPDATE refresh_tokens SET revoked = 1 WHERE user_id = $1 AND revoked = 0")
             .bind(user_id)
             .execute(&self.pool)
             .await
@@ -452,22 +420,23 @@ impl DatabaseRepo for SqliteRepo {
         let mut tx = self.pool.begin().await.context("failed to begin transaction")?;
 
         // Check not already revoked
-        let revoked: bool = sqlx::query_scalar(
-            "SELECT revoked FROM refresh_tokens WHERE jti = ?",
+        let revoked: Option<bool> = sqlx::query_scalar(
+            "SELECT revoked != 0 FROM refresh_tokens WHERE jti = $1",
         )
         .bind(old_jti)
         .fetch_optional(&mut *tx)
         .await
-        .context("db error checking revocation")?
-        .unwrap_or(true);
+        .context("db error checking revocation")?;
 
-        if revoked {
+        let is_revoked = revoked.unwrap_or(true);
+
+        if is_revoked {
             tx.rollback().await.ok();
             return Err(anyhow::anyhow!("refresh token already used or revoked"));
         }
 
         // Revoke old token
-        sqlx::query("UPDATE refresh_tokens SET revoked = 1 WHERE jti = ?")
+        sqlx::query("UPDATE refresh_tokens SET revoked = 1 WHERE jti = $1")
             .bind(old_jti)
             .execute(&mut *tx)
             .await
@@ -476,7 +445,7 @@ impl DatabaseRepo for SqliteRepo {
         // Store new refresh token
         let now = chrono::Utc::now().timestamp();
         sqlx::query(
-            "INSERT INTO refresh_tokens (jti, user_id, device_id, expires_at, revoked, created_at) VALUES (?, ?, ?, ?, 0, ?)",
+            "INSERT INTO refresh_tokens (jti, user_id, device_id, expires_at, revoked, created_at) VALUES ($1, $2, $3, $4, 0, $5)",
         )
         .bind(new_jti)
         .bind(user_id)

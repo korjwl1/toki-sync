@@ -82,15 +82,45 @@ fn default_vm_url() -> String { "http://victoriametrics:8428".to_string() }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct StorageConfig {
+    #[serde(default = "default_db_backend")]
+    pub backend: String,
+    /// New canonical field for SQLite path.
     #[serde(default = "default_db_path")]
+    pub sqlite_path: String,
+    /// Legacy alias — if present in config, used as sqlite_path (backward compat).
+    #[serde(default)]
     pub db_path: String,
+    #[serde(default)]
+    pub postgres_url: String,
 }
 
+fn default_db_backend() -> String { "sqlite".to_string() }
 fn default_db_path() -> String { "./data/toki_sync.db".to_string() }
+
+impl StorageConfig {
+    /// Resolve the effective sqlite_path: prefer explicit `sqlite_path`,
+    /// fall back to legacy `db_path` if set, otherwise use default.
+    pub fn effective_sqlite_path(&self) -> &str {
+        if self.sqlite_path != default_db_path() {
+            // sqlite_path was explicitly set
+            &self.sqlite_path
+        } else if !self.db_path.is_empty() {
+            // Legacy db_path present
+            &self.db_path
+        } else {
+            &self.sqlite_path
+        }
+    }
+}
 
 impl Default for StorageConfig {
     fn default() -> Self {
-        Self { db_path: default_db_path() }
+        Self {
+            backend: default_db_backend(),
+            sqlite_path: default_db_path(),
+            db_path: String::new(),
+            postgres_url: String::new(),
+        }
     }
 }
 

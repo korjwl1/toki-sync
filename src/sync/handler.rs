@@ -4,7 +4,7 @@ use anyhow::Result;
 use tokio::net::TcpStream;
 
 use crate::auth::JwtManager;
-use crate::db::Database;
+use crate::db::DatabaseRepo;
 use crate::metrics::backend::MetricPoint;
 use crate::metrics::backend::MetricsBackend;
 use crate::metrics::VictoriaMetrics;
@@ -13,7 +13,7 @@ use super::protocol::*;
 /// Handle a single TCP client connection.
 pub async fn handle_connection(
     stream: TcpStream,
-    db: Arc<Database>,
+    db: Arc<dyn DatabaseRepo>,
     jwt: Arc<JwtManager>,
     vm: Arc<VictoriaMetrics>,
 ) -> Result<()> {
@@ -59,7 +59,7 @@ pub async fn handle_connection(
     let provider = auth.provider.clone();
 
     // Find or create device using the stable device_key UUID
-    let device_id = find_or_create_device(&db, &user_id, &auth.device_name, &auth.device_key).await?;
+    let device_id = find_or_create_device(&*db, &user_id, &auth.device_name, &auth.device_key).await?;
 
     // Schema version guard — delete only this device's series, not all devices for this provider
     if auth.schema_version != SCHEMA_VERSION {
@@ -79,7 +79,7 @@ pub async fn handle_connection(
     }
 
     // Ensure cursor row for this (device, provider)
-    ensure_cursor(&db, &device_id, &provider).await?;
+    db.ensure_cursor(&device_id, &provider).await?;
 
     // AUTH_OK
     let ok = AuthOkPayload { device_id: device_id.clone() };
@@ -109,7 +109,7 @@ pub async fn handle_connection(
         match msg_type {
             MsgType::GetLastTs => {
                 let get_ts: GetLastTsPayload = bincode::deserialize(&payload)?;
-                let ts = get_last_ts(&db, &device_id, &get_ts.provider).await?;
+                let ts = db.get_last_ts(&device_id, &get_ts.provider).await?;
                 let p = LastTsPayload { ts_ms: ts };
                 write_frame(&mut writer, MsgType::LastTs, &bincode::serialize(&p)?).await?;
             }
@@ -123,8 +123,8 @@ pub async fn handle_connection(
                 };
                 let batch: SyncBatchPayload = bincode::deserialize(&raw)?;
                 // Ensure cursor exists for this batch's provider (may differ from auth provider)
-                ensure_cursor(&db, &device_id, &batch.provider).await?;
-                match handle_sync_batch(&batch, &user_id, &device_id, &batch.provider, &db, &vm).await {
+                db.ensure_cursor(&device_id, &batch.provider).await?;
+                match handle_sync_batch(&batch, &user_id, &device_id, &batch.provider, &*db, &vm).await {
                     Ok(last_ts) => {
                         let ack = SyncAckPayload { last_ts_ms: last_ts };
                         write_frame(&mut writer, MsgType::SyncAck, &bincode::serialize(&ack)?).await?;
@@ -153,73 +153,23 @@ pub async fn handle_connection(
 // ─── DB helpers ──────────────────────────────────────────────────────────────
 
 async fn find_or_create_device(
-    db: &Database,
+    db: &dyn DatabaseRepo,
     user_id: &str,
     device_name: &str,
     device_key: &str,
 ) -> Result<String> {
     // Look up existing device by stable device_key UUID, scoped to user
-    let existing: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM devices WHERE device_key = ? AND user_id = ?",
-    )
-    .bind(device_key)
-    .bind(user_id)
-    .fetch_optional(&db.pool)
-    .await?;
-
-    if let Some(id) = existing {
-        let now = chrono::Utc::now().timestamp();
-        sqlx::query("UPDATE devices SET last_seen_at = ?, name = ? WHERE id = ?")
-            .bind(now)
-            .bind(device_name)
-            .bind(&id)
-            .execute(&db.pool)
-            .await?;
+    if let Some(id) = db.find_device_by_key_and_user(device_key, user_id).await? {
+        db.update_device_seen(&id, device_name).await?;
         return Ok(id);
     }
 
     // Create new device
-    let id  = uuid::Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().timestamp();
-    sqlx::query(
-        "INSERT INTO devices (id, user_id, name, device_key, created_at, last_seen_at) \
-         VALUES (?, ?, ?, ?, ?, ?)",
-    )
-    .bind(&id)
-    .bind(user_id)
-    .bind(device_name)
-    .bind(device_key)
-    .bind(now)
-    .bind(now)
-    .execute(&db.pool)
-    .await?;
+    let id = uuid::Uuid::new_v4().to_string();
+    db.create_device(&id, user_id, device_name, device_key).await?;
 
     tracing::info!("registered new device '{device_name}' (key={device_key}) for user={user_id} id={id}");
     Ok(id)
-}
-
-async fn ensure_cursor(db: &Database, device_id: &str, provider: &str) -> Result<()> {
-    let now = chrono::Utc::now().timestamp();
-    sqlx::query(
-        "INSERT OR IGNORE INTO cursors (device_id, provider, last_ts, updated_at) VALUES (?, ?, 0, ?)",
-    )
-    .bind(device_id)
-    .bind(provider)
-    .bind(now)
-    .execute(&db.pool)
-    .await?;
-    Ok(())
-}
-
-async fn get_last_ts(db: &Database, device_id: &str, provider: &str) -> Result<i64> {
-    let ts: Option<i64> = sqlx::query_scalar(
-        "SELECT last_ts FROM cursors WHERE device_id = ? AND provider = ?",
-    )
-    .bind(device_id)
-    .bind(provider)
-    .fetch_optional(&db.pool)
-    .await?;
-    Ok(ts.unwrap_or(0))
 }
 
 async fn handle_sync_batch(
@@ -227,11 +177,11 @@ async fn handle_sync_batch(
     user_id: &str,
     device_id: &str,
     provider: &str,
-    db: &Database,
+    db: &dyn DatabaseRepo,
     vm: &VictoriaMetrics,
 ) -> Result<i64> {
     if batch.items.is_empty() {
-        let current = get_last_ts(db, device_id, provider).await?;
+        let current = db.get_last_ts(device_id, provider).await?;
         return Ok(current);
     }
 
@@ -243,18 +193,7 @@ async fn handle_sync_batch(
 
     // VM write succeeded → advance cursor to max ts in this batch
     let max_ts = batch.items.iter().map(|i| i.ts_ms).max().unwrap_or(0);
-    let now    = chrono::Utc::now().timestamp();
-
-    sqlx::query(
-        "UPDATE cursors SET last_ts = MAX(last_ts, ?), updated_at = ?
-         WHERE device_id = ? AND provider = ?",
-    )
-    .bind(max_ts)
-    .bind(now)
-    .bind(device_id)
-    .bind(provider)
-    .execute(&db.pool)
-    .await?;
+    db.advance_cursor(device_id, provider, max_ts).await?;
 
     Ok(max_ts)
 }

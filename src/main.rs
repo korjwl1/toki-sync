@@ -7,12 +7,11 @@ mod sync;
 
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
-use std::path::Path;
 use std::sync::Arc;
 
 use crate::auth::{BruteForceGuard, JwtManager};
 use crate::config::Config;
-use crate::db::Database;
+use crate::db::{DatabaseRepo, open_database};
 use crate::metrics::VictoriaMetrics;
 use crate::server::{build_router, http::AppState, tcp::run_tcp_server};
 
@@ -21,7 +20,7 @@ async fn main() -> Result<()> {
     // Load config first (needed for log config)
     let config_path = std::env::var("TOKI_SYNC_CONFIG")
         .unwrap_or_else(|_| "./config.toml".to_string());
-    let config = Config::load_or_default(Path::new(&config_path))
+    let config = Config::load_or_default(std::path::Path::new(&config_path))
         .context("failed to load config")?;
 
     // Initialize tracing with config-driven level + format
@@ -35,14 +34,12 @@ async fn main() -> Result<()> {
     }
 
     // Open database
-    let db = Arc::new(
-        Database::open(&config.storage.db_path)
-            .await
-            .context("failed to open database")?,
-    );
+    let db = open_database(&config.storage)
+        .await
+        .context("failed to open database")?;
 
     // Ensure admin account exists (TOKI_ADMIN_PASSWORD env)
-    ensure_admin(&db).await?;
+    ensure_admin(&*db).await?;
 
     // Build shared state
     let jwt = Arc::new(JwtManager::new(
@@ -59,7 +56,7 @@ async fn main() -> Result<()> {
 
     let state = AppState { db, jwt, brute, vm, allow_registration: config.auth.allow_registration, access_token_ttl_secs: config.auth.access_token_ttl_secs };
 
-    // ── TCP sync server ─────────────────────────────────────────────────────
+    // -- TCP sync server ------------------------------------------------------
     let tcp_addr: SocketAddr = format!("{}:{}", config.server.bind, config.server.tcp_port)
         .parse()
         .context("invalid TCP bind address")?;
@@ -75,7 +72,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    // ── HTTP server ──────────────────────────────────────────────────────────
+    // -- HTTP server ----------------------------------------------------------
     let router = build_router(state).into_make_service_with_connect_info::<SocketAddr>();
 
     let http_addr: SocketAddr = format!("{}:{}", config.server.bind, config.server.http_port)
@@ -117,7 +114,7 @@ fn init_tracing(level: &str, json: bool) {
     }
 }
 
-async fn ensure_admin(db: &Database) -> Result<()> {
+async fn ensure_admin(db: &dyn DatabaseRepo) -> Result<()> {
     let admin_password = match std::env::var("TOKI_ADMIN_PASSWORD") {
         Ok(p) => p,
         Err(_) => {
@@ -126,12 +123,10 @@ async fn ensure_admin(db: &Database) -> Result<()> {
         }
     };
 
-    let exists: bool = sqlx::query_scalar("SELECT COUNT(*) > 0 FROM users WHERE username = 'admin'")
-        .fetch_one(&db.pool)
-        .await
+    let existing = db.get_user_by_username("admin").await
         .context("failed to check admin existence")?;
 
-    if exists {
+    if existing.is_some() {
         tracing::debug!("admin account already exists, skipping");
         return Ok(());
     }
@@ -144,20 +139,14 @@ async fn ensure_admin(db: &Database) -> Result<()> {
     .context("bcrypt task panicked")?
     .context("bcrypt hashing failed")?;
 
-    let id = uuid::Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().timestamp();
-
-    sqlx::query(
-        "INSERT INTO users (id, username, password_hash, role, created_at, updated_at)
-         VALUES (?, 'admin', ?, 'admin', ?, ?)",
-    )
-    .bind(&id)
-    .bind(&hash)
-    .bind(now)
-    .bind(now)
-    .execute(&db.pool)
-    .await
-    .context("failed to create admin user")?;
+    let new_user = db::models::NewUser {
+        id: uuid::Uuid::new_v4().to_string(),
+        username: "admin".to_string(),
+        password_hash: hash,
+        role: "admin".to_string(),
+    };
+    db.create_user(&new_user).await
+        .context("failed to create admin user")?;
 
     tracing::info!("admin account created");
     Ok(())

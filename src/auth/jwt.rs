@@ -4,7 +4,7 @@ use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::db::Database;
+use crate::db::DatabaseRepo;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Claims {
@@ -99,76 +99,36 @@ impl JwtManager {
     /// Rotate refresh token: revoke old jti, issue new access + refresh pair.
     pub async fn rotate(
         &self,
-        db: &Database,
+        db: &dyn DatabaseRepo,
         old_token: &str,
         device_id: Option<&str>,
     ) -> Result<(String, String)> {
         let claims = self.verify_refresh(old_token)?;
 
-        let mut tx = db.pool.begin().await.context("failed to begin transaction")?;
-
-        // Check not already revoked
-        let revoked: bool = sqlx::query_scalar(
-            "SELECT revoked FROM refresh_tokens WHERE jti = ?",
-        )
-        .bind(&claims.jti)
-        .fetch_optional(&mut *tx)
-        .await
-        .context("db error checking revocation")?
-        .unwrap_or(true); // not found → treat as revoked
-
-        if revoked {
-            tx.rollback().await.ok();
-            return Err(anyhow!("refresh token already used or revoked"));
-        }
-
-        // Revoke old token
-        sqlx::query("UPDATE refresh_tokens SET revoked = 1 WHERE jti = ?")
-            .bind(&claims.jti)
-            .execute(&mut *tx)
-            .await
-            .context("failed to revoke old refresh token")?;
-
         // Issue new pair
         let access = self.issue_access_token(&claims.sub)?;
         let (refresh, new_claims) = self.issue_refresh_token(&claims.sub, device_id)?;
 
-        // Store new refresh token
-        let now = Utc::now().timestamp();
-        sqlx::query(
-            "INSERT INTO refresh_tokens (jti, user_id, device_id, expires_at, revoked, created_at)
-             VALUES (?, ?, ?, ?, 0, ?)",
-        )
-        .bind(&new_claims.jti)
-        .bind(&new_claims.sub)
-        .bind(device_id)
-        .bind(new_claims.exp)
-        .bind(now)
-        .execute(&mut *tx)
-        .await
-        .context("failed to store new refresh token")?;
-
-        tx.commit().await.context("failed to commit rotation transaction")?;
+        // Atomically revoke old + store new
+        db.rotate_refresh_token(
+            &claims.jti,
+            &new_claims.jti,
+            &new_claims.sub,
+            device_id,
+            new_claims.exp,
+        ).await?;
 
         Ok((access, refresh))
     }
 
     /// Store a freshly issued refresh token in DB (called on first login).
-    pub async fn store_refresh_token(&self, db: &Database, claims: &Claims) -> Result<()> {
-        let now = Utc::now().timestamp();
-        sqlx::query(
-            "INSERT INTO refresh_tokens (jti, user_id, device_id, expires_at, revoked, created_at)
-             VALUES (?, ?, ?, ?, 0, ?)",
-        )
-        .bind(&claims.jti)
-        .bind(&claims.sub)
-        .bind(claims.did.as_deref())
-        .bind(claims.exp)
-        .bind(now)
-        .execute(&db.pool)
-        .await
-        .context("failed to store refresh token")?;
-        Ok(())
+    pub async fn store_refresh_token(&self, db: &dyn DatabaseRepo, claims: &Claims) -> Result<()> {
+        db.store_refresh_token(
+            &claims.jti,
+            &claims.sub,
+            claims.did.as_deref(),
+            claims.exp,
+        ).await
     }
 }
 
@@ -176,7 +136,7 @@ impl JwtManager {
 mod tests {
     use super::*;
     use tempfile::NamedTempFile;
-    use crate::db::Database;
+    use crate::db::sqlite::SqliteRepo;
 
     fn mgr() -> JwtManager {
         JwtManager::new("test-secret-key-1234567890abcdef", 3600, 86400 * 30)
@@ -231,7 +191,7 @@ mod tests {
         assert!(m.verify(&token).is_err());
     }
 
-    async fn insert_test_user(db: &Database, user_id: &str) {
+    async fn insert_test_user(db: &SqliteRepo, user_id: &str) {
         let now = chrono::Utc::now().timestamp();
         sqlx::query(
             "INSERT INTO users (id, username, password_hash, role, created_at, updated_at)
@@ -249,7 +209,7 @@ mod tests {
     #[tokio::test]
     async fn test_rotate_valid() {
         let tmp = NamedTempFile::new().unwrap();
-        let db = Database::open(tmp.path().to_str().unwrap()).await.unwrap();
+        let db = SqliteRepo::open(tmp.path().to_str().unwrap()).await.unwrap();
 
         insert_test_user(&db, "user-1").await;
 
@@ -261,7 +221,7 @@ mod tests {
         assert!(!new_access.is_empty());
         assert!(!new_refresh.is_empty());
 
-        // Old token should be revoked — reuse must fail
+        // Old token should be revoked -- reuse must fail
         let err = m.rotate(&db, &refresh, None).await;
         assert!(err.is_err(), "reuse of old refresh token must fail");
     }
@@ -269,12 +229,12 @@ mod tests {
     #[tokio::test]
     async fn test_rotate_not_stored_fails() {
         let tmp = NamedTempFile::new().unwrap();
-        let db = Database::open(tmp.path().to_str().unwrap()).await.unwrap();
+        let db = SqliteRepo::open(tmp.path().to_str().unwrap()).await.unwrap();
         insert_test_user(&db, "user-1").await;
 
         let m = mgr();
         let (refresh, _) = m.issue_refresh_token("user-1", None).unwrap();
-        // Not stored in DB → should fail
+        // Not stored in DB -> should fail
         let err = m.rotate(&db, &refresh, None).await;
         assert!(err.is_err());
     }
