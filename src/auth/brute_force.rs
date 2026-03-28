@@ -81,7 +81,17 @@ impl BruteForceGuard {
         if entry.count >= self.max_attempts {
             let until = now + self.lockout;
             entry.locked_until = Some(until);
+            let map_len = map.len();
+            drop(map);
+            if map_len > 10_000 {
+                self.sweep();
+            }
             return Err(self.lockout.as_secs());
+        }
+
+        if map.len() > 10_000 {
+            drop(map);
+            self.sweep();
         }
 
         Ok(())

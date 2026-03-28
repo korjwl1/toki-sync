@@ -1,7 +1,12 @@
+use std::io::Read;
+
 use anyhow::{Context, Result};
 use bytes::Bytes;
 
 use super::backend::{MetricBatch, MetricsBackend};
+
+/// Maximum VM query response size: 32 MiB.
+const MAX_VM_RESPONSE: u64 = 32 * 1024 * 1024;
 
 pub struct VictoriaMetrics {
     base_url: String,
@@ -61,6 +66,33 @@ impl VictoriaMetrics {
         }
         out
     }
+
+    /// Write pre-formatted Prometheus text directly to VM import endpoint.
+    /// This bypasses MetricPoint construction for the hot path.
+    pub async fn write_prometheus_text(&self, text: String) -> Result<()> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        let url = format!("{}/api/v1/import/prometheus", self.base_url);
+        let client = self.client.clone();
+
+        tokio::task::spawn_blocking(move || {
+            for attempt in 0..2u8 {
+                match client.post(&url).set("Content-Type", "text/plain").send_string(&text) {
+                    Ok(_) => return Ok(()),
+                    Err(e) if attempt == 0 => {
+                        tracing::warn!("VM write_prometheus_text attempt 1 failed, retrying: {e}");
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        continue;
+                    }
+                    Err(e) => return Err(anyhow::anyhow!("VM write_prometheus_text failed: {e}")),
+                }
+            }
+            unreachable!()
+        })
+        .await
+        .context("spawn_blocking panicked")?
+    }
 }
 
 impl MetricsBackend for VictoriaMetrics {
@@ -71,20 +103,24 @@ impl MetricsBackend for VictoriaMetrics {
         let body = Self::format_prometheus_text(batch);
         let url = format!("{}/api/v1/import/prometheus", self.base_url);
 
-        let base_url = self.base_url.clone();
         let client = self.client.clone();
 
         tokio::task::spawn_blocking(move || {
-            client
-                .post(&url)
-                .set("Content-Type", "text/plain")
-                .send_string(&body)
-                .with_context(|| format!("VM write_batch failed: {base_url}"))
+            for attempt in 0..2u8 {
+                match client.post(&url).set("Content-Type", "text/plain").send_string(&body) {
+                    Ok(_) => return Ok(()),
+                    Err(e) if attempt == 0 => {
+                        tracing::warn!("VM write_batch attempt 1 failed, retrying: {e}");
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        continue;
+                    }
+                    Err(e) => return Err(anyhow::anyhow!("VM write_batch failed: {e}")),
+                }
+            }
+            unreachable!()
         })
         .await
-        .context("spawn_blocking panicked")??;
-
-        Ok(())
+        .context("spawn_blocking panicked")?
     }
 
     async fn query(&self, expr: &str, time: Option<i64>) -> Result<Bytes> {
@@ -103,7 +139,7 @@ impl MetricsBackend for VictoriaMetrics {
                 .call()
                 .with_context(|| format!("VM query failed: {base_url}"))?;
             let mut buf = Vec::new();
-            resp.into_reader().read_to_end(&mut buf)
+            resp.into_reader().take(MAX_VM_RESPONSE).read_to_end(&mut buf)
                 .context("reading VM response")?;
             Ok(buf)
         })
@@ -131,7 +167,7 @@ impl MetricsBackend for VictoriaMetrics {
                 .call()
                 .with_context(|| format!("VM query_range failed: {base_url}"))?;
             let mut buf = Vec::new();
-            resp.into_reader().read_to_end(&mut buf)
+            resp.into_reader().take(MAX_VM_RESPONSE).read_to_end(&mut buf)
                 .context("reading VM response")?;
             Ok(buf)
         })

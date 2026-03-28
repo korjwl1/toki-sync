@@ -1,136 +1,23 @@
 /// toki-sync server-side binary protocol.
 ///
-/// Frame format (all integers little-endian):
-///   [4B msg_type: u32][4B payload_len: u32][payload bytes]
-///
-/// Must stay binary-compatible with toki/src/sync/protocol.rs.
-use std::collections::HashMap;
-use std::io;
+/// Wire types are defined in the shared `toki-sync-protocol` crate.
+/// This module provides asynchronous (tokio::io) frame I/O.
 
-use serde::{Deserialize, Serialize};
+use std::io;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-/// Schema version the server expects. Clients must match.
-pub const SCHEMA_VERSION: u32 = 2;
+// Re-export all shared types so existing imports continue to work.
+// Re-export all shared types. Some may only be used transitively by downstream
+// modules, so suppress unused-import warnings.
+#[allow(unused_imports)]
+pub use toki_sync_protocol::{
+    MsgType, AuthPayload, AuthOkPayload, AuthErrPayload,
+    GetLastTsPayload, LastTsPayload,
+    StoredEvent, SyncItem, SyncBatchPayload, SyncAckPayload, SyncErrPayload,
+    PROTOCOL_VERSION, MAX_PAYLOAD_SIZE, SCHEMA_VERSION,
+};
 
-/// Current sync protocol version. Clients must send this in AUTH.
-pub const PROTOCOL_VERSION: u16 = 1;
-
-/// Max payload: 16 MiB
-pub const MAX_PAYLOAD_SIZE: u32 = 16 * 1024 * 1024;
-
-/// Message type discriminants.
-/// Values are hex-grouped by category: 0x01-0x03 auth, 0x10-0x11 cursor,
-/// 0x20-0x22 batch, 0x30-0x31 keepalive.
-#[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MsgType {
-    Auth      = 0x01,
-    AuthOk    = 0x02,
-    AuthErr   = 0x03,
-    GetLastTs = 0x10,
-    LastTs    = 0x11,
-    SyncBatch     = 0x20,
-    SyncAck       = 0x21,
-    SyncErr       = 0x22,
-    SyncBatchZstd = 0x23,
-    Ping          = 0x30,
-    Pong      = 0x31,
-}
-
-impl MsgType {
-    pub fn from_u32(v: u32) -> Option<Self> {
-        match v {
-            0x01 => Some(Self::Auth),
-            0x02 => Some(Self::AuthOk),
-            0x03 => Some(Self::AuthErr),
-            0x10 => Some(Self::GetLastTs),
-            0x11 => Some(Self::LastTs),
-            0x20 => Some(Self::SyncBatch),
-            0x21 => Some(Self::SyncAck),
-            0x22 => Some(Self::SyncErr),
-            0x23 => Some(Self::SyncBatchZstd),
-            0x30 => Some(Self::Ping),
-            0x31 => Some(Self::Pong),
-            _    => None,
-        }
-    }
-}
-
-// ─── Payload types (must match toki client bincode layout exactly) ─────────────
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct AuthPayload {
-    pub jwt: String,
-    pub device_name: String,
-    pub schema_version: u32,
-    pub provider: String,
-    /// Stable UUID generated on the client at `toki sync enable`.
-    /// Used for device lookup instead of (user_id, name) to survive renames.
-    pub device_key: String,
-    /// Sync protocol version. Server rejects unsupported versions.
-    pub protocol_version: u16,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct AuthOkPayload {
-    pub device_id: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct AuthErrPayload {
-    pub reason: String,
-    pub reset_required: bool,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct LastTsPayload {
-    pub ts_ms: i64,
-}
-
-/// Must match toki::common::types::StoredEvent field layout and types exactly.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoredEvent {
-    pub model_id: u32,
-    pub session_id: u32,
-    pub source_file_id: u32,
-    pub project_name_id: u32,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cache_creation_input_tokens: u64,
-    pub cache_read_input_tokens: u64,
-}
-
-/// Payload for GET_LAST_TS: specifies which provider's cursor to query.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct GetLastTsPayload {
-    pub provider: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SyncItem {
-    pub ts_ms: i64,
-    pub event: StoredEvent,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SyncBatchPayload {
-    pub items: Vec<SyncItem>,
-    pub dict: HashMap<u32, String>,
-    pub provider: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SyncAckPayload {
-    pub last_ts_ms: i64,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SyncErrPayload {
-    pub reason: String,
-}
-
-// ─── Async frame I/O ─────────────────────────────────────────────────────────
+// ─── Async frame I/O ───────────────────────────────────────────────────────
 
 /// Write a frame: [msg_type: u32 LE][payload_len: u32 LE][payload]
 pub async fn write_frame<W>(w: &mut W, msg_type: MsgType, payload: &[u8]) -> io::Result<()>
@@ -202,7 +89,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_frame_max_payload_rejected() {
-        // Build a frame header claiming MAX_PAYLOAD_SIZE + 1 bytes
         let oversized = MAX_PAYLOAD_SIZE + 1;
         let raw = make_raw_frame(MsgType::Ping as u32, oversized);
         let mut cursor = std::io::Cursor::new(raw);
@@ -213,12 +99,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_frame_exactly_max_payload_accepted() {
-        // Build a frame with exactly MAX_PAYLOAD_SIZE bytes — should not be rejected by size check
-        // (it would fail on read_exact since we only provide 8-byte header, but size guard passes)
         let raw = make_raw_frame(MsgType::Ping as u32, MAX_PAYLOAD_SIZE);
         let mut cursor = std::io::Cursor::new(raw);
-        // read_exact of MAX_PAYLOAD_SIZE bytes will fail with UnexpectedEof (only header provided)
-        // but the important thing is it's NOT InvalidData from the size guard
         let result = read_frame(&mut cursor).await;
         assert!(result.is_err());
         assert_ne!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);

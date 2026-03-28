@@ -7,7 +7,6 @@ use tokio::net::TcpStream;
 use crate::auth::JwtManager;
 use crate::db::DatabaseRepo;
 use crate::metrics::backend::MetricPoint;
-use crate::metrics::backend::MetricsBackend;
 use crate::metrics::VictoriaMetrics;
 use super::protocol::*;
 
@@ -195,11 +194,11 @@ async fn handle_sync_batch(
         return Ok(current);
     }
 
-    // Build VM metric points from batch
-    let points = build_metric_points(batch, user_id, device_id, provider);
+    // Build Prometheus text directly (avoids intermediate MetricPoint allocations)
+    let prom_text = build_prometheus_text(batch, user_id, device_id, provider);
 
     // Write to VM first — cursor MUST NOT advance on failure
-    vm.write_batch(&points).await?;
+    vm.write_prometheus_text(prom_text).await?;
 
     // VM write succeeded → advance cursor to max ts in this batch
     let max_ts = batch.items.iter().map(|i| i.ts_ms).max().unwrap_or(0);
@@ -223,8 +222,57 @@ fn escape_prom_value(s: &str) -> String {
     out
 }
 
-// ─── Metric point builder ─────────────────────────────────────────────────────
+// ─── Direct Prometheus text builder (avoids MetricPoint allocations) ──────────
 
+fn build_prometheus_text(
+    batch: &SyncBatchPayload,
+    user_id: &str,
+    device_id: &str,
+    provider: &str,
+) -> String {
+    use std::fmt::Write;
+
+    let empty = String::new();
+    let esc_provider = escape_prom_value(provider);
+    let esc_user = escape_prom_value(user_id);
+    let esc_device = escape_prom_value(device_id);
+
+    let mut out = String::with_capacity(batch.items.len() * 200);
+
+    for item in &batch.items {
+        let model = escape_prom_value(batch.dict.get(&item.event.model_id).unwrap_or(&empty));
+        let session = escape_prom_value(batch.dict.get(&item.event.session_id).unwrap_or(&empty));
+        let project = batch.dict
+            .get(&item.event.project_name_id)
+            .filter(|s| !s.is_empty())
+            .map(|s| escape_prom_value(s))
+            .unwrap_or_default();
+
+        let token_types: [(u64, &str); 4] = [
+            (item.event.input_tokens, "input"),
+            (item.event.output_tokens, "output"),
+            (item.event.cache_creation_input_tokens, "cache_create"),
+            (item.event.cache_read_input_tokens, "cache_read"),
+        ];
+
+        for (count, type_label) in &token_types {
+            if *count == 0 {
+                continue;
+            }
+            write!(
+                out,
+                "toki_tokens_total{{model=\"{model}\",session=\"{session}\",provider=\"{esc_provider}\",user=\"{esc_user}\",device=\"{esc_device}\",project=\"{project}\",type=\"{type_label}\"}} {count} {ts}\n",
+                count = count,
+                ts = item.ts_ms,
+            )
+            .unwrap();
+        }
+    }
+    out
+}
+
+/// Legacy structured metric point builder (kept for potential use by other backends).
+#[allow(dead_code)]
 fn build_metric_points(
     batch: &SyncBatchPayload,
     user_id: &str,
@@ -234,7 +282,6 @@ fn build_metric_points(
     let empty = String::new();
     let mut points = Vec::with_capacity(batch.items.len() * 4);
 
-    // Pre-escape values that are constant across the entire batch
     let esc_provider  = escape_prom_value(provider);
     let esc_user_id   = escape_prom_value(user_id);
     let esc_device_id = escape_prom_value(device_id);
@@ -269,7 +316,6 @@ fn build_metric_points(
         for (count, type_label) in &token_types {
             if *count == 0 { continue; }
             let mut labels = base.clone();
-            // type_label is static known-safe ASCII — no escaping needed
             labels.push(("type".into(), type_label.to_string()));
             points.push(MetricPoint {
                 name: "toki_tokens_total".to_string(),
@@ -377,5 +423,37 @@ mod tests {
         let batch  = make_batch(vec![]);
         let points = build_metric_points(&batch, "user-1", "device-1", "claude_code");
         assert!(points.is_empty());
+    }
+
+    #[test]
+    fn test_build_prometheus_text_basic() {
+        let item = SyncItem {
+            ts_ms: 1_700_000_000_000,
+            event: StoredEvent {
+                model_id:   1,
+                session_id: 2,
+                source_file_id:  3,
+                project_name_id: 4,
+                input_tokens:  100,
+                output_tokens: 50,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens:     0,
+            },
+        };
+        let batch = make_batch(vec![item]);
+        let text = build_prometheus_text(&batch, "user-1", "device-1", "claude_code");
+        let lines: Vec<&str> = text.trim().lines().collect();
+        assert_eq!(lines.len(), 2, "input + output only (cache=0 skipped)");
+        assert!(lines[0].contains("type=\"input\""));
+        assert!(lines[0].contains("100"));
+        assert!(lines[1].contains("type=\"output\""));
+        assert!(lines[1].contains("50"));
+    }
+
+    #[test]
+    fn test_build_prometheus_text_empty() {
+        let batch = make_batch(vec![]);
+        let text = build_prometheus_text(&batch, "user-1", "device-1", "claude_code");
+        assert!(text.is_empty());
     }
 }

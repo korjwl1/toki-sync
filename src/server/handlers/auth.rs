@@ -7,23 +7,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
-use super::super::http::{AppError, AppState, extract_client_ip, get_oidc_discovery};
-
-fn validate_username(username: &str) -> Result<(), AppError> {
-    if username.len() < 3 || username.len() > 32 {
-        return Err(AppError {
-            status: StatusCode::UNPROCESSABLE_ENTITY,
-            message: "username must be 3-32 characters".into(),
-        });
-    }
-    if !username.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.') {
-        return Err(AppError {
-            status: StatusCode::UNPROCESSABLE_ENTITY,
-            message: "username may only contain letters, digits, _, -, .".into(),
-        });
-    }
-    Ok(())
-}
+use super::super::http::{AppError, AppState, extract_client_ip, get_oidc_discovery, validate_username};
 
 // ─── /health ────────────────────────────────────────────────────────────────
 

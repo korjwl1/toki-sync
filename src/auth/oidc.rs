@@ -455,54 +455,19 @@ async fn fetch_userinfo(access_token: &str, userinfo_endpoint: &str, client: &re
     })
 }
 
-/// Minimal base64 URL-safe decoder (no-padding).
+/// Base64 URL-safe decoder using the `base64` crate.
 mod base64_decode {
-    use anyhow::{anyhow, Result};
+    use anyhow::{Context, Result};
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 
     pub fn decode_url_safe(input: &str) -> Result<Vec<u8>> {
-        // Convert URL-safe base64 to standard base64
-        let standard: String = input.chars().map(|c| match c {
-            '-' => '+',
-            '_' => '/',
-            c => c,
-        }).collect();
-
-        // Add padding if needed
-        let padded = match standard.len() % 4 {
-            2 => format!("{standard}=="),
-            3 => format!("{standard}="),
-            0 => standard,
-            _ => return Err(anyhow!("invalid base64 length")),
-        };
-
-        // Decode using a simple implementation
-        decode_standard(&padded)
-    }
-
-    fn decode_standard(input: &str) -> Result<Vec<u8>> {
-        let mut output = Vec::with_capacity(input.len() * 3 / 4);
-        let mut buf: u32 = 0;
-        let mut bits: u32 = 0;
-
-        for c in input.chars() {
-            if c == '=' { break; }
-            let val = match c {
-                'A'..='Z' => (c as u32) - ('A' as u32),
-                'a'..='z' => (c as u32) - ('a' as u32) + 26,
-                '0'..='9' => (c as u32) - ('0' as u32) + 52,
-                '+' => 62,
-                '/' => 63,
-                _ => return Err(anyhow!("invalid base64 char: {c}")),
-            };
-            buf = (buf << 6) | val;
-            bits += 6;
-            if bits >= 8 {
-                bits -= 8;
-                output.push((buf >> bits) as u8);
-                buf &= (1 << bits) - 1;
-            }
-        }
-
-        Ok(output)
+        URL_SAFE_NO_PAD
+            .decode(input)
+            .or_else(|_| {
+                // Retry with padding added (some providers include trailing '=')
+                let padded = format!("{}{}", input, "=".repeat((4 - input.len() % 4) % 4));
+                URL_SAFE_NO_PAD.decode(&padded)
+            })
+            .context("base64 URL-safe decode failed")
     }
 }

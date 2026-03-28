@@ -2371,6 +2371,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "base64",
  "bcrypt",
  "bincode",
  "bytes",
@@ -2383,6 +2384,7 @@ dependencies = [
  "sqlx",
  "tempfile",
  "thiserror 1.0.69",
+ "toki-sync-protocol",
  "tokio",
  "tokio-test",
  "toml",
@@ -2394,6 +2396,13 @@ dependencies = [
  "urlencoding",
  "uuid",
  "zstd",
+]
+
+[[package]]
+name = "toki-sync-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

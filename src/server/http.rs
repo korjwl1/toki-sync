@@ -100,6 +100,25 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
+// ─── Shared validation helpers ──────────────────────────────────────────────
+
+/// Validate a username: 3-32 chars, alphanumeric + `_`, `-`, `.` only.
+pub fn validate_username(username: &str) -> Result<(), AppError> {
+    if username.len() < 3 || username.len() > 32 {
+        return Err(AppError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            message: "username must be 3-32 characters".into(),
+        });
+    }
+    if !username.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.') {
+        return Err(AppError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            message: "username may only contain letters, digits, _, -, .".into(),
+        });
+    }
+    Ok(())
+}
+
 // ─── Client IP extraction ───────────────────────────────────────────────────
 
 /// Extract the real client IP from X-Forwarded-For header (last entry, proxy-added),
