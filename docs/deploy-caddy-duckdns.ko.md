@@ -118,6 +118,14 @@ toki settings sync devices
 
 동기화하려는 모든 기기에서 반복합니다.
 
+디바이스 연결을 해제하려면:
+
+```bash
+toki settings sync disable              # 원격 데이터 삭제 여부를 묻습니다
+toki settings sync disable --delete     # 서버에서 이 디바이스의 데이터를 삭제합니다
+toki settings sync disable --keep       # 원격 데이터를 유지하고 로컬에서만 비활성화합니다
+```
+
 ---
 
 ## 이후 동작

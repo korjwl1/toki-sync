@@ -48,6 +48,14 @@ toki settings sync enable --server myserver.duckdns.org:9090 --username admin
 
 Done. Token usage now syncs automatically.
 
+To disconnect later:
+
+```bash
+toki settings sync disable              # Prompts to delete remote data
+toki settings sync disable --delete     # Delete this device's data from server
+toki settings sync disable --keep       # Keep remote data, only disable locally
+```
+
 > First time with DuckDNS? The [Caddy + DuckDNS guide](docs/deploy-caddy-duckdns.md) walks you through every step from signup to verification.
 
 ---

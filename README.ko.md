@@ -48,6 +48,14 @@ toki settings sync enable --server myserver.duckdns.org:9090 --username admin
 
 완료. 토큰 사용량이 자동으로 동기화됩니다.
 
+연결을 해제하려면:
+
+```bash
+toki settings sync disable              # 원격 데이터 삭제 여부를 묻습니다
+toki settings sync disable --delete     # 서버에서 이 디바이스의 데이터를 삭제합니다
+toki settings sync disable --keep       # 원격 데이터를 유지하고 로컬에서만 비활성화합니다
+```
+
 > DuckDNS가 처음이신가요? [Caddy + DuckDNS 가이드](docs/deploy-caddy-duckdns.ko.md)에서 가입부터 검증까지 모든 단계를 안내합니다.
 
 ---

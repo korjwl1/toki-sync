@@ -118,6 +118,14 @@ toki settings sync devices
 
 Repeat on each machine you want to sync.
 
+To disconnect a device later:
+
+```bash
+toki settings sync disable              # Prompts to delete remote data
+toki settings sync disable --delete     # Delete this device's data from server
+toki settings sync disable --keep       # Keep remote data, only disable locally
+```
+
 ---
 
 ## What happens next
