@@ -11,7 +11,7 @@ use crate::auth::{BruteForceGuard, JwtManager};
 use crate::db::DatabaseRepo;
 use crate::metrics::vm::VictoriaMetrics;
 
-use super::handlers::{admin, auth, me, metrics};
+use super::handlers::{admin, auth, dashboard, me, metrics};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -25,10 +25,13 @@ pub struct AppState {
 
 pub fn build_router(state: AppState) -> Router {
     Router::new()
+        // Dashboard (public HTML pages)
+        .route("/", get(dashboard::dashboard_redirect))
+        .route("/dashboard", get(dashboard::dashboard_page))
         // Public
         .route("/health", get(auth::health))
         .route("/auth-method", post(auth::auth_method))
-        .route("/login", post(auth::login))
+        .route("/login", get(dashboard::login_page).post(auth::login))
         .route("/register", post(auth::register))
         .route("/token/refresh", post(auth::token_refresh))
         // PromQL proxy (requires JWT)

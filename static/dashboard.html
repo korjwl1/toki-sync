@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>toki-sync Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
+    background: #0d1117;
+    color: #c9d1d9;
+    min-height: 100vh;
+  }
+
+  /* ── Header ────────────────────────────────────────────────────────────── */
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 24px;
+    border-bottom: 1px solid #21262d;
+    background: #161b22;
+  }
+  .header h1 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #e6edf3;
+  }
+  .header-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .time-range-btn {
+    padding: 5px 12px;
+    background: #21262d;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    color: #8b949e;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .time-range-btn:hover { color: #c9d1d9; border-color: #484f58; }
+  .time-range-btn.active {
+    background: #1f6feb;
+    border-color: #1f6feb;
+    color: #fff;
+  }
+  .status-indicator {
+    font-size: 0.75rem;
+    color: #8b949e;
+  }
+  .status-indicator .dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #3fb950;
+    margin-right: 4px;
+    vertical-align: middle;
+  }
+  .logout-btn {
+    padding: 5px 12px;
+    background: transparent;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    color: #8b949e;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .logout-btn:hover { color: #f85149; border-color: #f85149; }
+
+  /* ── Grid ──────────────────────────────────────────────────────────────── */
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    padding: 24px;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+  @media (max-width: 900px) {
+    .grid { grid-template-columns: 1fr; }
+  }
+
+  /* ── Panel ─────────────────────────────────────────────────────────────── */
+  .panel {
+    background: #161b22;
+    border: 1px solid #21262d;
+    border-radius: 8px;
+    padding: 20px;
+  }
+  .panel h2 {
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: #8b949e;
+    margin-bottom: 16px;
+  }
+  .panel canvas {
+    width: 100% !important;
+    max-height: 280px;
+  }
+  .panel .no-data {
+    text-align: center;
+    color: #484f58;
+    font-size: 0.85rem;
+    padding: 60px 0;
+  }
+
+  /* ── Loading ───────────────────────────────────────────────────────────── */
+  .loading-overlay {
+    position: fixed;
+    inset: 0;
+    background: #0d1117ee;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    font-size: 0.95rem;
+    color: #8b949e;
+  }
+</style>
+</head>
+<body>
+
+<div id="loading" class="loading-overlay">Loading dashboard...</div>
+
+<div class="header">
+  <h1>toki-sync</h1>
+  <div class="header-controls">
+    <button class="time-range-btn active" data-range="3600">1h</button>
+    <button class="time-range-btn" data-range="21600">6h</button>
+    <button class="time-range-btn" data-range="86400">24h</button>
+    <button class="time-range-btn" data-range="604800">7d</button>
+    <button class="time-range-btn" data-range="2592000">30d</button>
+    <span class="status-indicator"><span class="dot"></span><span id="refresh-status">auto-refresh 60s</span></span>
+    <button class="logout-btn" id="logout-btn">Logout</button>
+  </div>
+</div>
+
+<div class="grid">
+  <div class="panel">
+    <h2>Total Tokens Over Time</h2>
+    <canvas id="chart-total"></canvas>
+  </div>
+  <div class="panel">
+    <h2>Tokens by Model</h2>
+    <canvas id="chart-model"></canvas>
+  </div>
+  <div class="panel">
+    <h2>Tokens by Device</h2>
+    <canvas id="chart-device"></canvas>
+  </div>
+  <div class="panel">
+    <h2>Tokens by Type</h2>
+    <canvas id="chart-type"></canvas>
+  </div>
+</div>
+
+<script>
+(function() {
+  'use strict';
+
+  // ── Auth helpers ─────────────────────────────────────────────────────────
+
+  function getToken() { return localStorage.getItem('access_token'); }
+
+  function logout() {
+    localStorage.removeItem('access_token');
+    localStorage.removeItem('refresh_token');
+    localStorage.removeItem('expires_in');
+    window.location.href = '/login';
+  }
+
+  if (!getToken()) { window.location.href = '/login'; return; }
+
+  async function refreshAccessToken() {
+    const rt = localStorage.getItem('refresh_token');
+    if (!rt) { logout(); return null; }
+    try {
+      const resp = await fetch('/token/refresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: rt }),
+      });
+      if (!resp.ok) { logout(); return null; }
+      const data = await resp.json();
+      localStorage.setItem('access_token', data.access_token);
+      localStorage.setItem('refresh_token', data.refresh_token);
+      localStorage.setItem('expires_in', String(data.expires_in));
+      return data.access_token;
+    } catch { logout(); return null; }
+  }
+
+  async function authFetch(url) {
+    let token = getToken();
+    let resp = await fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
+    if (resp.status === 401) {
+      token = await refreshAccessToken();
+      if (!token) return null;
+      resp = await fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
+    }
+    if (!resp.ok) return null;
+    return resp.json();
+  }
+
+  // ── Chart.js defaults ───────────────────────────────────────────────────
+
+  Chart.defaults.color = '#8b949e';
+  Chart.defaults.borderColor = '#21262d';
+  Chart.defaults.font.family = '-apple-system, BlinkMacSystemFont, monospace';
+  Chart.defaults.font.size = 11;
+
+  const COLORS = [
+    '#58a6ff', '#3fb950', '#d2a8ff', '#f0883e',
+    '#f778ba', '#a5d6ff', '#7ee787', '#d29922',
+    '#ff7b72', '#79c0ff', '#56d364', '#e3b341',
+  ];
+
+  // ── State ───────────────────────────────────────────────────────────────
+
+  let currentRange = 3600;  // seconds
+  let charts = {};
+  let refreshTimer = null;
+
+  // ── Step size for range ─────────────────────────────────────────────────
+
+  function stepForRange(rangeSecs) {
+    if (rangeSecs <= 3600)   return '60s';
+    if (rangeSecs <= 21600)  return '300s';
+    if (rangeSecs <= 86400)  return '900s';
+    if (rangeSecs <= 604800) return '3600s';
+    return '14400s';
+  }
+
+  // ── Query helper ────────────────────────────────────────────────────────
+
+  function promqlRangeStep(rangeSecs) {
+    // PromQL range for increase() -- should be >= 2x step to avoid gaps
+    const step = stepForRange(rangeSecs);
+    const stepNum = parseInt(step);
+    return String(stepNum * 2) + 's';
+  }
+
+  async function queryRange(expr, rangeSecs) {
+    const now = Math.floor(Date.now() / 1000);
+    const start = now - rangeSecs;
+    const step = stepForRange(rangeSecs);
+    const url = '/api/v1/query_range?query=' + encodeURIComponent(expr)
+      + '&start=' + start + '&end=' + now + '&step=' + step;
+    return authFetch(url);
+  }
+
+  // ── Format timestamp ───────────────────────────────────────────────────
+
+  function formatTime(epoch, rangeSecs) {
+    const d = new Date(epoch * 1000);
+    if (rangeSecs <= 86400) {
+      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
+    return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+      + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+
+  // ── Build / update charts ──────────────────────────────────────────────
+
+  function createOrUpdateChart(canvasId, type, labels, datasets, rangeSecs) {
+    const ctx = document.getElementById(canvasId);
+    if (charts[canvasId]) {
+      charts[canvasId].destroy();
+    }
+
+    const formattedLabels = labels.map(t => formatTime(t, rangeSecs));
+
+    charts[canvasId] = new Chart(ctx, {
+      type: type,
+      data: { labels: formattedLabels, datasets: datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: {
+            display: datasets.length > 1,
+            position: 'bottom',
+            labels: { boxWidth: 12, padding: 12 },
+          },
+          tooltip: {
+            backgroundColor: '#1c2128',
+            borderColor: '#30363d',
+            borderWidth: 1,
+            titleColor: '#e6edf3',
+            bodyColor: '#c9d1d9',
+          },
+        },
+        scales: {
+          x: {
+            grid: { color: '#21262d' },
+            ticks: { maxRotation: 0, maxTicksLimit: 8 },
+          },
+          y: {
+            beginAtZero: true,
+            grid: { color: '#21262d' },
+            ticks: {
+              callback: function(v) {
+                if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+                if (v >= 1e3) return (v / 1e3).toFixed(1) + 'K';
+                return v;
+              }
+            },
+          },
+        },
+      },
+    });
+  }
+
+  // ── Parse Prometheus response ──────────────────────────────────────────
+
+  function parseMatrix(data) {
+    // data.data.result is an array of { metric: {...}, values: [[ts, val], ...] }
+    if (!data || !data.data || !data.data.result) return { labels: [], series: [] };
+    const result = data.data.result;
+    if (result.length === 0) return { labels: [], series: [] };
+
+    // Collect all unique timestamps across all series
+    const tsSet = new Set();
+    for (const s of result) {
+      for (const [ts] of s.values) { tsSet.add(ts); }
+    }
+    const labels = Array.from(tsSet).sort((a, b) => a - b);
+    const tsIndex = {};
+    labels.forEach((t, i) => tsIndex[t] = i);
+
+    const series = result.map(s => {
+      const values = new Array(labels.length).fill(null);
+      for (const [ts, val] of s.values) {
+        const v = parseFloat(val);
+        values[tsIndex[ts]] = isNaN(v) ? 0 : v;
+      }
+      return { metric: s.metric, values };
+    });
+
+    return { labels, series };
+  }
+
+  // ── Panel queries ─────────────────────────────────────────────────────
+
+  async function refreshAllPanels() {
+    const rangeStep = promqlRangeStep(currentRange);
+
+    const queries = [
+      { id: 'chart-total',  expr: 'sum(increase(toki_tokens_total[' + rangeStep + ']))' },
+      { id: 'chart-model',  expr: 'sum by (model)(increase(toki_tokens_total[' + rangeStep + ']))' },
+      { id: 'chart-device', expr: 'sum by (device)(increase(toki_tokens_total[' + rangeStep + ']))' },
+      { id: 'chart-type',   expr: 'sum by (type)(increase(toki_tokens_total[' + rangeStep + ']))' },
+    ];
+
+    const results = await Promise.all(queries.map(q => queryRange(q.expr, currentRange)));
+
+    for (let i = 0; i < queries.length; i++) {
+      const q = queries[i];
+      const { labels, series } = parseMatrix(results[i]);
+
+      if (labels.length === 0) {
+        // Show no-data
+        if (charts[q.id]) { charts[q.id].destroy(); delete charts[q.id]; }
+        const canvas = document.getElementById(q.id);
+        const parent = canvas.parentElement;
+        let noData = parent.querySelector('.no-data');
+        if (!noData) {
+          canvas.style.display = 'none';
+          noData = document.createElement('div');
+          noData.className = 'no-data';
+          noData.textContent = 'No data for this time range';
+          parent.appendChild(noData);
+        }
+        continue;
+      }
+
+      // Ensure canvas is visible
+      const canvas = document.getElementById(q.id);
+      canvas.style.display = '';
+      const noData = canvas.parentElement.querySelector('.no-data');
+      if (noData) noData.remove();
+
+      const labelKey = q.id === 'chart-model' ? 'model'
+        : q.id === 'chart-device' ? 'device'
+        : q.id === 'chart-type' ? 'type'
+        : null;
+
+      const datasets = series.map((s, idx) => {
+        const name = labelKey ? (s.metric[labelKey] || 'unknown') : 'Total';
+        return {
+          label: name,
+          data: s.values,
+          borderColor: COLORS[idx % COLORS.length],
+          backgroundColor: COLORS[idx % COLORS.length] + '20',
+          borderWidth: 2,
+          pointRadius: 0,
+          pointHitRadius: 8,
+          fill: series.length === 1,
+          tension: 0.3,
+        };
+      });
+
+      const chartType = q.id === 'chart-total' ? 'line' : 'line';
+      createOrUpdateChart(q.id, chartType, labels, datasets, currentRange);
+    }
+
+    // Update status
+    document.getElementById('refresh-status').textContent =
+      'updated ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  }
+
+  // ── Time range buttons ─────────────────────────────────────────────────
+
+  document.querySelectorAll('.time-range-btn').forEach(btn => {
+    btn.addEventListener('click', function() {
+      document.querySelectorAll('.time-range-btn').forEach(b => b.classList.remove('active'));
+      this.classList.add('active');
+      currentRange = parseInt(this.dataset.range);
+      refreshAllPanels();
+    });
+  });
+
+  // ── Logout ─────────────────────────────────────────────────────────────
+
+  document.getElementById('logout-btn').addEventListener('click', logout);
+
+  // ── Auto-refresh ──────────────────────────────────────────────────────
+
+  function startAutoRefresh() {
+    if (refreshTimer) clearInterval(refreshTimer);
+    refreshTimer = setInterval(refreshAllPanels, 60000);
+  }
+
+  // ── Init ──────────────────────────────────────────────────────────────
+
+  async function init() {
+    await refreshAllPanels();
+    document.getElementById('loading').style.display = 'none';
+    startAutoRefresh();
+  }
+
+  init();
+})();
+</script>
+</body>
+</html>
