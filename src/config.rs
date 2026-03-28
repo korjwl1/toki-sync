@@ -55,6 +55,9 @@ pub struct AuthConfig {
     pub brute_force_window_secs: u64,
     #[serde(default = "default_brute_lockout")]
     pub brute_force_lockout_secs: u64,
+    /// Allow open self-registration via POST /register. Default: false (admin-only).
+    #[serde(default)]
+    pub allow_registration: bool,
 }
 
 fn default_access_ttl() -> u64 { 3600 }         // 1h
@@ -139,6 +142,7 @@ impl Config {
                     brute_force_max_attempts: default_brute_max_attempts(),
                     brute_force_window_secs: default_brute_window(),
                     brute_force_lockout_secs: default_brute_lockout(),
+                    allow_registration: false,
                 },
                 backend: BackendConfig::default(),
                 storage: StorageConfig::default(),

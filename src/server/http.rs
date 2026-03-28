@@ -20,6 +20,7 @@ pub struct AppState {
     pub jwt: Arc<JwtManager>,
     pub brute: Arc<BruteForceGuard>,
     pub vm: Arc<VictoriaMetrics>,
+    pub allow_registration: bool,
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -28,12 +29,14 @@ pub fn build_router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/auth-method", post(auth_method))
         .route("/login", post(login))
+        .route("/register", post(register))
         .route("/token/refresh", post(token_refresh))
         // PromQL proxy (requires JWT)
         .route("/api/v1/query", get(promql_query))
         .route("/api/v1/query_range", get(promql_query_range))
         // User self-service
         .route("/me/devices", get(me_devices))
+        .route("/me/devices/:device_id/name", axum::routing::patch(me_rename_device))
         .route("/me/password", put(me_change_password))
         // Admin
         .route("/admin/users", get(admin_list_users).post(admin_create_user))
@@ -422,6 +425,54 @@ pub fn inject_user_label(expr: &str, user_id: &str) -> String {
     result
 }
 
+// ─── /register ──────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct RegisterRequest {
+    username: String,
+    password: String,
+}
+
+async fn register(
+    ConnectInfo(_addr): ConnectInfo<SocketAddr>,
+    State(state): State<AppState>,
+    Json(body): Json<RegisterRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    if !state.allow_registration {
+        return Err(AppError { status: StatusCode::FORBIDDEN, message: "registration is disabled".into() });
+    }
+
+    let pw = body.password.clone();
+    let hash = tokio::task::spawn_blocking(move || bcrypt::hash(&pw, bcrypt::DEFAULT_COST))
+        .await
+        .map_err(AppError::internal)?
+        .map_err(AppError::internal)?;
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().timestamp();
+
+    sqlx::query(
+        "INSERT INTO users (id, username, password_hash, role, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+    )
+    .bind(&id)
+    .bind(&body.username)
+    .bind(&hash)
+    .bind("user")
+    .bind(now)
+    .bind(now)
+    .execute(&state.db.pool)
+    .await
+    .map_err(|e| {
+        if e.to_string().contains("UNIQUE") {
+            AppError::conflict("username already exists")
+        } else {
+            AppError::internal(e)
+        }
+    })?;
+
+    Ok((StatusCode::CREATED, Json(serde_json::json!({ "id": id, "username": body.username }))))
+}
+
 // ─── /me endpoints ──────────────────────────────────────────────────────────
 
 async fn me_devices(
@@ -442,6 +493,41 @@ async fn me_devices(
     }).collect();
 
     Ok(Json(serde_json::json!({ "devices": devices })))
+}
+
+#[derive(Deserialize)]
+struct RenameDeviceRequest {
+    name: String,
+}
+
+async fn me_rename_device(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    axum::extract::Path(device_id): axum::extract::Path<String>,
+    Json(body): Json<RenameDeviceRequest>,
+) -> Result<StatusCode, AppError> {
+    let claims = extract_jwt(&headers, &state.jwt)?;
+
+    let name = body.name.trim().to_string();
+    if name.is_empty() {
+        return Err(AppError { status: StatusCode::UNPROCESSABLE_ENTITY, message: "name must not be empty".into() });
+    }
+
+    let affected = sqlx::query(
+        "UPDATE devices SET name = ? WHERE id = ? AND user_id = ?",
+    )
+    .bind(&name)
+    .bind(&device_id)
+    .bind(&claims.sub)
+    .execute(&state.db.pool)
+    .await
+    .map_err(AppError::internal)?
+    .rows_affected();
+
+    if affected == 0 {
+        return Err(AppError::not_found("device not found"));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]
