@@ -4,15 +4,21 @@ use std::path::Path;
 
 fn expand_env(s: &str) -> String {
     let mut result = s.to_owned();
-    // Replace ${VAR} with env var value (fallback: empty string)
-    while let Some(start) = result.find("${") {
+    let mut search_from = 0;
+    // Replace ${VAR} with env var value (fallback: empty string).
+    // Advance past each replacement to avoid infinite loops when
+    // an env var value itself contains "${".
+    while let Some(rel) = result[search_from..].find("${") {
+        let start = search_from + rel;
         let end = match result[start..].find('}') {
             Some(i) => start + i,
             None => break,
         };
         let var_name = &result[start + 2..end];
         let value = std::env::var(var_name).unwrap_or_default();
+        let value_len = value.len();
         result.replace_range(start..=end, &value);
+        search_from = start + value_len;
     }
     result
 }
