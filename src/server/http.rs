@@ -639,6 +639,13 @@ async fn me_change_password(
         .await
         .map_err(AppError::internal)?;
 
+    // Revoke all refresh tokens — password change invalidates existing sessions
+    sqlx::query("UPDATE refresh_tokens SET revoked = 1 WHERE user_id = ? AND revoked = 0")
+        .bind(&claims.sub)
+        .execute(&state.db.pool)
+        .await
+        .map_err(AppError::internal)?;
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -793,6 +800,13 @@ async fn admin_change_user_password(
     sqlx::query("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?")
         .bind(&new_hash)
         .bind(now)
+        .bind(&user_id)
+        .execute(&state.db.pool)
+        .await
+        .map_err(AppError::internal)?;
+
+    // Revoke all refresh tokens — password change invalidates existing sessions
+    sqlx::query("UPDATE refresh_tokens SET revoked = 1 WHERE user_id = ? AND revoked = 0")
         .bind(&user_id)
         .execute(&state.db.pool)
         .await
