@@ -63,7 +63,9 @@ pub async fn handle_connection(
 
     // Schema version guard — delete only this device's series, not all devices for this provider
     if auth.schema_version != SCHEMA_VERSION {
-        let _ = vm.delete_device_series(&device_id).await;
+        if let Err(e) = vm.delete_device_series(&device_id).await {
+            tracing::warn!("failed to delete VM series for device {device_id}: {e}");
+        }
 
         let err = AuthErrPayload {
             reason: format!(
@@ -114,7 +116,7 @@ pub async fn handle_connection(
                     payload
                 };
                 let batch: SyncBatchPayload = bincode::deserialize(&raw)?;
-                match handle_sync_batch(&batch, &user_id, &device_id, &provider, &db, &vm).await {
+                match handle_sync_batch(&batch, &user_id, &device_id, &batch.provider, &db, &vm).await {
                     Ok(last_ts) => {
                         let ack = SyncAckPayload { last_ts_ms: last_ts };
                         write_frame(&mut writer, MsgType::SyncAck, &bincode::serialize(&ack)?).await?;
@@ -148,11 +150,12 @@ async fn find_or_create_device(
     device_name: &str,
     device_key: &str,
 ) -> Result<String> {
-    // Look up existing device by stable device_key UUID
+    // Look up existing device by stable device_key UUID, scoped to user
     let existing: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM devices WHERE device_key = ?",
+        "SELECT id FROM devices WHERE device_key = ? AND user_id = ?",
     )
     .bind(device_key)
+    .bind(user_id)
     .fetch_optional(&db.pool)
     .await?;
 
@@ -247,6 +250,21 @@ async fn handle_sync_batch(
     Ok(max_ts)
 }
 
+// ─── Prometheus value escaping ────────────────────────────────────────────────
+
+fn escape_prom_value(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 // ─── Metric point builder ─────────────────────────────────────────────────────
 
 fn build_metric_points(
@@ -268,12 +286,12 @@ fn build_metric_points(
             .unwrap_or("");
 
         let base: Vec<(String, String)> = vec![
-            ("model".into(),    model.clone()),
-            ("session".into(),  session.clone()),
-            ("provider".into(), provider.to_string()),
-            ("user".into(),     user_id.to_string()),
-            ("device".into(),   device_id.to_string()),
-            ("project".into(),  project.to_string()),
+            ("model".into(),    escape_prom_value(model)),
+            ("session".into(),  escape_prom_value(session)),
+            ("provider".into(), escape_prom_value(provider)),
+            ("user".into(),     escape_prom_value(user_id)),
+            ("device".into(),   escape_prom_value(device_id)),
+            ("project".into(),  escape_prom_value(project)),
         ];
 
         let ts = item.ts_ms;
@@ -288,7 +306,7 @@ fn build_metric_points(
         for (count, type_label) in &token_types {
             if *count == 0 { continue; }
             let mut labels = base.clone();
-            labels.push(("type".into(), (*type_label).to_string()));
+            labels.push(("type".into(), escape_prom_value(type_label)));
             points.push(MetricPoint {
                 name: "toki_tokens_total".to_string(),
                 labels,

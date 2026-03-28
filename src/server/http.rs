@@ -2,7 +2,7 @@ use axum::{
     extract::{ConnectInfo, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{delete, get, post, put},
+    routing::{delete, get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -21,6 +21,7 @@ pub struct AppState {
     pub brute: Arc<BruteForceGuard>,
     pub vm: Arc<VictoriaMetrics>,
     pub allow_registration: bool,
+    pub access_token_ttl_secs: u64,
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -38,7 +39,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/me/devices", get(me_devices))
         .route("/me/devices/:device_id", delete(me_delete_device))
         .route("/me/devices/:device_id/name", axum::routing::patch(me_rename_device))
-        .route("/me/password", put(me_change_password))
+        .route("/me/password", axum::routing::patch(me_change_password))
         // Admin
         .route("/admin/users", get(admin_list_users).post(admin_create_user))
         .route("/admin/users/:user_id", delete(admin_delete_user))
@@ -162,7 +163,7 @@ async fn login(
         access_token: access,
         refresh_token: refresh,
         token_type: "Bearer".to_string(),
-        expires_in: 3600,
+        expires_in: state.access_token_ttl_secs,
     }))
 }
 
@@ -187,7 +188,7 @@ async fn token_refresh(
         access_token: access,
         refresh_token: refresh,
         token_type: "Bearer".to_string(),
-        expires_in: 3600,
+        expires_in: state.access_token_ttl_secs,
     }))
 }
 
@@ -538,6 +539,9 @@ async fn me_delete_device(
     axum::extract::Path(device_id): axum::extract::Path<String>,
 ) -> Result<StatusCode, AppError> {
     let claims = extract_jwt(&headers, &state.jwt)?;
+
+    // Delete the device's time-series data from VictoriaMetrics before removing from DB
+    state.vm.delete_device_series(&device_id).await.map_err(AppError::internal)?;
 
     let affected = sqlx::query("DELETE FROM devices WHERE id = ? AND user_id = ?")
         .bind(&device_id)

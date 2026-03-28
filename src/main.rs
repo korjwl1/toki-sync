@@ -53,7 +53,7 @@ async fn main() -> Result<()> {
     ));
     let vm = Arc::new(VictoriaMetrics::new(&config.backend.vm_url));
 
-    let state = AppState { db, jwt, brute, vm, allow_registration: config.auth.allow_registration };
+    let state = AppState { db, jwt, brute, vm, allow_registration: config.auth.allow_registration, access_token_ttl_secs: config.auth.access_token_ttl_secs };
 
     // ── TCP sync server ─────────────────────────────────────────────────────
     let tcp_addr: SocketAddr = format!("{}:{}", config.server.bind, config.server.tcp_port)

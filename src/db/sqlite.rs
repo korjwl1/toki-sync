@@ -53,9 +53,11 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_devices_user_id ON devices(user_id);
 
             CREATE TABLE IF NOT EXISTS cursors (
-                device_id   TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,
+                device_id   TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+                provider    TEXT NOT NULL DEFAULT '',
                 last_ts     INTEGER NOT NULL DEFAULT 0,
-                updated_at  INTEGER NOT NULL
+                updated_at  INTEGER NOT NULL,
+                PRIMARY KEY (device_id, provider)
             );
 
             CREATE TABLE IF NOT EXISTS refresh_tokens (
@@ -74,13 +76,46 @@ impl Database {
         .await
         .context("migration failed")?;
 
-        // Migration: add provider column to cursors for multi-provider support.
-        // ALTER TABLE fails silently on subsequent runs (column already exists).
-        let _ = sqlx::query(
-            "ALTER TABLE cursors ADD COLUMN provider TEXT NOT NULL DEFAULT ''",
+        // Migration: recreate cursors table with composite PK (device_id, provider)
+        // Only needed if the old single-PK schema exists.
+        let has_old_schema: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('cursors') WHERE name = 'device_id' AND pk = 1"
         )
-        .execute(&self.pool)
-        .await;
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(false);
+
+        if has_old_schema {
+            // Check if provider column already exists (from previous migration)
+            let has_provider: bool = sqlx::query_scalar(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('cursors') WHERE name = 'provider'"
+            )
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or(false);
+
+            sqlx::query("ALTER TABLE cursors RENAME TO cursors_old").execute(&self.pool).await.ok();
+
+            sqlx::query(
+                "CREATE TABLE IF NOT EXISTS cursors (
+                    device_id   TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+                    provider    TEXT NOT NULL DEFAULT '',
+                    last_ts     INTEGER NOT NULL DEFAULT 0,
+                    updated_at  INTEGER NOT NULL,
+                    PRIMARY KEY (device_id, provider)
+                )"
+            ).execute(&self.pool).await?;
+
+            if has_provider {
+                sqlx::query("INSERT OR IGNORE INTO cursors SELECT device_id, provider, last_ts, updated_at FROM cursors_old")
+                    .execute(&self.pool).await.ok();
+            } else {
+                sqlx::query("INSERT OR IGNORE INTO cursors SELECT device_id, '', last_ts, updated_at FROM cursors_old")
+                    .execute(&self.pool).await.ok();
+            }
+
+            sqlx::query("DROP TABLE IF EXISTS cursors_old").execute(&self.pool).await.ok();
+        }
 
         // Migration: add device_key column to devices for stable UUID-based identity.
         // ALTER TABLE fails silently on subsequent runs (column already exists).
@@ -89,15 +124,6 @@ impl Database {
         )
         .execute(&self.pool)
         .await;
-
-        // Unique index enables (device_id, provider) cursor per provider per device.
-        sqlx::query(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_cursors_device_provider \
-             ON cursors(device_id, provider)",
-        )
-        .execute(&self.pool)
-        .await
-        .context("failed to create cursor index")?;
 
         Ok(())
     }
