@@ -255,73 +255,168 @@ pub fn escape_label_value(s: &str) -> String {
 /// metric selector. This prevents a user from querying another user's data.
 ///
 /// Strategy: find the first `{` in each metric selector and insert the label
-/// before the first existing label. If no `{` exists, append `{user_id="..."}`.
+/// before the first existing label. If no `{` exists, find each bare metric
+/// name token and inject `{user_id="..."}` after it.
 ///
-/// NOTE: This is intentionally a string-level transformation on the *selector*
-/// portion, not a full PromQL parse, because we only need to inject one well-
-/// known label and avoid introducing an external PromQL parser dependency.
+/// NOTE: This is a string-level transformation, not a full PromQL parse.
+/// Handles the common patterns used by toki-monitor and toki CLI:
+///   - bare metric:              `toki_tokens_total`
+///   - aggregation argument:     `sum(toki_tokens_total)`
+///   - range vector:             `rate(toki_tokens_total[5m])`
+///   - aggregation with groupby: `sum by (model)(toki_tokens_total)`
+///
 /// All injected values are escaped; no string interpolation from user input.
 pub fn inject_user_label(expr: &str, user_id: &str) -> String {
     let escaped = escape_label_value(user_id);
     let injection = format!("user_id=\"{escaped}\"");
+    let selector = format!("{{{injection}}}");
 
-    // We scan for metric name boundaries and inject into each selector.
-    // Pattern: metric_name{...}  OR  metric_name (no selector)
-    // We insert before existing labels or append new selector.
+    // ── Path A: expression already has `{...}` selectors ──────────────────
+    if expr.contains('{') {
+        let mut result = String::with_capacity(expr.len() + injection.len() + 10);
+        let mut chars = expr.chars().peekable();
 
-    let mut result = String::with_capacity(expr.len() + injection.len() + 10);
-    let mut chars = expr.chars().peekable();
-
-    while let Some(&ch) = chars.peek() {
-        // Skip string literals to avoid injecting inside them
-        if ch == '"' || ch == '\'' || ch == '`' {
-            let quote = ch;
-            result.push(chars.next().unwrap());
-            while let Some(&c) = chars.peek() {
+        while let Some(&ch) = chars.peek() {
+            // Skip string literals
+            if ch == '"' || ch == '\'' || ch == '`' {
+                let quote = ch;
                 result.push(chars.next().unwrap());
-                if c == '\\' {
-                    // skip escaped char
-                    if let Some(&next) = chars.peek() {
-                        result.push(chars.next().unwrap());
-                        let _ = next;
+                while let Some(&c) = chars.peek() {
+                    result.push(chars.next().unwrap());
+                    if c == '\\' {
+                        if let Some(&_next) = chars.peek() {
+                            result.push(chars.next().unwrap());
+                        }
+                    } else if c == quote {
+                        break;
                     }
-                } else if c == quote {
-                    break;
                 }
+                continue;
             }
-            continue;
-        }
-
-        // Detect `{` — opening of label selector
-        if ch == '{' {
-            result.push(chars.next().unwrap()); // push '{'
-            // Peek: if immediately '}' (empty selector), insert injection
-            if chars.peek() == Some(&'}') {
-                result.push_str(&injection);
-            } else {
-                // Non-empty: prepend our label before existing labels
-                result.push_str(&injection);
-                result.push(',');
+            // Inject into `{` label selectors
+            if ch == '{' {
+                result.push(chars.next().unwrap());
+                if chars.peek() == Some(&'}') {
+                    result.push_str(&injection);
+                } else {
+                    result.push_str(&injection);
+                    result.push(',');
+                }
+                continue;
             }
-            continue;
+            result.push(chars.next().unwrap());
         }
-
-        result.push(chars.next().unwrap());
+        return result;
     }
 
-    // If no `{` was found at all for a bare metric name like `up`,
-    // we need to append. But since we already processed char by char and
-    // never found `{`, the result equals the original expr without `{}`.
-    // Check if we need to append:
-    if !expr.contains('{') {
-        // Append at end of each metric segment (simplified: append to whole expr)
-        // For bare metric names or expressions without selectors, append at the end
-        // just before any offset/range/aggregation operators. For simplicity,
-        // detect if the expression ends with a bare metric name pattern.
-        // This is the simplest safe approach for the bare-name case.
-        result.push('{');
-        result.push_str(&injection);
-        result.push('}');
+    // ── Path B: no `{` — inject after bare metric name tokens ─────────────
+    //
+    // A metric name token is `[a-zA-Z_:][a-zA-Z0-9_:]*` that is:
+    //   - NOT immediately followed by `(` (which would make it a function name)
+    //   - NOT a PromQL keyword (aggregation modifier, binary operator, etc.)
+    //   - NOT inside an aggregation-modifier label list `by(...)` / `without(...)`
+    //
+    // We track parenthesis depth and whether we're inside a modifier label list.
+    // Modifier label lists are `(...)` that directly follow `by`, `without`,
+    // `on`, or `ignoring` keywords.
+
+    const KEYWORDS: &[&str] = &[
+        // aggregation operators (always followed by `(` or modifier keyword)
+        "sum", "min", "max", "avg", "count", "stddev", "stdvar",
+        "bottomk", "topk", "count_values", "quantile",
+        // range/instant functions
+        "rate", "irate", "increase", "delta", "idelta",
+        "resets", "changes", "deriv", "predict_linear", "holt_winters",
+        "label_replace", "label_join", "histogram_quantile",
+        "abs", "absent", "ceil", "floor", "round", "clamp_max", "clamp_min",
+        "exp", "sqrt", "ln", "log2", "log10",
+        "vector", "scalar", "sort", "sort_desc",
+        "time", "minute", "hour", "day_of_month", "day_of_week", "month", "year",
+        // modifier keywords — their `(label, ...)` list must not get injected
+        "by", "without", "on", "ignoring", "group_left", "group_right",
+        // binary-operator keywords
+        "and", "or", "unless", "bool", "offset",
+    ];
+
+    // Pre-scan: find byte ranges that are inside modifier-label lists.
+    // A modifier-label list is `(...)` that immediately follows (with optional
+    // whitespace) one of: `by`, `without`, `on`, `ignoring`.
+    let bytes = expr.as_bytes();
+    let len = bytes.len();
+    let mut skip_range: Vec<(usize, usize)> = Vec::new();
+    {
+        let modifier_kw: &[&str] = &["by", "without", "on", "ignoring"];
+        let mut i = 0;
+        while i < len {
+            if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
+                let start = i;
+                while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                let tok = &expr[start..i];
+                if modifier_kw.contains(&tok) {
+                    // skip whitespace
+                    let mut j = i;
+                    while j < len && (bytes[j] == b' ' || bytes[j] == b'\t') {
+                        j += 1;
+                    }
+                    if j < len && bytes[j] == b'(' {
+                        // find matching ')'
+                        let open = j;
+                        let mut depth = 1usize;
+                        let mut k = j + 1;
+                        while k < len && depth > 0 {
+                            if bytes[k] == b'(' { depth += 1; }
+                            else if bytes[k] == b')' { depth -= 1; }
+                            k += 1;
+                        }
+                        skip_range.push((open, k)); // k points past ')'
+                    }
+                }
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    let in_skip_range = |pos: usize| skip_range.iter().any(|&(a, b)| pos >= a && pos < b);
+
+    let mut result = String::with_capacity(expr.len() + selector.len() * 2);
+    let mut i = 0;
+    let mut bracket_depth = 0u32; // depth inside `[...]` range vectors
+    while i < len {
+        let b = bytes[i];
+        if b == b'[' {
+            bracket_depth += 1;
+            result.push(b as char);
+            i += 1;
+        } else if b == b']' {
+            bracket_depth = bracket_depth.saturating_sub(1);
+            result.push(b as char);
+            i += 1;
+        } else if b.is_ascii_alphabetic() || b == b'_' || b == b':' {
+            let start = i;
+            while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b':') {
+                i += 1;
+            }
+            let tok = &expr[start..i];
+            result.push_str(tok);
+
+            // Never inject inside `[...]` (duration suffixes like `5m`, `1h`)
+            if bracket_depth == 0 {
+                let next = bytes.get(i).copied();
+                let is_fn   = next == Some(b'(');
+                let is_kw   = KEYWORDS.contains(&tok);
+                let in_skip = in_skip_range(start);
+
+                if !is_fn && !is_kw && !in_skip {
+                    result.push_str(&selector);
+                }
+            }
+        } else {
+            result.push(b as char);
+            i += 1;
+        }
     }
 
     result
@@ -639,8 +734,31 @@ mod tests {
 
     #[test]
     fn test_inject_range_query() {
-        // rate(metric[5m]) — bare metric inside function
+        // rate(metric[5m]) — bare metric inside function, label before `[`
         let result = inject_user_label("rate(toki_tokens_total[5m])", "dave");
-        assert!(result.contains("user_id=\"dave\""), "got: {result}");
+        assert_eq!(result, "rate(toki_tokens_total{user_id=\"dave\"}[5m])", "got: {result}");
+    }
+
+    #[test]
+    fn test_inject_aggregation_no_selector() {
+        // sum(metric) — metric inside aggregation, no existing selector
+        let result = inject_user_label("sum(toki_tokens_total)", "eve");
+        assert_eq!(result, "sum(toki_tokens_total{user_id=\"eve\"})", "got: {result}");
+    }
+
+    #[test]
+    fn test_inject_aggregation_with_by() {
+        // sum by (model)(metric) — `model` inside `by(...)` must NOT get injected
+        let result = inject_user_label("sum by (model)(toki_tokens_total)", "frank");
+        assert!(result.contains("toki_tokens_total{user_id=\"frank\"}"), "metric must be injected, got: {result}");
+        // `model` inside `by(...)` must not get a selector appended
+        assert!(!result.contains("model{"), "label in by() must not be injected, got: {result}");
+    }
+
+    #[test]
+    fn test_inject_increase_range() {
+        // increase(metric[1h]) — similar to rate
+        let result = inject_user_label("increase(toki_tokens_total[1h])", "grace");
+        assert_eq!(result, "increase(toki_tokens_total{user_id=\"grace\"}[1h])", "got: {result}");
     }
 }
