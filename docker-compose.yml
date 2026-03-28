@@ -1,20 +1,24 @@
 services:
-  toki-sync:
+  toki-sync-server:
     build:
       context: .
       dockerfile: Dockerfile
+    image: toki-sync:${TOKI_VERSION:-latest}
+    container_name: toki-sync-server
     restart: unless-stopped
     environment:
       TOKI_SYNC_CONFIG: /app/config/config.toml
       TOKI_ADMIN_PASSWORD: ${TOKI_ADMIN_PASSWORD}
+      JWT_SECRET: ${TOKI_JWT_SECRET}
     ports:
-      - "9091:9091"   # HTTP
-      - "9090:9090"   # TCP sync
+      - "9091:9091"   # HTTP (direct access or behind Caddy)
+      - "9090:9090"   # TCP sync (direct access or via Caddy L4)
     volumes:
       - ./config:/app/config:ro
-      - toki-sync-data:/app/data
+      - toki-data:/app/data
     networks:
       - toki-internal
+      - toki-external
     depends_on:
       victoriametrics:
         condition: service_healthy
@@ -37,7 +41,7 @@ services:
       - vm-data:/storage
     networks:
       - toki-internal
-    # VM is intentionally NOT exposed on host — accessed only via toki-sync proxy
+    # VM intentionally NOT exposed on host — accessed only via toki-sync proxy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8428/health"]
       interval: 15s
@@ -45,11 +49,40 @@ services:
       retries: 3
       start_period: 10s
 
+  caddy:
+    build:
+      context: ./caddy
+      dockerfile: Dockerfile
+    container_name: toki-caddy
+    restart: unless-stopped
+    profiles: ["caddy"]
+    environment:
+      TOKI_DOMAIN: ${TOKI_DOMAIN:-localhost}
+      DUCKDNS_TOKEN: ${DUCKDNS_TOKEN:-}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - toki-internal
+      - toki-external
+    depends_on:
+      toki-sync-server:
+        condition: service_healthy
+
 volumes:
-  toki-sync-data:
+  toki-data:
   vm-data:
+  caddy-data:
+  caddy-config:
 
 networks:
   toki-internal:
     driver: bridge
-    internal: false  # toki-sync needs outbound for updates; VM is isolated by no port mapping
+    internal: true    # VM is isolated: no direct host exposure
+  toki-external:
+    driver: bridge
+    internal: false   # toki-sync and Caddy need outbound connectivity

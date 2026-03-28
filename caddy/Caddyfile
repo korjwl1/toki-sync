@@ -1,0 +1,37 @@
+# Caddy configuration for toki-sync
+# Requires caddy-l4 plugin (see caddy/Dockerfile)
+#
+# Topology:
+#   Client → Caddy :443 HTTPS → toki-sync HTTP :9091
+#   Client → Caddy :9090 TLS passthrough → toki-sync TCP :9090
+
+{
+    # Global options
+    admin off
+}
+
+# ── HTTPS: /api/v1/* and /login ────────────────────────────────────────────────
+{$TOKI_DOMAIN} {
+    # TLS via Let's Encrypt (ACME) — set TOKI_DOMAIN to your domain
+    # For DuckDNS: add caddy-dns/duckdns plugin and set DUCKDNS_TOKEN env
+    tls {
+        # Uncomment for DuckDNS wildcard certs:
+        # dns duckdns {env.DUCKDNS_TOKEN}
+    }
+
+    reverse_proxy toki-sync-server:9091
+}
+
+# ── Layer 4: TCP sync passthrough on port 9090 ─────────────────────────────────
+{
+    layer4 {
+        :9090 {
+            # Pass TCP connections directly to toki-sync (TLS handled by toki-sync or plaintext)
+            route {
+                proxy {
+                    upstream toki-sync-server:9090
+                }
+            }
+        }
+    }
+}
