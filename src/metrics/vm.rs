@@ -20,7 +20,7 @@ impl VictoriaMetrics {
 
     /// Delete all VM series for a specific device (used on schema mismatch reset).
     pub async fn delete_device_series(&self, device_id: &str) -> Result<()> {
-        let selector = format!("{{device_id=\"{device_id}\"}}");
+        let selector = format!("{{device=\"{device_id}\"}}");
         let url = format!(
             "{}/api/v1/admin/tsdb/delete_series?match[]={}",
             self.base_url,

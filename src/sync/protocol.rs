@@ -13,38 +13,44 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// Schema version the server expects. Clients must match.
 pub const SCHEMA_VERSION: u32 = 2;
 
+/// Current sync protocol version. Clients must send this in AUTH.
+pub const PROTOCOL_VERSION: u16 = 1;
+
 /// Max payload: 16 MiB
 pub const MAX_PAYLOAD_SIZE: u32 = 16 * 1024 * 1024;
 
+/// Message type discriminants.
+/// Values are hex-grouped by category: 0x01-0x03 auth, 0x10-0x11 cursor,
+/// 0x20-0x22 batch, 0x30-0x31 keepalive.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MsgType {
-    Auth      = 1,
-    AuthOk    = 2,
-    AuthErr   = 3,
-    GetLastTs = 4,
-    LastTs    = 5,
-    SyncBatch = 6,
-    SyncAck   = 7,
-    SyncErr   = 8,
-    Ping      = 9,
-    Pong      = 10,
+    Auth      = 0x01,
+    AuthOk    = 0x02,
+    AuthErr   = 0x03,
+    GetLastTs = 0x10,
+    LastTs    = 0x11,
+    SyncBatch = 0x20,
+    SyncAck   = 0x21,
+    SyncErr   = 0x22,
+    Ping      = 0x30,
+    Pong      = 0x31,
 }
 
 impl MsgType {
     pub fn from_u32(v: u32) -> Option<Self> {
         match v {
-            1  => Some(Self::Auth),
-            2  => Some(Self::AuthOk),
-            3  => Some(Self::AuthErr),
-            4  => Some(Self::GetLastTs),
-            5  => Some(Self::LastTs),
-            6  => Some(Self::SyncBatch),
-            7  => Some(Self::SyncAck),
-            8  => Some(Self::SyncErr),
-            9  => Some(Self::Ping),
-            10 => Some(Self::Pong),
-            _  => None,
+            0x01 => Some(Self::Auth),
+            0x02 => Some(Self::AuthOk),
+            0x03 => Some(Self::AuthErr),
+            0x10 => Some(Self::GetLastTs),
+            0x11 => Some(Self::LastTs),
+            0x20 => Some(Self::SyncBatch),
+            0x21 => Some(Self::SyncAck),
+            0x22 => Some(Self::SyncErr),
+            0x30 => Some(Self::Ping),
+            0x31 => Some(Self::Pong),
+            _    => None,
         }
     }
 }
@@ -60,6 +66,8 @@ pub struct AuthPayload {
     /// Stable UUID generated on the client at `toki sync enable`.
     /// Used for device lookup instead of (user_id, name) to survive renames.
     pub device_key: String,
+    /// Sync protocol version. Server rejects unsupported versions.
+    pub protocol_version: u16,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

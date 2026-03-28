@@ -29,6 +29,19 @@ pub async fn handle_connection(
 
     let auth: AuthPayload = bincode::deserialize(&payload)?;
 
+    // Protocol version check — reject unknown versions immediately
+    if auth.protocol_version != PROTOCOL_VERSION {
+        let err = AuthErrPayload {
+            reason: format!(
+                "unsupported protocol version: client={}, server={}",
+                auth.protocol_version, PROTOCOL_VERSION
+            ),
+            reset_required: false,
+        };
+        write_frame(&mut writer, MsgType::AuthErr, &bincode::serialize(&err)?).await?;
+        return Ok(());
+    }
+
     // JWT verification first — we need user_id to scope any device operations
     let claims = match jwt.verify_access(&auth.jwt) {
         Ok(c) => c,
@@ -248,12 +261,12 @@ fn build_metric_points(
             .unwrap_or("");
 
         let base: Vec<(String, String)> = vec![
-            ("model".into(),     model.clone()),
-            ("session".into(),   session.clone()),
-            ("provider".into(),  provider.to_string()),
-            ("user_id".into(),   user_id.to_string()),
-            ("device_id".into(), device_id.to_string()),
-            ("project".into(),   project.to_string()),
+            ("model".into(),    model.clone()),
+            ("session".into(),  session.clone()),
+            ("provider".into(), provider.to_string()),
+            ("user".into(),     user_id.to_string()),
+            ("device".into(),   device_id.to_string()),
+            ("project".into(),  project.to_string()),
         ];
 
         let ts = item.ts_ms;
@@ -367,9 +380,9 @@ mod tests {
         let points = build_metric_points(&batch, "user-xyz", "device-1", "claude_code");
         assert_eq!(points.len(), 1);
         let pt = &points[0];
-        let user_label = pt.labels.iter().find(|(k, _)| k == "user_id").unwrap();
+        let user_label = pt.labels.iter().find(|(k, _)| k == "user").unwrap();
         assert_eq!(user_label.1, "user-xyz");
-        let device_label = pt.labels.iter().find(|(k, _)| k == "device_id").unwrap();
+        let device_label = pt.labels.iter().find(|(k, _)| k == "device").unwrap();
         assert_eq!(device_label.1, "device-1");
     }
 

@@ -251,12 +251,12 @@ pub fn escape_label_value(s: &str) -> String {
     out
 }
 
-/// Inject `user_id="<escaped>"` into a PromQL expression by rewriting the
+/// Inject `user="<escaped>"` into a PromQL expression by rewriting the
 /// metric selector. This prevents a user from querying another user's data.
 ///
 /// Strategy: find the first `{` in each metric selector and insert the label
 /// before the first existing label. If no `{` exists, find each bare metric
-/// name token and inject `{user_id="..."}` after it.
+/// name token and inject `{user="..."}` after it.
 ///
 /// NOTE: This is a string-level transformation, not a full PromQL parse.
 /// Handles the common patterns used by toki-monitor and toki CLI:
@@ -268,7 +268,7 @@ pub fn escape_label_value(s: &str) -> String {
 /// All injected values are escaped; no string interpolation from user input.
 pub fn inject_user_label(expr: &str, user_id: &str) -> String {
     let escaped = escape_label_value(user_id);
-    let injection = format!("user_id=\"{escaped}\"");
+    let injection = format!("user=\"{escaped}\"");
     let selector = format!("{{{injection}}}");
 
     // ── Path A: expression already has `{...}` selectors ──────────────────
@@ -690,39 +690,39 @@ mod tests {
 
     #[test]
     fn test_inject_bare_metric() {
-        // No selector → append {user_id="..."}
+        // No selector → append {user="..."}
         let result = inject_user_label("up", "alice");
-        assert!(result.contains("user_id=\"alice\""), "got: {result}");
+        assert!(result.contains("user=\"alice\""), "got: {result}");
         assert!(result.starts_with("up{"), "got: {result}");
     }
 
     #[test]
     fn test_inject_empty_selector() {
         let result = inject_user_label("toki_usage{}", "bob");
-        assert!(result.contains("user_id=\"bob\""), "got: {result}");
+        assert!(result.contains("user=\"bob\""), "got: {result}");
         assert!(!result.contains(",}"), "should not have trailing comma: {result}");
     }
 
     #[test]
     fn test_inject_existing_labels() {
         let result = inject_user_label("toki_usage{model=\"gpt-4\"}", "carol");
-        assert!(result.contains("user_id=\"carol\""), "got: {result}");
+        assert!(result.contains("user=\"carol\""), "got: {result}");
         assert!(result.contains("model=\"gpt-4\""), "existing label preserved: {result}");
     }
 
     #[test]
     fn test_injection_attempt_escaped() {
-        // Attacker tries to inject: attacker",user_id="victim
-        // After escape: attacker\",user_id=\"victim
+        // Attacker tries to inject: attacker",user="victim
+        // After escape: attacker\",user=\"victim
         // This is safe: PromQL treats \" as escaped quote inside the string,
-        // so there is no separate user_id="victim" label.
-        let malicious_user = "attacker\",user_id=\"victim";
+        // so there is no separate user="victim" label.
+        let malicious_user = "attacker\",user=\"victim";
         let result = inject_user_label("metric{}", malicious_user);
         // Escaped quote must appear — the " is not raw in output
         assert!(result.contains("\\\""), "quote must be escaped, got: {result}");
-        // Must NOT contain an unescaped standalone label like ,user_id="victim"
-        // i.e. after the escaped quote there must not be a bare: ,user_id="
-        assert!(!result.contains(",user_id=\"victim\""), "standalone injection label must not appear, got: {result}");
+        // Must NOT contain an unescaped standalone label like ,user="victim"
+        // i.e. after the escaped quote there must not be a bare: ,user="
+        assert!(!result.contains(",user=\"victim\""), "standalone injection label must not appear, got: {result}");
     }
 
     #[test]
@@ -736,21 +736,21 @@ mod tests {
     fn test_inject_range_query() {
         // rate(metric[5m]) — bare metric inside function, label before `[`
         let result = inject_user_label("rate(toki_tokens_total[5m])", "dave");
-        assert_eq!(result, "rate(toki_tokens_total{user_id=\"dave\"}[5m])", "got: {result}");
+        assert_eq!(result, "rate(toki_tokens_total{user=\"dave\"}[5m])", "got: {result}");
     }
 
     #[test]
     fn test_inject_aggregation_no_selector() {
         // sum(metric) — metric inside aggregation, no existing selector
         let result = inject_user_label("sum(toki_tokens_total)", "eve");
-        assert_eq!(result, "sum(toki_tokens_total{user_id=\"eve\"})", "got: {result}");
+        assert_eq!(result, "sum(toki_tokens_total{user=\"eve\"})", "got: {result}");
     }
 
     #[test]
     fn test_inject_aggregation_with_by() {
         // sum by (model)(metric) — `model` inside `by(...)` must NOT get injected
         let result = inject_user_label("sum by (model)(toki_tokens_total)", "frank");
-        assert!(result.contains("toki_tokens_total{user_id=\"frank\"}"), "metric must be injected, got: {result}");
+        assert!(result.contains("toki_tokens_total{user=\"frank\"}"), "metric must be injected, got: {result}");
         // `model` inside `by(...)` must not get a selector appended
         assert!(!result.contains("model{"), "label in by() must not be injected, got: {result}");
     }
@@ -759,7 +759,7 @@ mod tests {
     fn test_inject_increase_range() {
         // increase(metric[1h]) — similar to rate
         let result = inject_user_label("increase(toki_tokens_total[1h])", "grace");
-        assert_eq!(result, "increase(toki_tokens_total{user_id=\"grace\"}[1h])", "got: {result}");
+        assert_eq!(result, "increase(toki_tokens_total{user=\"grace\"}[1h])", "got: {result}");
     }
 
     #[test]
@@ -769,7 +769,7 @@ mod tests {
             "sum by (model) (increase(toki_tokens_total[15m]))", "hana");
         assert_eq!(
             result,
-            "sum by (model) (increase(toki_tokens_total{user_id=\"hana\"}[15m]))",
+            "sum by (model) (increase(toki_tokens_total{user=\"hana\"}[15m]))",
             "got: {result}",
         );
         // model inside by(...) must NOT get a selector
@@ -781,7 +781,7 @@ mod tests {
         // toki-monitor with provider filter: Path A (expr contains `{`)
         let result = inject_user_label(
             "sum by (model) (increase(toki_tokens_total{provider=\"claude_code\"}[1h]))", "ivan");
-        assert!(result.contains("user_id=\"ivan\""), "got: {result}");
+        assert!(result.contains("user=\"ivan\""), "got: {result}");
         assert!(result.contains("provider=\"claude_code\""), "existing label preserved, got: {result}");
         // injection must be inside the `{...}`, not appended at end
         assert!(result.contains("toki_tokens_total{"), "got: {result}");
@@ -793,7 +793,7 @@ mod tests {
         // sum by (model, provider)(metric) — multi-label modifier list
         let result = inject_user_label(
             "sum by (model, provider) (increase(toki_tokens_total[1h]))", "judy");
-        assert!(result.contains("toki_tokens_total{user_id=\"judy\"}"), "got: {result}");
+        assert!(result.contains("toki_tokens_total{user=\"judy\"}"), "got: {result}");
         assert!(!result.contains("model{"), "model label must not be injected, got: {result}");
         assert!(!result.contains("provider{"), "provider label must not be injected, got: {result}");
     }
@@ -803,7 +803,7 @@ mod tests {
         // sum without (session)(metric)
         let result = inject_user_label(
             "sum without (session) (increase(toki_tokens_total[1h]))", "ken");
-        assert!(result.contains("toki_tokens_total{user_id=\"ken\"}"), "got: {result}");
+        assert!(result.contains("toki_tokens_total{user=\"ken\"}"), "got: {result}");
         assert!(!result.contains("session{"), "session label must not be injected, got: {result}");
     }
 
@@ -812,7 +812,7 @@ mod tests {
         // sum(increase(metric[1h])) by (model) — alternative PromQL syntax (by after closing paren)
         let result = inject_user_label(
             "sum(increase(toki_tokens_total[1h])) by (model)", "leo");
-        assert!(result.contains("toki_tokens_total{user_id=\"leo\"}"), "got: {result}");
+        assert!(result.contains("toki_tokens_total{user=\"leo\"}"), "got: {result}");
         assert!(!result.contains("model{"), "model label must not be injected, got: {result}");
     }
 }
