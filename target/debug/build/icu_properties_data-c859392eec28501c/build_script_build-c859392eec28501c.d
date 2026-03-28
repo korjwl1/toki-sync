@@ -1,5 +1,0 @@
-/Users/korjwl1/Documents/toki_projects/toki_sync/target/debug/build/icu_properties_data-c859392eec28501c/build_script_build-c859392eec28501c.d: /Users/korjwl1/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/icu_properties_data-2.1.2/build.rs
-
-/Users/korjwl1/Documents/toki_projects/toki_sync/target/debug/build/icu_properties_data-c859392eec28501c/build_script_build-c859392eec28501c: /Users/korjwl1/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/icu_properties_data-2.1.2/build.rs
-
-/Users/korjwl1/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/icu_properties_data-2.1.2/build.rs:
