@@ -13,6 +13,7 @@ use std::sync::Arc;
 use crate::auth::{BruteForceGuard, JwtManager};
 use crate::config::Config;
 use crate::db::Database;
+use crate::metrics::VictoriaMetrics;
 use crate::server::{build_router, http::AppState};
 
 #[tokio::main]
@@ -50,8 +51,9 @@ async fn main() -> Result<()> {
         config.auth.brute_force_window_secs,
         config.auth.brute_force_lockout_secs,
     ));
+    let vm = Arc::new(VictoriaMetrics::new(&config.backend.vm_url));
 
-    let state = AppState { db, jwt, brute };
+    let state = AppState { db, jwt, brute, vm };
     let router = build_router(state).into_make_service_with_connect_info::<SocketAddr>();
 
     let addr: SocketAddr = format!("{}:{}", config.server.bind, config.server.http_port)

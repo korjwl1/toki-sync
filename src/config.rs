@@ -66,7 +66,6 @@ fn default_brute_lockout() -> u64 { 900 }        // 15m
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct BackendConfig {
     #[serde(default = "default_vm_url")]
-    #[allow(dead_code)]
     pub vm_url: String,
 }
 
@@ -108,7 +107,6 @@ pub struct Config {
     pub server: ServerConfig,
     pub auth: AuthConfig,
     #[serde(default)]
-    #[allow(dead_code)]
     pub backend: BackendConfig,
     #[serde(default)]
     pub storage: StorageConfig,

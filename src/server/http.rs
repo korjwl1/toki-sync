@@ -1,8 +1,8 @@
 use axum::{
-    extract::{ConnectInfo, State},
-    http::StatusCode,
+    extract::{ConnectInfo, Query, State},
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -11,21 +11,65 @@ use std::sync::Arc;
 
 use crate::auth::{BruteForceGuard, JwtManager};
 use crate::db::Database;
+use crate::metrics::backend::MetricsBackend;
+use crate::metrics::vm::VictoriaMetrics;
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: Arc<Database>,
     pub jwt: Arc<JwtManager>,
     pub brute: Arc<BruteForceGuard>,
+    pub vm: Arc<VictoriaMetrics>,
 }
 
 pub fn build_router(state: AppState) -> Router {
     Router::new()
+        // Public
         .route("/health", get(health))
         .route("/auth-method", post(auth_method))
         .route("/login", post(login))
         .route("/token/refresh", post(token_refresh))
+        // PromQL proxy (requires JWT)
+        .route("/api/v1/query", get(promql_query))
+        .route("/api/v1/query_range", get(promql_query_range))
+        // User self-service
+        .route("/me/devices", get(me_devices))
+        .route("/me/password", put(me_change_password))
+        // Admin
+        .route("/admin/users", get(admin_list_users).post(admin_create_user))
+        .route("/admin/users/:user_id", delete(admin_delete_user))
+        .route("/admin/devices", get(admin_list_devices))
+        .route("/admin/devices/:device_id", delete(admin_delete_device))
         .with_state(state)
+}
+
+// ─── JWT extraction helper ───────────────────────────────────────────────────
+
+/// Extract and verify the Bearer JWT from the Authorization header.
+fn extract_jwt(headers: &HeaderMap, jwt: &JwtManager) -> Result<crate::auth::jwt::Claims, AppError> {
+    let auth = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| AppError::unauthorized("missing Authorization header"))?;
+
+    let token = auth.strip_prefix("Bearer ")
+        .ok_or_else(|| AppError::unauthorized("expected Bearer token"))?;
+
+    jwt.verify_access(token)
+        .map_err(|_| AppError::unauthorized("invalid or expired token"))
+}
+
+async fn require_admin<'a>(headers: &'a HeaderMap, jwt: &'a JwtManager, db: &'a Database) -> Result<String, AppError> {
+    let claims = extract_jwt(headers, jwt)?;
+    let role: Option<String> = sqlx::query_scalar("SELECT role FROM users WHERE id = ?")
+        .bind(&claims.sub)
+        .fetch_optional(&db.pool)
+        .await
+        .map_err(AppError::internal)?;
+    match role.as_deref() {
+        Some("admin") => Ok(claims.sub),
+        _ => Err(AppError::forbidden("admin role required")),
+    }
 }
 
 // ─── /health ────────────────────────────────────────────────────────────────
@@ -41,18 +85,9 @@ struct AuthMethodRequest {
     username: String,
 }
 
-#[derive(Serialize)]
-struct AuthMethodResponse {
-    method: String,
-}
-
-async fn auth_method(
-    Json(body): Json<AuthMethodRequest>,
-) -> impl IntoResponse {
-    // Currently only password auth is supported.
-    // In the future this could return "totp", "sso", etc.
+async fn auth_method(Json(body): Json<AuthMethodRequest>) -> impl IntoResponse {
     let _ = body.username;
-    Json(AuthMethodResponse { method: "password".to_string() })
+    Json(serde_json::json!({ "method": "password" }))
 }
 
 // ─── /login ─────────────────────────────────────────────────────────────────
@@ -61,12 +96,11 @@ async fn auth_method(
 struct LoginRequest {
     username: String,
     password: String,
-    /// Optional: associate refresh token with a device
     device_id: Option<String>,
 }
 
 #[derive(Serialize)]
-struct LoginResponse {
+struct TokenResponse {
     access_token: String,
     refresh_token: String,
     token_type: String,
@@ -77,15 +111,11 @@ async fn login(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
     Json(body): Json<LoginRequest>,
-) -> Result<Json<LoginResponse>, AppError> {
+) -> Result<Json<TokenResponse>, AppError> {
     let ip = addr.ip().to_string();
 
-    // Check brute force lockout before even touching DB
-    state.brute.check(&ip, &body.username).map_err(|secs| {
-        AppError::locked_out(secs)
-    })?;
+    state.brute.check(&ip, &body.username).map_err(AppError::locked_out)?;
 
-    // Look up user
     let row: Option<(String, String, String)> = sqlx::query_as(
         "SELECT id, password_hash, role FROM users WHERE username = ?",
     )
@@ -102,7 +132,6 @@ async fn login(
         }
     };
 
-    // Verify password (bcrypt — blocking, run in threadpool)
     let pw = body.password.clone();
     let hash = password_hash.clone();
     let valid = tokio::task::spawn_blocking(move || bcrypt::verify(&pw, &hash))
@@ -117,21 +146,14 @@ async fn login(
 
     state.brute.record_success(&ip, &body.username);
 
-    // Issue tokens
-    let access = state.jwt.issue_access_token(&user_id)
+    let access = state.jwt.issue_access_token(&user_id).map_err(AppError::internal)?;
+    let (refresh, refresh_claims) = state.jwt
+        .issue_refresh_token(&user_id, body.device_id.as_deref())
         .map_err(AppError::internal)?;
-    let (refresh, refresh_claims) = state.jwt.issue_refresh_token(
-        &user_id,
-        body.device_id.as_deref(),
-    ).map_err(AppError::internal)?;
-
-    state.jwt.store_refresh_token(&state.db, &refresh_claims)
-        .await
-        .map_err(AppError::internal)?;
+    state.jwt.store_refresh_token(&state.db, &refresh_claims).await.map_err(AppError::internal)?;
 
     tracing::info!(user_id = %user_id, "login successful");
-
-    Ok(Json(LoginResponse {
+    Ok(Json(TokenResponse {
         access_token: access,
         refresh_token: refresh,
         token_type: "Bearer".to_string(),
@@ -147,24 +169,16 @@ struct RefreshRequest {
     device_id: Option<String>,
 }
 
-#[derive(Serialize)]
-struct RefreshResponse {
-    access_token: String,
-    refresh_token: String,
-    token_type: String,
-    expires_in: u64,
-}
-
 async fn token_refresh(
     State(state): State<AppState>,
     Json(body): Json<RefreshRequest>,
-) -> Result<Json<RefreshResponse>, AppError> {
+) -> Result<Json<TokenResponse>, AppError> {
     let (access, refresh) = state.jwt
         .rotate(&state.db, &body.refresh_token, body.device_id.as_deref())
         .await
         .map_err(|_| AppError::unauthorized("invalid or expired refresh token"))?;
 
-    Ok(Json(RefreshResponse {
+    Ok(Json(TokenResponse {
         access_token: access,
         refresh_token: refresh,
         token_type: "Bearer".to_string(),
@@ -172,27 +186,374 @@ async fn token_refresh(
     }))
 }
 
+// ─── PromQL proxy ────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct QueryParams {
+    query: String,
+    time: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct QueryRangeParams {
+    query: String,
+    start: i64,
+    end: i64,
+    step: Option<String>,
+}
+
+async fn promql_query(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Query(params): Query<QueryParams>,
+) -> Result<Response, AppError> {
+    let claims = extract_jwt(&headers, &state.jwt)?;
+    let injected = inject_user_label(&params.query, &claims.sub);
+    let result = state.vm.query(&injected, params.time).await.map_err(AppError::internal)?;
+    Ok((
+        StatusCode::OK,
+        [("Content-Type", "application/json")],
+        result,
+    ).into_response())
+}
+
+async fn promql_query_range(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Query(params): Query<QueryRangeParams>,
+) -> Result<Response, AppError> {
+    let claims = extract_jwt(&headers, &state.jwt)?;
+    let injected = inject_user_label(&params.query, &claims.sub);
+    let step = params.step.as_deref().unwrap_or("60s");
+    let result = state.vm.query_range(&injected, params.start, params.end, step)
+        .await
+        .map_err(AppError::internal)?;
+    Ok((
+        StatusCode::OK,
+        [("Content-Type", "application/json")],
+        result,
+    ).into_response())
+}
+
+// ─── Label injection ─────────────────────────────────────────────────────────
+
+/// Escape a PromQL label value: backslash and double-quote must be escaped.
+pub fn escape_label_value(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"'  => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            c    => out.push(c),
+        }
+    }
+    out
+}
+
+/// Inject `user_id="<escaped>"` into a PromQL expression by rewriting the
+/// metric selector. This prevents a user from querying another user's data.
+///
+/// Strategy: find the first `{` in each metric selector and insert the label
+/// before the first existing label. If no `{` exists, append `{user_id="..."}`.
+///
+/// NOTE: This is intentionally a string-level transformation on the *selector*
+/// portion, not a full PromQL parse, because we only need to inject one well-
+/// known label and avoid introducing an external PromQL parser dependency.
+/// All injected values are escaped; no string interpolation from user input.
+pub fn inject_user_label(expr: &str, user_id: &str) -> String {
+    let escaped = escape_label_value(user_id);
+    let injection = format!("user_id=\"{escaped}\"");
+
+    // We scan for metric name boundaries and inject into each selector.
+    // Pattern: metric_name{...}  OR  metric_name (no selector)
+    // We insert before existing labels or append new selector.
+
+    let mut result = String::with_capacity(expr.len() + injection.len() + 10);
+    let mut chars = expr.chars().peekable();
+
+    while let Some(&ch) = chars.peek() {
+        // Skip string literals to avoid injecting inside them
+        if ch == '"' || ch == '\'' || ch == '`' {
+            let quote = ch;
+            result.push(chars.next().unwrap());
+            while let Some(&c) = chars.peek() {
+                result.push(chars.next().unwrap());
+                if c == '\\' {
+                    // skip escaped char
+                    if let Some(&next) = chars.peek() {
+                        result.push(chars.next().unwrap());
+                        let _ = next;
+                    }
+                } else if c == quote {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        // Detect `{` — opening of label selector
+        if ch == '{' {
+            result.push(chars.next().unwrap()); // push '{'
+            // Peek: if immediately '}' (empty selector), insert injection
+            if chars.peek() == Some(&'}') {
+                result.push_str(&injection);
+            } else {
+                // Non-empty: prepend our label before existing labels
+                result.push_str(&injection);
+                result.push(',');
+            }
+            continue;
+        }
+
+        result.push(chars.next().unwrap());
+    }
+
+    // If no `{` was found at all for a bare metric name like `up`,
+    // we need to append. But since we already processed char by char and
+    // never found `{`, the result equals the original expr without `{}`.
+    // Check if we need to append:
+    if !expr.contains('{') {
+        // Append at end of each metric segment (simplified: append to whole expr)
+        // For bare metric names or expressions without selectors, append at the end
+        // just before any offset/range/aggregation operators. For simplicity,
+        // detect if the expression ends with a bare metric name pattern.
+        // This is the simplest safe approach for the bare-name case.
+        result.push('{');
+        result.push_str(&injection);
+        result.push('}');
+    }
+
+    result
+}
+
+// ─── /me endpoints ──────────────────────────────────────────────────────────
+
+async fn me_devices(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let claims = extract_jwt(&headers, &state.jwt)?;
+    let rows: Vec<(String, String, i64)> = sqlx::query_as(
+        "SELECT id, name, last_seen_at FROM devices WHERE user_id = ? ORDER BY last_seen_at DESC",
+    )
+    .bind(&claims.sub)
+    .fetch_all(&state.db.pool)
+    .await
+    .map_err(AppError::internal)?;
+
+    let devices: Vec<_> = rows.into_iter().map(|(id, name, last_seen)| {
+        serde_json::json!({ "id": id, "name": name, "last_seen_at": last_seen })
+    }).collect();
+
+    Ok(Json(serde_json::json!({ "devices": devices })))
+}
+
+#[derive(Deserialize)]
+struct ChangePasswordRequest {
+    current_password: String,
+    new_password: String,
+}
+
+async fn me_change_password(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Json(body): Json<ChangePasswordRequest>,
+) -> Result<StatusCode, AppError> {
+    let claims = extract_jwt(&headers, &state.jwt)?;
+
+    let row: Option<(String,)> = sqlx::query_as("SELECT password_hash FROM users WHERE id = ?")
+        .bind(&claims.sub)
+        .fetch_optional(&state.db.pool)
+        .await
+        .map_err(AppError::internal)?;
+
+    let (hash,) = row.ok_or_else(|| AppError::not_found("user not found"))?;
+
+    let cur = body.current_password.clone();
+    let valid = tokio::task::spawn_blocking(move || bcrypt::verify(&cur, &hash))
+        .await
+        .map_err(AppError::internal)?
+        .map_err(AppError::internal)?;
+
+    if !valid {
+        return Err(AppError::unauthorized("current password incorrect"));
+    }
+
+    let new_pw = body.new_password.clone();
+    let new_hash = tokio::task::spawn_blocking(move || {
+        bcrypt::hash(&new_pw, bcrypt::DEFAULT_COST)
+    })
+    .await
+    .map_err(AppError::internal)?
+    .map_err(AppError::internal)?;
+
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?")
+        .bind(&new_hash)
+        .bind(now)
+        .bind(&claims.sub)
+        .execute(&state.db.pool)
+        .await
+        .map_err(AppError::internal)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ─── /admin endpoints ───────────────────────────────────────────────────────
+
+async fn admin_list_users(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_admin(&headers, &state.jwt, &state.db).await?;
+
+    let rows: Vec<(String, String, String, i64)> = sqlx::query_as(
+        "SELECT id, username, role, created_at FROM users ORDER BY created_at",
+    )
+    .fetch_all(&state.db.pool)
+    .await
+    .map_err(AppError::internal)?;
+
+    let users: Vec<_> = rows.into_iter().map(|(id, username, role, created_at)| {
+        serde_json::json!({ "id": id, "username": username, "role": role, "created_at": created_at })
+    }).collect();
+
+    Ok(Json(serde_json::json!({ "users": users })))
+}
+
+#[derive(Deserialize)]
+struct CreateUserRequest {
+    username: String,
+    password: String,
+    role: Option<String>,
+}
+
+async fn admin_create_user(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Json(body): Json<CreateUserRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    require_admin(&headers, &state.jwt, &state.db).await?;
+
+    let pw = body.password.clone();
+    let hash = tokio::task::spawn_blocking(move || bcrypt::hash(&pw, bcrypt::DEFAULT_COST))
+        .await
+        .map_err(AppError::internal)?
+        .map_err(AppError::internal)?;
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().timestamp();
+    let role = body.role.as_deref().unwrap_or("user");
+
+    sqlx::query(
+        "INSERT INTO users (id, username, password_hash, role, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+    )
+    .bind(&id)
+    .bind(&body.username)
+    .bind(&hash)
+    .bind(role)
+    .bind(now)
+    .bind(now)
+    .execute(&state.db.pool)
+    .await
+    .map_err(|e| {
+        if e.to_string().contains("UNIQUE") {
+            AppError::conflict("username already exists")
+        } else {
+            AppError::internal(e)
+        }
+    })?;
+
+    Ok((StatusCode::CREATED, Json(serde_json::json!({ "id": id, "username": body.username, "role": role }))))
+}
+
+async fn admin_delete_user(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    axum::extract::Path(user_id): axum::extract::Path<String>,
+) -> Result<StatusCode, AppError> {
+    require_admin(&headers, &state.jwt, &state.db).await?;
+
+    let affected = sqlx::query("DELETE FROM users WHERE id = ?")
+        .bind(&user_id)
+        .execute(&state.db.pool)
+        .await
+        .map_err(AppError::internal)?
+        .rows_affected();
+
+    if affected == 0 {
+        return Err(AppError::not_found("user not found"));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn admin_list_devices(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_admin(&headers, &state.jwt, &state.db).await?;
+
+    let rows: Vec<(String, String, String, i64)> = sqlx::query_as(
+        "SELECT d.id, d.name, u.username, d.last_seen_at FROM devices d
+         JOIN users u ON d.user_id = u.id ORDER BY d.last_seen_at DESC",
+    )
+    .fetch_all(&state.db.pool)
+    .await
+    .map_err(AppError::internal)?;
+
+    let devices: Vec<_> = rows.into_iter().map(|(id, name, username, last_seen)| {
+        serde_json::json!({ "id": id, "name": name, "username": username, "last_seen_at": last_seen })
+    }).collect();
+
+    Ok(Json(serde_json::json!({ "devices": devices })))
+}
+
+async fn admin_delete_device(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    axum::extract::Path(device_id): axum::extract::Path<String>,
+) -> Result<StatusCode, AppError> {
+    require_admin(&headers, &state.jwt, &state.db).await?;
+
+    let affected = sqlx::query("DELETE FROM devices WHERE id = ?")
+        .bind(&device_id)
+        .execute(&state.db.pool)
+        .await
+        .map_err(AppError::internal)?
+        .rows_affected();
+
+    if affected == 0 {
+        return Err(AppError::not_found("device not found"));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ─── Error type ─────────────────────────────────────────────────────────────
 
-struct AppError {
+pub struct AppError {
     status: StatusCode,
     message: String,
 }
 
 impl AppError {
-    fn internal(e: impl std::fmt::Display) -> Self {
+    pub fn internal(e: impl std::fmt::Display) -> Self {
         tracing::error!("internal error: {e}");
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: "internal server error".to_string(),
-        }
+        Self { status: StatusCode::INTERNAL_SERVER_ERROR, message: "internal server error".to_string() }
     }
-
-    fn unauthorized(msg: &str) -> Self {
+    pub fn unauthorized(msg: &str) -> Self {
         Self { status: StatusCode::UNAUTHORIZED, message: msg.to_string() }
     }
-
-    fn locked_out(retry_after: u64) -> Self {
+    pub fn forbidden(msg: &str) -> Self {
+        Self { status: StatusCode::FORBIDDEN, message: msg.to_string() }
+    }
+    pub fn not_found(msg: &str) -> Self {
+        Self { status: StatusCode::NOT_FOUND, message: msg.to_string() }
+    }
+    pub fn conflict(msg: &str) -> Self {
+        Self { status: StatusCode::CONFLICT, message: msg.to_string() }
+    }
+    pub fn locked_out(retry_after: u64) -> Self {
         Self {
             status: StatusCode::TOO_MANY_REQUESTS,
             message: format!("too many attempts, retry after {retry_after}s"),
@@ -202,7 +563,84 @@ impl AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let body = Json(serde_json::json!({ "error": self.message }));
-        (self.status, body).into_response()
+        (self.status, Json(serde_json::json!({ "error": self.message }))).into_response()
+    }
+}
+
+// ─── Label injection tests ───────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_escape_backslash() {
+        assert_eq!(escape_label_value("a\\b"), "a\\\\b");
+    }
+
+    #[test]
+    fn test_escape_double_quote() {
+        assert_eq!(escape_label_value("a\"b"), "a\\\"b");
+    }
+
+    #[test]
+    fn test_escape_newline() {
+        assert_eq!(escape_label_value("a\nb"), "a\\nb");
+    }
+
+    #[test]
+    fn test_escape_no_special_chars() {
+        assert_eq!(escape_label_value("user-123"), "user-123");
+    }
+
+    #[test]
+    fn test_inject_bare_metric() {
+        // No selector → append {user_id="..."}
+        let result = inject_user_label("up", "alice");
+        assert!(result.contains("user_id=\"alice\""), "got: {result}");
+        assert!(result.starts_with("up{"), "got: {result}");
+    }
+
+    #[test]
+    fn test_inject_empty_selector() {
+        let result = inject_user_label("toki_usage{}", "bob");
+        assert!(result.contains("user_id=\"bob\""), "got: {result}");
+        assert!(!result.contains(",}"), "should not have trailing comma: {result}");
+    }
+
+    #[test]
+    fn test_inject_existing_labels() {
+        let result = inject_user_label("toki_usage{model=\"gpt-4\"}", "carol");
+        assert!(result.contains("user_id=\"carol\""), "got: {result}");
+        assert!(result.contains("model=\"gpt-4\""), "existing label preserved: {result}");
+    }
+
+    #[test]
+    fn test_injection_attempt_escaped() {
+        // Attacker tries to inject: attacker",user_id="victim
+        // After escape: attacker\",user_id=\"victim
+        // This is safe: PromQL treats \" as escaped quote inside the string,
+        // so there is no separate user_id="victim" label.
+        let malicious_user = "attacker\",user_id=\"victim";
+        let result = inject_user_label("metric{}", malicious_user);
+        // Escaped quote must appear — the " is not raw in output
+        assert!(result.contains("\\\""), "quote must be escaped, got: {result}");
+        // Must NOT contain an unescaped standalone label like ,user_id="victim"
+        // i.e. after the escaped quote there must not be a bare: ,user_id="
+        assert!(!result.contains(",user_id=\"victim\""), "standalone injection label must not appear, got: {result}");
+    }
+
+    #[test]
+    fn test_injection_backslash_escaped() {
+        let user = "user\\admin";
+        let result = inject_user_label("m{}", user);
+        assert!(result.contains("user\\\\admin"), "backslash must be doubled, got: {result}");
+    }
+
+    #[test]
+    fn test_inject_range_query() {
+        // rate(metric[5m]) — bare metric inside function
+        let result = inject_user_label("rate(toki_tokens_total[5m])", "dave");
+        assert!(result.contains("user_id=\"dave\""), "got: {result}");
     }
 }

@@ -36,6 +36,10 @@ zstd = "0.13"
 
 # HTTP client (VM remote_write)
 ureq = { version = "2", features = ["json"] }
+urlencoding = "2"
+
+# HTTP response (bytes)
+bytes = "1"
 
 # Logging
 tracing = "0.1"
