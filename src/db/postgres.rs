@@ -199,7 +199,13 @@ impl DatabaseRepo for PostgresRepo {
         .bind(now)
         .execute(&self.pool)
         .await
-        .context("create_user")?;
+        .map_err(|e| {
+            if e.to_string().contains("UNIQUE") || e.to_string().contains("duplicate key") {
+                anyhow::anyhow!("UNIQUE constraint violation: username already exists")
+            } else {
+                anyhow::anyhow!("create_user: {e}")
+            }
+        })?;
         Ok(())
     }
 

@@ -31,7 +31,7 @@ pub async fn promql_query(
 ) -> Result<Response, AppError> {
     let claims = extract_jwt(&headers, &state.jwt)?;
     let injected = inject_user_label(&params.query, &claims.sub);
-    let result = state.vm.query(&injected, params.time).await.map_err(AppError::internal)?;
+    let result = state.vm.query(&injected, params.time).await.map_err(AppError::bad_gateway)?;
     Ok((
         StatusCode::OK,
         [("Content-Type", "application/json")],
@@ -49,7 +49,7 @@ pub async fn promql_query_range(
     let step = params.step.as_deref().unwrap_or("60s");
     let result = state.vm.query_range(&injected, params.start, params.end, step)
         .await
-        .map_err(AppError::internal)?;
+        .map_err(AppError::bad_gateway)?;
     Ok((
         StatusCode::OK,
         [("Content-Type", "application/json")],

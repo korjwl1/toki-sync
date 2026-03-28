@@ -247,7 +247,13 @@ impl DatabaseRepo for SqliteRepo {
         .bind(now)
         .execute(&self.pool)
         .await
-        .context("create_user")?;
+        .map_err(|e| {
+            if e.to_string().contains("UNIQUE") {
+                anyhow::anyhow!("UNIQUE constraint violation: username already exists")
+            } else {
+                anyhow::anyhow!("create_user: {e}")
+            }
+        })?;
         Ok(())
     }
 

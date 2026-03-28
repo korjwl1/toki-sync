@@ -169,6 +169,10 @@ impl AppError {
         tracing::error!("internal error: {e}");
         Self { status: StatusCode::INTERNAL_SERVER_ERROR, message: "internal server error".to_string() }
     }
+    pub fn bad_gateway(e: impl std::fmt::Display) -> Self {
+        tracing::error!("backend unavailable: {e}");
+        Self { status: StatusCode::BAD_GATEWAY, message: "metrics backend unavailable".to_string() }
+    }
     pub fn unauthorized(msg: &str) -> Self {
         Self { status: StatusCode::UNAUTHORIZED, message: msg.to_string() }
     }

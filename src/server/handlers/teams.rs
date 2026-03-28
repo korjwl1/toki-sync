@@ -221,7 +221,7 @@ pub async fn team_query_range(
     let step = params.step.as_deref().unwrap_or("60s");
     let result = state.vm.query_range(&injected, params.start, params.end, step)
         .await
-        .map_err(AppError::internal)?;
+        .map_err(AppError::bad_gateway)?;
 
     Ok((
         StatusCode::OK,
