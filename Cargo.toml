@@ -1,0 +1,53 @@
+[package]
+name = "toki-sync"
+version = "0.1.0"
+edition = "2021"
+description = "toki multi-device token usage sync server"
+license = "FSL-1.1-Apache-2.0"
+
+[[bin]]
+name = "toki-sync"
+path = "src/main.rs"
+
+[dependencies]
+# HTTP server
+axum = { version = "0.7", features = ["macros"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["trace", "cors"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Database
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "macros", "migrate"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+toml = "0.8"
+
+# Auth
+jsonwebtoken = "9"
+bcrypt = "0.15"
+
+# Compression
+zstd = "0.13"
+
+# HTTP client (VM remote_write)
+ureq = { version = "2", features = ["json"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+# Config / utils
+anyhow = "1"
+thiserror = "1"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3"
