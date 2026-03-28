@@ -30,10 +30,11 @@ pub enum MsgType {
     AuthErr   = 0x03,
     GetLastTs = 0x10,
     LastTs    = 0x11,
-    SyncBatch = 0x20,
-    SyncAck   = 0x21,
-    SyncErr   = 0x22,
-    Ping      = 0x30,
+    SyncBatch     = 0x20,
+    SyncAck       = 0x21,
+    SyncErr       = 0x22,
+    SyncBatchZstd = 0x23,
+    Ping          = 0x30,
     Pong      = 0x31,
 }
 
@@ -48,6 +49,7 @@ impl MsgType {
             0x20 => Some(Self::SyncBatch),
             0x21 => Some(Self::SyncAck),
             0x22 => Some(Self::SyncErr),
+            0x23 => Some(Self::SyncBatchZstd),
             0x30 => Some(Self::Ping),
             0x31 => Some(Self::Pong),
             _    => None,
@@ -99,10 +101,15 @@ pub struct StoredEvent {
     pub cache_read_input_tokens: u64,
 }
 
+/// Payload for GET_LAST_TS: specifies which provider's cursor to query.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GetLastTsPayload {
+    pub provider: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SyncItem {
     pub ts_ms: i64,
-    pub message_id: String,
     pub event: StoredEvent,
 }
 

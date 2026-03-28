@@ -100,13 +100,20 @@ pub async fn handle_connection(
 
         match msg_type {
             MsgType::GetLastTs => {
-                let ts = get_last_ts(&db, &device_id, &provider).await?;
+                let get_ts: GetLastTsPayload = bincode::deserialize(&payload)?;
+                let ts = get_last_ts(&db, &device_id, &get_ts.provider).await?;
                 let p = LastTsPayload { ts_ms: ts };
                 write_frame(&mut writer, MsgType::LastTs, &bincode::serialize(&p)?).await?;
             }
 
-            MsgType::SyncBatch => {
-                let batch: SyncBatchPayload = bincode::deserialize(&payload)?;
+            MsgType::SyncBatch | MsgType::SyncBatchZstd => {
+                let raw = if msg_type == MsgType::SyncBatchZstd {
+                    zstd::decode_all(payload.as_slice())
+                        .map_err(|e| anyhow::anyhow!("zstd decompress failed: {e}"))?
+                } else {
+                    payload
+                };
+                let batch: SyncBatchPayload = bincode::deserialize(&raw)?;
                 match handle_sync_batch(&batch, &user_id, &device_id, &provider, &db, &vm).await {
                     Ok(last_ts) => {
                         let ack = SyncAckPayload { last_ts_ms: last_ts };
@@ -314,7 +321,6 @@ mod tests {
     fn test_build_metric_points_basic() {
         let item = SyncItem {
             ts_ms: 1_700_000_000_000,
-            message_id: "msg-1".to_string(),
             event: StoredEvent {
                 model_id:   1,
                 session_id: 2,
@@ -343,7 +349,6 @@ mod tests {
     fn test_build_metric_points_all_types() {
         let item = SyncItem {
             ts_ms: 1_000,
-            message_id: "msg-2".to_string(),
             event: StoredEvent {
                 model_id:   1,
                 session_id: 2,
@@ -364,7 +369,6 @@ mod tests {
     fn test_build_metric_points_user_label_present() {
         let item = SyncItem {
             ts_ms: 1_000,
-            message_id: "msg-3".to_string(),
             event: StoredEvent {
                 model_id:   1,
                 session_id: 2,

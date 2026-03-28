@@ -36,11 +36,13 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/query_range", get(promql_query_range))
         // User self-service
         .route("/me/devices", get(me_devices))
+        .route("/me/devices/:device_id", delete(me_delete_device))
         .route("/me/devices/:device_id/name", axum::routing::patch(me_rename_device))
         .route("/me/password", put(me_change_password))
         // Admin
         .route("/admin/users", get(admin_list_users).post(admin_create_user))
         .route("/admin/users/:user_id", delete(admin_delete_user))
+        .route("/admin/users/:user_id/password", axum::routing::patch(admin_change_user_password))
         .route("/admin/devices", get(admin_list_devices))
         .route("/admin/devices/:device_id", delete(admin_delete_device))
         .with_state(state)
@@ -530,6 +532,27 @@ async fn me_rename_device(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn me_delete_device(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    axum::extract::Path(device_id): axum::extract::Path<String>,
+) -> Result<StatusCode, AppError> {
+    let claims = extract_jwt(&headers, &state.jwt)?;
+
+    let affected = sqlx::query("DELETE FROM devices WHERE id = ? AND user_id = ?")
+        .bind(&device_id)
+        .bind(&claims.sub)
+        .execute(&state.db.pool)
+        .await
+        .map_err(AppError::internal)?
+        .rows_affected();
+
+    if affected == 0 {
+        return Err(AppError::not_found("device not found"));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(Deserialize)]
 struct ChangePasswordRequest {
     current_password: String,
@@ -669,6 +692,48 @@ async fn admin_delete_user(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Deserialize)]
+struct AdminChangePasswordRequest {
+    password: String,
+}
+
+async fn admin_change_user_password(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    axum::extract::Path(user_id): axum::extract::Path<String>,
+    Json(body): Json<AdminChangePasswordRequest>,
+) -> Result<StatusCode, AppError> {
+    require_admin(&headers, &state.jwt, &state.db).await?;
+
+    // Verify user exists
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM users WHERE id = ?")
+        .bind(&user_id)
+        .fetch_optional(&state.db.pool)
+        .await
+        .map_err(AppError::internal)?;
+
+    if exists.is_none() {
+        return Err(AppError::not_found("user not found"));
+    }
+
+    let pw = body.password.clone();
+    let new_hash = tokio::task::spawn_blocking(move || bcrypt::hash(&pw, bcrypt::DEFAULT_COST))
+        .await
+        .map_err(AppError::internal)?
+        .map_err(AppError::internal)?;
+
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?")
+        .bind(&new_hash)
+        .bind(now)
+        .bind(&user_id)
+        .execute(&state.db.pool)
+        .await
+        .map_err(AppError::internal)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn admin_list_devices(
     headers: HeaderMap,
     State(state): State<AppState>,
@@ -696,6 +761,9 @@ async fn admin_delete_device(
     axum::extract::Path(device_id): axum::extract::Path<String>,
 ) -> Result<StatusCode, AppError> {
     require_admin(&headers, &state.jwt, &state.db).await?;
+
+    // Delete the device's time-series data from VictoriaMetrics before removing from DB
+    state.vm.delete_device_series(&device_id).await.map_err(AppError::internal)?;
 
     let affected = sqlx::query("DELETE FROM devices WHERE id = ?")
         .bind(&device_id)
