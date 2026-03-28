@@ -82,6 +82,14 @@ impl Database {
         .execute(&self.pool)
         .await;
 
+        // Migration: add device_key column to devices for stable UUID-based identity.
+        // ALTER TABLE fails silently on subsequent runs (column already exists).
+        let _ = sqlx::query(
+            "ALTER TABLE devices ADD COLUMN device_key TEXT",
+        )
+        .execute(&self.pool)
+        .await;
+
         // Unique index enables (device_id, provider) cursor per provider per device.
         sqlx::query(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_cursors_device_provider \

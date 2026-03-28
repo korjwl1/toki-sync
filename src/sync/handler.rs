@@ -29,23 +29,7 @@ pub async fn handle_connection(
 
     let auth: AuthPayload = bincode::deserialize(&payload)?;
 
-    // Schema version guard
-    if auth.schema_version != SCHEMA_VERSION {
-        // Best-effort: delete VM series so client can re-sync clean
-        let _ = vm.delete_user_series(&auth.provider).await;
-
-        let err = AuthErrPayload {
-            reason: format!(
-                "schema version mismatch: client={}, server={}",
-                auth.schema_version, SCHEMA_VERSION
-            ),
-            reset_required: true,
-        };
-        write_frame(&mut writer, MsgType::AuthErr, &bincode::serialize(&err)?).await?;
-        return Ok(());
-    }
-
-    // JWT verification
+    // JWT verification first — we need user_id to scope any device operations
     let claims = match jwt.verify_access(&auth.jwt) {
         Ok(c) => c,
         Err(e) => {
@@ -61,8 +45,23 @@ pub async fn handle_connection(
     let user_id  = claims.sub.clone();
     let provider = auth.provider.clone();
 
-    // Find or create device
-    let device_id = find_or_create_device(&db, &user_id, &auth.device_name).await?;
+    // Find or create device using the stable device_key UUID
+    let device_id = find_or_create_device(&db, &user_id, &auth.device_name, &auth.device_key).await?;
+
+    // Schema version guard — delete only this device's series, not all devices for this provider
+    if auth.schema_version != SCHEMA_VERSION {
+        let _ = vm.delete_device_series(&device_id).await;
+
+        let err = AuthErrPayload {
+            reason: format!(
+                "schema version mismatch: client={}, server={}",
+                auth.schema_version, SCHEMA_VERSION
+            ),
+            reset_required: true,
+        };
+        write_frame(&mut writer, MsgType::AuthErr, &bincode::serialize(&err)?).await?;
+        return Ok(());
+    }
 
     // Ensure cursor row for this (device, provider)
     ensure_cursor(&db, &device_id, &provider).await?;
@@ -123,20 +122,25 @@ pub async fn handle_connection(
 
 // ─── DB helpers ──────────────────────────────────────────────────────────────
 
-async fn find_or_create_device(db: &Database, user_id: &str, device_name: &str) -> Result<String> {
-    // Look up existing device
+async fn find_or_create_device(
+    db: &Database,
+    user_id: &str,
+    device_name: &str,
+    device_key: &str,
+) -> Result<String> {
+    // Look up existing device by stable device_key UUID
     let existing: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM devices WHERE user_id = ? AND name = ?",
+        "SELECT id FROM devices WHERE device_key = ?",
     )
-    .bind(user_id)
-    .bind(device_name)
+    .bind(device_key)
     .fetch_optional(&db.pool)
     .await?;
 
     if let Some(id) = existing {
         let now = chrono::Utc::now().timestamp();
-        sqlx::query("UPDATE devices SET last_seen_at = ? WHERE id = ?")
+        sqlx::query("UPDATE devices SET last_seen_at = ?, name = ? WHERE id = ?")
             .bind(now)
+            .bind(device_name)
             .bind(&id)
             .execute(&db.pool)
             .await?;
@@ -147,17 +151,19 @@ async fn find_or_create_device(db: &Database, user_id: &str, device_name: &str) 
     let id  = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().timestamp();
     sqlx::query(
-        "INSERT INTO devices (id, user_id, name, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO devices (id, user_id, name, device_key, created_at, last_seen_at) \
+         VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(user_id)
     .bind(device_name)
+    .bind(device_key)
     .bind(now)
     .bind(now)
     .execute(&db.pool)
     .await?;
 
-    tracing::info!("registered new device '{device_name}' for user={user_id} id={id}");
+    tracing::info!("registered new device '{device_name}' (key={device_key}) for user={user_id} id={id}");
     Ok(id)
 }
 
@@ -198,7 +204,7 @@ async fn handle_sync_batch(
     }
 
     // Build VM metric points from batch
-    let points = build_metric_points(batch, user_id, provider);
+    let points = build_metric_points(batch, user_id, device_id, provider);
 
     // Write to VM first — cursor MUST NOT advance on failure
     vm.write_batch(&points).await?;
@@ -223,7 +229,12 @@ async fn handle_sync_batch(
 
 // ─── Metric point builder ─────────────────────────────────────────────────────
 
-fn build_metric_points(batch: &SyncBatchPayload, user_id: &str, provider: &str) -> Vec<MetricPoint> {
+fn build_metric_points(
+    batch: &SyncBatchPayload,
+    user_id: &str,
+    device_id: &str,
+    provider: &str,
+) -> Vec<MetricPoint> {
     let empty = String::new();
     let mut points = Vec::with_capacity(batch.items.len() * 4);
 
@@ -237,11 +248,12 @@ fn build_metric_points(batch: &SyncBatchPayload, user_id: &str, provider: &str) 
             .unwrap_or("");
 
         let base: Vec<(String, String)> = vec![
-            ("model".into(),    model.clone()),
-            ("session".into(),  session.clone()),
-            ("provider".into(), provider.to_string()),
-            ("user_id".into(),  user_id.to_string()),
-            ("project".into(),  project.to_string()),
+            ("model".into(),     model.clone()),
+            ("session".into(),   session.clone()),
+            ("provider".into(),  provider.to_string()),
+            ("user_id".into(),   user_id.to_string()),
+            ("device_id".into(), device_id.to_string()),
+            ("project".into(),   project.to_string()),
         ];
 
         let ts = item.ts_ms;
@@ -302,7 +314,7 @@ mod tests {
             },
         };
         let batch  = make_batch(vec![item]);
-        let points = build_metric_points(&batch, "user-1", "claude_code");
+        let points = build_metric_points(&batch, "user-1", "device-1", "claude_code");
 
         assert_eq!(points.len(), 2, "input + output only (cache=0 skipped)");
 
@@ -331,7 +343,7 @@ mod tests {
             },
         };
         let batch  = make_batch(vec![item]);
-        let points = build_metric_points(&batch, "user-1", "claude_code");
+        let points = build_metric_points(&batch, "user-1", "device-1", "claude_code");
         assert_eq!(points.len(), 4);
     }
 
@@ -352,17 +364,19 @@ mod tests {
             },
         };
         let batch  = make_batch(vec![item]);
-        let points = build_metric_points(&batch, "user-xyz", "claude_code");
+        let points = build_metric_points(&batch, "user-xyz", "device-1", "claude_code");
         assert_eq!(points.len(), 1);
         let pt = &points[0];
         let user_label = pt.labels.iter().find(|(k, _)| k == "user_id").unwrap();
         assert_eq!(user_label.1, "user-xyz");
+        let device_label = pt.labels.iter().find(|(k, _)| k == "device_id").unwrap();
+        assert_eq!(device_label.1, "device-1");
     }
 
     #[test]
     fn test_build_metric_points_empty_batch() {
         let batch  = make_batch(vec![]);
-        let points = build_metric_points(&batch, "user-1", "claude_code");
+        let points = build_metric_points(&batch, "user-1", "device-1", "claude_code");
         assert!(points.is_empty());
     }
 }

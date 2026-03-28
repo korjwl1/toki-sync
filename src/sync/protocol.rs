@@ -57,6 +57,9 @@ pub struct AuthPayload {
     pub device_name: String,
     pub schema_version: u32,
     pub provider: String,
+    /// Stable UUID generated on the client at `toki sync enable`.
+    /// Used for device lookup instead of (user_id, name) to survive renames.
+    pub device_key: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
