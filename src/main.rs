@@ -53,8 +53,22 @@ async fn main() -> Result<()> {
         config.auth.brute_force_lockout_secs,
     ));
     let vm = Arc::new(VictoriaMetrics::new(&config.backend.vm_url));
+    let oidc_state_store = Arc::new(crate::auth::oidc::OidcStateStore::new(600)); // 10 min TTL
 
-    let state = AppState { db, jwt, brute, vm, allow_registration: config.auth.allow_registration, access_token_ttl_secs: config.auth.access_token_ttl_secs };
+    if !config.auth.oidc_issuer.is_empty() {
+        tracing::info!(issuer = %config.auth.oidc_issuer, "OIDC authentication enabled");
+    }
+
+    let state = AppState {
+        db, jwt, brute, vm,
+        allow_registration: config.auth.allow_registration,
+        access_token_ttl_secs: config.auth.access_token_ttl_secs,
+        oidc_issuer: config.auth.oidc_issuer.clone(),
+        oidc_client_id: config.auth.oidc_client_id.clone(),
+        oidc_client_secret: config.auth.oidc_client_secret.clone(),
+        oidc_redirect_uri: config.auth.oidc_redirect_uri.clone(),
+        oidc_state_store,
+    };
 
     // -- TCP sync server ------------------------------------------------------
     let tcp_addr: SocketAddr = format!("{}:{}", config.server.bind, config.server.tcp_port)

@@ -131,6 +131,52 @@ impl SqliteRepo {
         .execute(&self.pool)
         .await;
 
+        // Migration: teams and team_members tables
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS teams (
+                id          TEXT PRIMARY KEY,
+                name        TEXT NOT NULL UNIQUE,
+                created_at  INTEGER NOT NULL,
+                updated_at  INTEGER NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await
+        .context("migrate: create teams")?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS team_members (
+                team_id   TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+                user_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                role      TEXT NOT NULL DEFAULT 'member',
+                joined_at INTEGER NOT NULL,
+                PRIMARY KEY (team_id, user_id)
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await
+        .context("migrate: create team_members")?;
+
+        let _ = sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_team_members_user ON team_members(user_id)"
+        )
+        .execute(&self.pool)
+        .await;
+
+        // Migration: add OIDC columns to users
+        let _ = sqlx::query("ALTER TABLE users ADD COLUMN oidc_sub TEXT")
+            .execute(&self.pool).await;
+        let _ = sqlx::query("ALTER TABLE users ADD COLUMN oidc_issuer TEXT")
+            .execute(&self.pool).await;
+        let _ = sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_oidc ON users(oidc_issuer, oidc_sub) WHERE oidc_sub IS NOT NULL"
+        )
+        .execute(&self.pool).await;
+
         Ok(())
     }
 }
@@ -140,30 +186,30 @@ impl DatabaseRepo for SqliteRepo {
     // ── Users ───────────────────────────────────────────────────────────────
 
     async fn get_user_by_username(&self, username: &str) -> Result<Option<User>> {
-        let row: Option<(String, String, String, String, i64, i64)> = sqlx::query_as(
-            "SELECT id, username, password_hash, role, created_at, updated_at FROM users WHERE username = ?",
+        let row: Option<(String, String, String, String, i64, i64, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer FROM users WHERE username = ?",
         )
         .bind(username)
         .fetch_optional(&self.pool)
         .await
         .context("get_user_by_username")?;
 
-        Ok(row.map(|(id, username, password_hash, role, created_at, updated_at)| User {
-            id, username, password_hash, role, created_at, updated_at,
+        Ok(row.map(|(id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer)| User {
+            id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer,
         }))
     }
 
     async fn get_user_by_id(&self, id: &str) -> Result<Option<User>> {
-        let row: Option<(String, String, String, String, i64, i64)> = sqlx::query_as(
-            "SELECT id, username, password_hash, role, created_at, updated_at FROM users WHERE id = ?",
+        let row: Option<(String, String, String, String, i64, i64, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer FROM users WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
         .await
         .context("get_user_by_id")?;
 
-        Ok(row.map(|(id, username, password_hash, role, created_at, updated_at)| User {
-            id, username, password_hash, role, created_at, updated_at,
+        Ok(row.map(|(id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer)| User {
+            id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer,
         }))
     }
 
@@ -397,6 +443,166 @@ impl DatabaseRepo for SqliteRepo {
         .execute(&self.pool)
         .await
         .context("advance_cursor")?;
+        Ok(())
+    }
+
+    // ── Teams ───────────────────────────────────────────────────────────────
+
+    async fn create_team(&self, id: &str, name: &str) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        sqlx::query("INSERT INTO teams (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)")
+            .bind(id)
+            .bind(name)
+            .bind(now)
+            .bind(now)
+            .execute(&self.pool)
+            .await
+            .context("create_team")?;
+        Ok(())
+    }
+
+    async fn get_team(&self, id: &str) -> Result<Option<Team>> {
+        let row: Option<(String, String, i64, i64)> = sqlx::query_as(
+            "SELECT id, name, created_at, updated_at FROM teams WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("get_team")?;
+
+        Ok(row.map(|(id, name, created_at, updated_at)| Team {
+            id, name, created_at, updated_at,
+        }))
+    }
+
+    async fn list_teams(&self) -> Result<Vec<Team>> {
+        let rows: Vec<(String, String, i64, i64)> = sqlx::query_as(
+            "SELECT id, name, created_at, updated_at FROM teams ORDER BY name",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("list_teams")?;
+
+        Ok(rows.into_iter().map(|(id, name, created_at, updated_at)| Team {
+            id, name, created_at, updated_at,
+        }).collect())
+    }
+
+    async fn delete_team(&self, id: &str) -> Result<bool> {
+        let affected = sqlx::query("DELETE FROM teams WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .context("delete_team")?
+            .rows_affected();
+        Ok(affected > 0)
+    }
+
+    async fn list_user_teams(&self, user_id: &str) -> Result<Vec<TeamMembership>> {
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT tm.team_id, t.name, tm.role FROM team_members tm
+             JOIN teams t ON tm.team_id = t.id
+             WHERE tm.user_id = ? ORDER BY t.name",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("list_user_teams")?;
+
+        Ok(rows.into_iter().map(|(team_id, team_name, role)| TeamMembership {
+            team_id, team_name, role,
+        }).collect())
+    }
+
+    // ── Team members ───────────────────────────────────────────────────────
+
+    async fn add_team_member(&self, team_id: &str, user_id: &str, role: &str) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        sqlx::query(
+            "INSERT INTO team_members (team_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)"
+        )
+        .bind(team_id)
+        .bind(user_id)
+        .bind(role)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .context("add_team_member")?;
+        Ok(())
+    }
+
+    async fn remove_team_member(&self, team_id: &str, user_id: &str) -> Result<bool> {
+        let affected = sqlx::query("DELETE FROM team_members WHERE team_id = ? AND user_id = ?")
+            .bind(team_id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await
+            .context("remove_team_member")?
+            .rows_affected();
+        Ok(affected > 0)
+    }
+
+    async fn list_team_members(&self, team_id: &str) -> Result<Vec<TeamMemberSummary>> {
+        let rows: Vec<(String, String, String, i64)> = sqlx::query_as(
+            "SELECT tm.user_id, u.username, tm.role, tm.joined_at FROM team_members tm
+             JOIN users u ON tm.user_id = u.id
+             WHERE tm.team_id = ? ORDER BY tm.joined_at",
+        )
+        .bind(team_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("list_team_members")?;
+
+        Ok(rows.into_iter().map(|(user_id, username, role, joined_at)| TeamMemberSummary {
+            user_id, username, role, joined_at,
+        }).collect())
+    }
+
+    async fn get_team_member_role(&self, team_id: &str, user_id: &str) -> Result<Option<String>> {
+        let role: Option<String> = sqlx::query_scalar(
+            "SELECT role FROM team_members WHERE team_id = ? AND user_id = ?"
+        )
+        .bind(team_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("get_team_member_role")?;
+        Ok(role)
+    }
+
+    // ── OIDC users ─────────────────────────────────────────────────────────
+
+    async fn find_user_by_oidc(&self, issuer: &str, sub: &str) -> Result<Option<User>> {
+        let row: Option<(String, String, String, String, i64, i64, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer FROM users WHERE oidc_issuer = ? AND oidc_sub = ?",
+        )
+        .bind(issuer)
+        .bind(sub)
+        .fetch_optional(&self.pool)
+        .await
+        .context("find_user_by_oidc")?;
+
+        Ok(row.map(|(id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer)| User {
+            id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer,
+        }))
+    }
+
+    async fn create_oidc_user(&self, user: &NewOidcUser) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer) VALUES (?,?,?,?,?,?,?,?)",
+        )
+        .bind(&user.id)
+        .bind(&user.username)
+        .bind("")  // no password for OIDC users
+        .bind(&user.role)
+        .bind(now)
+        .bind(now)
+        .bind(&user.oidc_sub)
+        .bind(&user.oidc_issuer)
+        .execute(&self.pool)
+        .await
+        .context("create_oidc_user")?;
         Ok(())
     }
 

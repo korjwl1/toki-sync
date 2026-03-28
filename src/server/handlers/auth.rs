@@ -1,7 +1,7 @@
 use axum::{
-    extract::{ConnectInfo, State},
+    extract::{ConnectInfo, Query, State},
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Redirect},
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -22,9 +22,21 @@ pub struct AuthMethodRequest {
     pub username: String,
 }
 
-pub async fn auth_method(Json(body): Json<AuthMethodRequest>) -> impl IntoResponse {
+pub async fn auth_method(
+    State(state): State<AppState>,
+    Json(body): Json<AuthMethodRequest>,
+) -> impl IntoResponse {
     let _ = body.username;
-    Json(serde_json::json!({ "method": "password" }))
+    if !state.oidc_issuer.is_empty() {
+        // Build OIDC authorize URL for the client to redirect to
+        let auth_url = format!(
+            "/auth/oidc/authorize?redirect_uri={}",
+            urlencoding::encode(&state.oidc_redirect_uri),
+        );
+        Json(serde_json::json!({ "method": "oidc", "auth_url": auth_url }))
+    } else {
+        Json(serde_json::json!({ "method": "password" }))
+    }
 }
 
 // ─── /login ─────────────────────────────────────────────────────────────────
@@ -185,4 +197,155 @@ pub async fn token_refresh(
             Err(AppError::unauthorized("invalid or expired refresh token"))
         }
     }
+}
+
+// ─── OIDC /auth/oidc/authorize ─────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct OidcAuthorizeQuery {
+    #[serde(default)]
+    pub redirect_uri: String,
+}
+
+pub async fn oidc_authorize(
+    State(state): State<AppState>,
+    Query(params): Query<OidcAuthorizeQuery>,
+) -> Result<Redirect, AppError> {
+    if state.oidc_issuer.is_empty() {
+        return Err(AppError { status: StatusCode::NOT_FOUND, message: "OIDC not configured".into() });
+    }
+
+    // Discover OIDC provider endpoints
+    let discovery = crate::auth::oidc::discover(&state.oidc_issuer)
+        .await
+        .map_err(AppError::internal)?;
+
+    // Generate CSRF state token
+    let csrf_state = uuid::Uuid::new_v4().to_string();
+
+    // Store the state token with the client's desired redirect_uri (for CLI flow)
+    let client_redirect = if params.redirect_uri.is_empty() {
+        String::new()
+    } else {
+        params.redirect_uri.clone()
+    };
+    state.oidc_state_store.insert(csrf_state.clone(), client_redirect);
+
+    // Build the authorization URL
+    let auth_url = crate::auth::oidc::build_auth_url(
+        &discovery,
+        &state.oidc_client_id,
+        &state.oidc_redirect_uri,
+        &csrf_state,
+    );
+
+    Ok(Redirect::temporary(&auth_url))
+}
+
+// ─── OIDC /auth/callback ───────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct OidcCallbackQuery {
+    pub code: String,
+    pub state: String,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+pub async fn oidc_callback(
+    State(state): State<AppState>,
+    Query(params): Query<OidcCallbackQuery>,
+) -> Result<axum::response::Response, AppError> {
+    if state.oidc_issuer.is_empty() {
+        return Err(AppError { status: StatusCode::NOT_FOUND, message: "OIDC not configured".into() });
+    }
+
+    // Check for error from provider
+    if let Some(ref err) = params.error {
+        return Err(AppError { status: StatusCode::BAD_REQUEST, message: format!("OIDC error: {err}") });
+    }
+
+    // Validate CSRF state
+    let client_redirect = state.oidc_state_store.validate(&params.state)
+        .ok_or_else(|| AppError { status: StatusCode::BAD_REQUEST, message: "invalid or expired state parameter".into() })?;
+
+    // Discover provider endpoints
+    let discovery = crate::auth::oidc::discover(&state.oidc_issuer)
+        .await
+        .map_err(AppError::internal)?;
+
+    // Exchange code for tokens
+    let token_resp = crate::auth::oidc::exchange_code(
+        &discovery,
+        &state.oidc_client_id,
+        &state.oidc_client_secret,
+        &state.oidc_redirect_uri,
+        &params.code,
+    )
+    .await
+    .map_err(AppError::internal)?;
+
+    // Extract user info
+    let user_info = crate::auth::oidc::extract_user_info(&token_resp, &discovery)
+        .await
+        .map_err(AppError::internal)?;
+
+    // Find or create user by OIDC subject
+    let user = state.db.find_user_by_oidc(&state.oidc_issuer, &user_info.sub)
+        .await
+        .map_err(AppError::internal)?;
+
+    let user_id = match user {
+        Some(u) => u.id,
+        None => {
+            // Create new OIDC user
+            let id = uuid::Uuid::new_v4().to_string();
+            let username = user_info.email.clone()
+                .or_else(|| user_info.name.clone())
+                .unwrap_or_else(|| format!("oidc_{}", &user_info.sub[..8.min(user_info.sub.len())]));
+
+            let new_user = crate::db::models::NewOidcUser {
+                id: id.clone(),
+                username,
+                role: "user".to_string(),
+                oidc_sub: user_info.sub.clone(),
+                oidc_issuer: state.oidc_issuer.clone(),
+            };
+            state.db.create_oidc_user(&new_user).await.map_err(AppError::internal)?;
+            tracing::info!(oidc_sub = %user_info.sub, "OIDC user created");
+            id
+        }
+    };
+
+    // Issue JWT pair
+    let access = state.jwt.issue_access_token(&user_id).map_err(AppError::internal)?;
+    let (refresh, refresh_claims) = state.jwt
+        .issue_refresh_token(&user_id, None)
+        .map_err(AppError::internal)?;
+    state.jwt.store_refresh_token(&*state.db, &refresh_claims)
+        .await
+        .map_err(AppError::internal)?;
+
+    tracing::info!(user_id = %user_id, "OIDC login successful");
+
+    // If client provided a redirect_uri (CLI flow), redirect with tokens
+    if !client_redirect.is_empty() {
+        let redirect_url = format!(
+            "{}?access_token={}&refresh_token={}&token_type=Bearer&expires_in={}",
+            client_redirect,
+            urlencoding::encode(&access),
+            urlencoding::encode(&refresh),
+            state.access_token_ttl_secs,
+        );
+        return Ok(Redirect::temporary(&redirect_url).into_response());
+    }
+
+    // Browser flow: redirect to dashboard with tokens in URL fragment
+    let dashboard_url = format!(
+        "/dashboard#access_token={}&refresh_token={}&expires_in={}",
+        urlencoding::encode(&access),
+        urlencoding::encode(&refresh),
+        state.access_token_ttl_secs,
+    );
+    Ok(Redirect::temporary(&dashboard_url).into_response())
 }

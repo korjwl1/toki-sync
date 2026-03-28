@@ -39,6 +39,9 @@ zstd = "0.13"
 ureq = { version = "2", features = ["json"] }
 urlencoding = "2"
 
+# HTTP client (OIDC token exchange)
+reqwest = { version = "0.12", features = ["json"] }
+
 # HTTP response (bytes)
 bytes = "1"
 

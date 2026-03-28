@@ -74,6 +74,169 @@
   }
   .logout-btn:hover { color: #f85149; border-color: #f85149; }
 
+  /* ── Tabs ──────────────────────────────────────────────────────────────── */
+  .tab-bar {
+    display: flex;
+    gap: 0;
+    padding: 0 24px;
+    background: #161b22;
+    border-bottom: 1px solid #21262d;
+  }
+  .tab-btn {
+    padding: 10px 20px;
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: #8b949e;
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .tab-btn:hover { color: #c9d1d9; }
+  .tab-btn.active {
+    color: #e6edf3;
+    border-bottom-color: #1f6feb;
+  }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+
+  /* ── Teams section ────────────────────────────────────────────────────── */
+  .teams-container {
+    padding: 24px;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+  .teams-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+  }
+  .teams-header h2 {
+    font-size: 1rem;
+    color: #e6edf3;
+  }
+  .btn {
+    padding: 6px 16px;
+    border-radius: 6px;
+    border: 1px solid #30363d;
+    background: #21262d;
+    color: #c9d1d9;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .btn:hover { border-color: #484f58; color: #e6edf3; }
+  .btn-primary {
+    background: #238636;
+    border-color: #238636;
+    color: #fff;
+  }
+  .btn-primary:hover { background: #2ea043; }
+  .btn-danger {
+    background: transparent;
+    border-color: #f85149;
+    color: #f85149;
+  }
+  .btn-danger:hover { background: #f8514920; }
+  .btn-sm { padding: 3px 10px; font-size: 0.75rem; }
+  .team-table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  .team-table th, .team-table td {
+    padding: 10px 12px;
+    text-align: left;
+    border-bottom: 1px solid #21262d;
+    font-size: 0.85rem;
+  }
+  .team-table th {
+    color: #8b949e;
+    font-weight: 500;
+    font-size: 0.8rem;
+  }
+  .team-table tr:hover { background: #161b2280; }
+  .team-table .actions { display: flex; gap: 6px; }
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: #0d1117cc;
+    z-index: 2000;
+    align-items: center;
+    justify-content: center;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 24px;
+    min-width: 340px;
+    max-width: 480px;
+  }
+  .modal h3 {
+    font-size: 0.95rem;
+    color: #e6edf3;
+    margin-bottom: 16px;
+  }
+  .modal label {
+    display: block;
+    font-size: 0.8rem;
+    color: #8b949e;
+    margin-bottom: 4px;
+  }
+  .modal input, .modal select {
+    width: 100%;
+    padding: 8px 10px;
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    color: #c9d1d9;
+    font-size: 0.85rem;
+    margin-bottom: 12px;
+  }
+  .modal input:focus, .modal select:focus {
+    outline: none;
+    border-color: #1f6feb;
+  }
+  .modal .modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .team-detail-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .team-detail-header h3 {
+    font-size: 1rem;
+    color: #e6edf3;
+  }
+  .back-btn {
+    padding: 4px 10px;
+    background: transparent;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    color: #8b949e;
+    font-size: 0.8rem;
+    cursor: pointer;
+  }
+  .back-btn:hover { color: #c9d1d9; border-color: #484f58; }
+  .team-chart-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-top: 20px;
+  }
+  @media (max-width: 900px) {
+    .team-chart-grid { grid-template-columns: 1fr; }
+  }
+  .admin-only { display: none; }
+
   /* ── Grid ──────────────────────────────────────────────────────────────── */
   .grid {
     display: grid;
@@ -142,6 +305,12 @@
   </div>
 </div>
 
+<div class="tab-bar">
+  <button class="tab-btn active" data-tab="usage">Usage</button>
+  <button class="tab-btn admin-only" data-tab="teams">Teams</button>
+</div>
+
+<div id="tab-usage" class="tab-content active">
 <div class="grid">
   <div class="panel">
     <h2>Total Tokens Over Time</h2>
@@ -160,12 +329,102 @@
     <canvas id="chart-type"></canvas>
   </div>
 </div>
+</div><!-- end tab-usage -->
+
+<div id="tab-teams" class="tab-content">
+  <div class="teams-container">
+    <!-- Team list view -->
+    <div id="teams-list-view">
+      <div class="teams-header">
+        <h2>Teams</h2>
+        <button class="btn btn-primary" id="btn-create-team">Create Team</button>
+      </div>
+      <table class="team-table">
+        <thead>
+          <tr><th>Name</th><th>Members</th><th>Created</th><th></th></tr>
+        </thead>
+        <tbody id="teams-tbody"></tbody>
+      </table>
+    </div>
+
+    <!-- Team detail view -->
+    <div id="teams-detail-view" style="display:none;">
+      <div class="team-detail-header">
+        <button class="back-btn" id="btn-back-teams">&larr; Back</button>
+        <h3 id="team-detail-name"></h3>
+        <button class="btn btn-primary btn-sm" id="btn-add-member">Add Member</button>
+      </div>
+      <table class="team-table">
+        <thead>
+          <tr><th>Username</th><th>Role</th><th>Joined</th><th></th></tr>
+        </thead>
+        <tbody id="members-tbody"></tbody>
+      </table>
+      <div class="team-chart-grid">
+        <div class="panel">
+          <h2>Team Total Tokens</h2>
+          <canvas id="team-chart-total"></canvas>
+        </div>
+        <div class="panel">
+          <h2>Team Tokens by Model</h2>
+          <canvas id="team-chart-model"></canvas>
+        </div>
+      </div>
+    </div>
+  </div>
+</div><!-- end tab-teams -->
+
+<!-- Create Team Modal -->
+<div class="modal-overlay" id="modal-create-team">
+  <div class="modal">
+    <h3>Create Team</h3>
+    <label for="team-name-input">Team Name</label>
+    <input type="text" id="team-name-input" placeholder="e.g. Engineering">
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal('modal-create-team')">Cancel</button>
+      <button class="btn btn-primary" id="btn-confirm-create-team">Create</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add Member Modal -->
+<div class="modal-overlay" id="modal-add-member">
+  <div class="modal">
+    <h3>Add Team Member</h3>
+    <label for="member-user-select">User</label>
+    <select id="member-user-select"></select>
+    <label for="member-role-select">Role</label>
+    <select id="member-role-select">
+      <option value="member">Member</option>
+      <option value="admin">Admin</option>
+      <option value="owner">Owner</option>
+    </select>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal('modal-add-member')">Cancel</button>
+      <button class="btn btn-primary" id="btn-confirm-add-member">Add</button>
+    </div>
+  </div>
+</div>
 
 <script>
 (function() {
   'use strict';
 
   // ── Auth helpers ─────────────────────────────────────────────────────────
+
+  // Handle OIDC callback tokens in URL fragment
+  if (window.location.hash) {
+    const params = new URLSearchParams(window.location.hash.substring(1));
+    const at = params.get('access_token');
+    const rt = params.get('refresh_token');
+    const ei = params.get('expires_in');
+    if (at && rt) {
+      localStorage.setItem('access_token', at);
+      localStorage.setItem('refresh_token', rt);
+      if (ei) localStorage.setItem('expires_in', ei);
+      history.replaceState(null, '', '/dashboard');
+    }
+  }
 
   function getToken() { return localStorage.getItem('access_token'); }
 
@@ -438,9 +697,286 @@
     refreshTimer = setInterval(refreshAllPanels, 60000);
   }
 
+  // ── Tab switching ─────────────────────────────────────────────────────
+
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', function() {
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+      this.classList.add('active');
+      const tab = document.getElementById('tab-' + this.dataset.tab);
+      if (tab) tab.classList.add('active');
+      if (this.dataset.tab === 'teams') refreshTeamsList();
+    });
+  });
+
+  // ── Modal helpers ─────────────────────────────────────────────────────
+
+  window.closeModal = function(id) {
+    document.getElementById(id).classList.remove('open');
+  };
+
+  function openModal(id) {
+    document.getElementById(id).classList.add('open');
+  }
+
+  // ── Auth fetch with body ──────────────────────────────────────────────
+
+  async function authFetchJson(url, opts) {
+    let token = getToken();
+    let resp = await fetch(url, {
+      ...opts,
+      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json', ...(opts.headers || {}) },
+    });
+    if (resp.status === 401) {
+      token = await refreshAccessToken();
+      if (!token) return null;
+      resp = await fetch(url, {
+        ...opts,
+        headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json', ...(opts.headers || {}) },
+      });
+    }
+    return resp;
+  }
+
+  async function authDelete(url) {
+    let token = getToken();
+    let resp = await fetch(url, {
+      method: 'DELETE',
+      headers: { 'Authorization': 'Bearer ' + token },
+    });
+    if (resp.status === 401) {
+      token = await refreshAccessToken();
+      if (!token) return null;
+      resp = await fetch(url, {
+        method: 'DELETE',
+        headers: { 'Authorization': 'Bearer ' + token },
+      });
+    }
+    return resp;
+  }
+
+  // ── Admin check ───────────────────────────────────────────────────────
+
+  let isAdmin = false;
+
+  async function checkAdmin() {
+    const data = await authFetch('/admin/users');
+    if (data && data.users) {
+      isAdmin = true;
+      document.querySelectorAll('.admin-only').forEach(el => el.style.display = '');
+    }
+  }
+
+  // ── Teams management (admin only) ─────────────────────────────────────
+
+  let currentTeamId = null;
+  let allUsers = [];
+
+  function formatDate(epoch) {
+    if (!epoch) return '-';
+    return new Date(epoch * 1000).toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' });
+  }
+
+  async function refreshTeamsList() {
+    if (!isAdmin) return;
+    const data = await authFetch('/admin/teams');
+    if (!data || !data.teams) return;
+    const tbody = document.getElementById('teams-tbody');
+    tbody.innerHTML = '';
+    for (const t of data.teams) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td>' + esc(t.name) + '</td>'
+        + '<td>' + t.member_count + '</td>'
+        + '<td>' + formatDate(t.created_at) + '</td>'
+        + '<td class="actions">'
+        + '<button class="btn btn-sm" data-view="' + t.id + '">View</button>'
+        + '<button class="btn btn-danger btn-sm" data-del="' + t.id + '">Delete</button>'
+        + '</td>';
+      tbody.appendChild(tr);
+    }
+    // Bind view/delete
+    tbody.querySelectorAll('[data-view]').forEach(b => {
+      b.addEventListener('click', function() { showTeamDetail(this.dataset.view, data.teams.find(t => t.id === this.dataset.view)); });
+    });
+    tbody.querySelectorAll('[data-del]').forEach(b => {
+      b.addEventListener('click', async function() {
+        if (!confirm('Delete this team?')) return;
+        await authDelete('/admin/teams/' + this.dataset.del);
+        refreshTeamsList();
+      });
+    });
+  }
+
+  function esc(s) {
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  async function showTeamDetail(teamId, teamInfo) {
+    currentTeamId = teamId;
+    document.getElementById('teams-list-view').style.display = 'none';
+    document.getElementById('teams-detail-view').style.display = '';
+    document.getElementById('team-detail-name').textContent = teamInfo ? teamInfo.name : teamId;
+
+    // Load members
+    await refreshTeamMembers(teamId);
+
+    // Load team usage charts
+    await refreshTeamCharts(teamId);
+  }
+
+  document.getElementById('btn-back-teams').addEventListener('click', function() {
+    document.getElementById('teams-detail-view').style.display = 'none';
+    document.getElementById('teams-list-view').style.display = '';
+    currentTeamId = null;
+  });
+
+  async function refreshTeamMembers(teamId) {
+    const data = await authFetch('/admin/teams/' + teamId + '/members');
+    if (!data || !data.members) return;
+    const tbody = document.getElementById('members-tbody');
+    tbody.innerHTML = '';
+    for (const m of data.members) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td>' + esc(m.username) + '</td>'
+        + '<td>' + esc(m.role) + '</td>'
+        + '<td>' + formatDate(m.joined_at) + '</td>'
+        + '<td class="actions">'
+        + '<button class="btn btn-danger btn-sm" data-rm-user="' + m.user_id + '">Remove</button>'
+        + '</td>';
+      tbody.appendChild(tr);
+    }
+    tbody.querySelectorAll('[data-rm-user]').forEach(b => {
+      b.addEventListener('click', async function() {
+        if (!confirm('Remove this member?')) return;
+        await authDelete('/admin/teams/' + teamId + '/members/' + this.dataset.rmUser);
+        refreshTeamMembers(teamId);
+      });
+    });
+  }
+
+  async function refreshTeamCharts(teamId) {
+    const rangeStep = promqlRangeStep(currentRange);
+    const now = Math.floor(Date.now() / 1000);
+    const start = now - currentRange;
+    const step = stepForRange(currentRange);
+
+    const queries = [
+      { id: 'team-chart-total', expr: 'sum(increase(toki_tokens_total[' + rangeStep + ']))' },
+      { id: 'team-chart-model', expr: 'sum by (model)(increase(toki_tokens_total[' + rangeStep + ']))' },
+    ];
+
+    for (const q of queries) {
+      const url = '/api/v1/teams/' + teamId + '/query_range?query=' + encodeURIComponent(q.expr)
+        + '&start=' + start + '&end=' + now + '&step=' + step;
+      const data = await authFetch(url);
+      const { labels, series } = parseMatrix(data);
+
+      if (labels.length === 0) {
+        if (charts[q.id]) { charts[q.id].destroy(); delete charts[q.id]; }
+        const canvas = document.getElementById(q.id);
+        const parent = canvas.parentElement;
+        let nd = parent.querySelector('.no-data');
+        if (!nd) {
+          canvas.style.display = 'none';
+          nd = document.createElement('div');
+          nd.className = 'no-data';
+          nd.textContent = 'No data for this team';
+          parent.appendChild(nd);
+        }
+        continue;
+      }
+
+      const canvas = document.getElementById(q.id);
+      canvas.style.display = '';
+      const nd = canvas.parentElement.querySelector('.no-data');
+      if (nd) nd.remove();
+
+      const labelKey = q.id === 'team-chart-model' ? 'model' : null;
+      const datasets = series.map((s, idx) => {
+        const name = labelKey ? (s.metric[labelKey] || 'unknown') : 'Total';
+        return {
+          label: name,
+          data: s.values,
+          borderColor: COLORS[idx % COLORS.length],
+          backgroundColor: COLORS[idx % COLORS.length] + '20',
+          borderWidth: 2,
+          pointRadius: 0,
+          pointHitRadius: 8,
+          fill: series.length === 1,
+          tension: 0.3,
+        };
+      });
+      createOrUpdateChart(q.id, 'line', labels, datasets, currentRange);
+    }
+  }
+
+  // ── Create team ───────────────────────────────────────────────────────
+
+  document.getElementById('btn-create-team').addEventListener('click', function() {
+    document.getElementById('team-name-input').value = '';
+    openModal('modal-create-team');
+  });
+
+  document.getElementById('btn-confirm-create-team').addEventListener('click', async function() {
+    const name = document.getElementById('team-name-input').value.trim();
+    if (!name) return;
+    const resp = await authFetchJson('/admin/teams', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    });
+    if (resp && resp.ok) {
+      closeModal('modal-create-team');
+      refreshTeamsList();
+    } else {
+      const err = resp ? await resp.json().catch(() => ({})) : {};
+      alert(err.error || 'Failed to create team');
+    }
+  });
+
+  // ── Add member ────────────────────────────────────────────────────────
+
+  document.getElementById('btn-add-member').addEventListener('click', async function() {
+    // Load users for the select
+    const data = await authFetch('/admin/users');
+    if (!data || !data.users) return;
+    allUsers = data.users;
+    const sel = document.getElementById('member-user-select');
+    sel.innerHTML = '';
+    for (const u of data.users) {
+      const opt = document.createElement('option');
+      opt.value = u.id;
+      opt.textContent = u.username;
+      sel.appendChild(opt);
+    }
+    document.getElementById('member-role-select').value = 'member';
+    openModal('modal-add-member');
+  });
+
+  document.getElementById('btn-confirm-add-member').addEventListener('click', async function() {
+    if (!currentTeamId) return;
+    const userId = document.getElementById('member-user-select').value;
+    const role = document.getElementById('member-role-select').value;
+    if (!userId) return;
+    const resp = await authFetchJson('/admin/teams/' + currentTeamId + '/members', {
+      method: 'POST',
+      body: JSON.stringify({ user_id: userId, role: role }),
+    });
+    if (resp && resp.ok) {
+      closeModal('modal-add-member');
+      refreshTeamMembers(currentTeamId);
+    } else {
+      const err = resp ? await resp.json().catch(() => ({})) : {};
+      alert(err.error || 'Failed to add member');
+    }
+  });
+
   // ── Init ──────────────────────────────────────────────────────────────
 
   async function init() {
+    await checkAdmin();
     await refreshAllPanels();
     document.getElementById('loading').style.display = 'none';
     startAutoRefresh();

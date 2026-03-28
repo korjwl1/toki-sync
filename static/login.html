@@ -71,6 +71,29 @@
   }
   button:hover { background: #2ea043; }
   button:disabled { opacity: 0.6; cursor: not-allowed; }
+  .oidc-btn {
+    background: #1f6feb;
+    border-color: #388bfd;
+    margin-top: 12px;
+  }
+  .oidc-btn:hover { background: #388bfd; }
+  .divider {
+    text-align: center;
+    color: #8b949e;
+    font-size: 0.8rem;
+    margin: 16px 0;
+    position: relative;
+  }
+  .divider::before, .divider::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    width: 40%;
+    height: 1px;
+    background: #30363d;
+  }
+  .divider::before { left: 0; }
+  .divider::after { right: 0; }
   .error {
     background: #da363340;
     border: 1px solid #da3633;
@@ -95,14 +118,53 @@
     <input type="password" id="password" name="password" autocomplete="current-password" required>
     <button type="submit" id="submit-btn">Sign in</button>
   </form>
+  <div id="oidc-section" style="display:none">
+    <div class="divider">or</div>
+    <button type="button" id="oidc-btn" class="oidc-btn">Sign in with OIDC</button>
+  </div>
 </div>
 <script>
 (function() {
+  // Check for tokens in URL fragment (OIDC callback)
+  if (window.location.hash) {
+    const params = new URLSearchParams(window.location.hash.substring(1));
+    const at = params.get('access_token');
+    const rt = params.get('refresh_token');
+    const ei = params.get('expires_in');
+    if (at && rt) {
+      localStorage.setItem('access_token', at);
+      localStorage.setItem('refresh_token', rt);
+      if (ei) localStorage.setItem('expires_in', ei);
+      window.location.href = '/dashboard';
+      return;
+    }
+  }
+
   // If already logged in, redirect
   if (localStorage.getItem('access_token')) {
     window.location.href = '/dashboard';
     return;
   }
+
+  // Check auth method and show OIDC button if available
+  (async function() {
+    try {
+      const resp = await fetch('/auth-method', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: '' }),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data.method === 'oidc' && data.auth_url) {
+          document.getElementById('oidc-section').style.display = 'block';
+          document.getElementById('oidc-btn').addEventListener('click', function() {
+            window.location.href = data.auth_url;
+          });
+        }
+      }
+    } catch (_) { /* ignore, password form remains available */ }
+  })();
 
   const form = document.getElementById('login-form');
   const errorEl = document.getElementById('error');

@@ -64,6 +64,15 @@ pub struct AuthConfig {
     /// Allow open self-registration via POST /register. Default: false (admin-only).
     #[serde(default)]
     pub allow_registration: bool,
+    /// OIDC configuration (Phase 3). Empty = disabled.
+    #[serde(default)]
+    pub oidc_issuer: String,
+    #[serde(default)]
+    pub oidc_client_id: String,
+    #[serde(default)]
+    pub oidc_client_secret: String,
+    #[serde(default)]
+    pub oidc_redirect_uri: String,
 }
 
 fn default_access_ttl() -> u64 { 3600 }         // 1h
@@ -179,6 +188,10 @@ impl Config {
                     brute_force_window_secs: default_brute_window(),
                     brute_force_lockout_secs: default_brute_lockout(),
                     allow_registration: false,
+                    oidc_issuer: String::new(),
+                    oidc_client_id: String::new(),
+                    oidc_client_secret: String::new(),
+                    oidc_redirect_uri: String::new(),
                 },
                 backend: BackendConfig::default(),
                 storage: StorageConfig::default(),

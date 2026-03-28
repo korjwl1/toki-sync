@@ -8,10 +8,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::auth::{BruteForceGuard, JwtManager};
+use crate::auth::oidc::OidcStateStore;
 use crate::db::DatabaseRepo;
 use crate::metrics::vm::VictoriaMetrics;
 
-use super::handlers::{admin, auth, dashboard, me, metrics};
+use super::handlers::{admin, auth, dashboard, me, metrics, teams};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -21,6 +22,12 @@ pub struct AppState {
     pub vm: Arc<VictoriaMetrics>,
     pub allow_registration: bool,
     pub access_token_ttl_secs: u64,
+    /// OIDC config (Phase 3). Empty strings = disabled.
+    pub oidc_issuer: String,
+    pub oidc_client_id: String,
+    pub oidc_client_secret: String,
+    pub oidc_redirect_uri: String,
+    pub oidc_state_store: Arc<OidcStateStore>,
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -34,6 +41,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/login", get(dashboard::login_page).post(auth::login))
         .route("/register", post(auth::register))
         .route("/token/refresh", post(auth::token_refresh))
+        // OIDC (Phase 3)
+        .route("/auth/oidc/authorize", get(auth::oidc_authorize))
+        .route("/auth/callback", get(auth::oidc_callback))
         // PromQL proxy (requires JWT)
         .route("/api/v1/query", get(metrics::promql_query))
         .route("/api/v1/query_range", get(metrics::promql_query_range))
@@ -42,12 +52,20 @@ pub fn build_router(state: AppState) -> Router {
         .route("/me/devices/:device_id", delete(me::me_delete_device))
         .route("/me/devices/:device_id/name", axum::routing::patch(me::me_rename_device))
         .route("/me/password", axum::routing::patch(me::me_change_password))
+        .route("/me/teams", get(teams::me_teams))
         // Admin
         .route("/admin/users", get(admin::admin_list_users).post(admin::admin_create_user))
         .route("/admin/users/:user_id", delete(admin::admin_delete_user))
         .route("/admin/users/:user_id/password", axum::routing::patch(admin::admin_change_user_password))
         .route("/admin/devices", get(admin::admin_list_devices))
         .route("/admin/devices/:device_id", delete(admin::admin_delete_device))
+        // Admin: teams
+        .route("/admin/teams", get(teams::admin_list_teams).post(teams::admin_create_team))
+        .route("/admin/teams/:team_id", delete(teams::admin_delete_team))
+        .route("/admin/teams/:team_id/members", get(teams::admin_list_team_members).post(teams::admin_add_team_member))
+        .route("/admin/teams/:team_id/members/:user_id", delete(teams::admin_remove_team_member))
+        // Team usage aggregation
+        .route("/api/v1/teams/:team_id/query_range", get(teams::team_query_range))
         .with_state(state)
 }
 

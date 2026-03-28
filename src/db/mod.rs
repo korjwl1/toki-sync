@@ -37,6 +37,23 @@ pub trait DatabaseRepo: Send + Sync {
     async fn get_last_ts(&self, device_id: &str, provider: &str) -> Result<i64>;
     async fn advance_cursor(&self, device_id: &str, provider: &str, ts: i64) -> Result<()>;
 
+    // Teams
+    async fn create_team(&self, id: &str, name: &str) -> Result<()>;
+    async fn get_team(&self, id: &str) -> Result<Option<Team>>;
+    async fn list_teams(&self) -> Result<Vec<Team>>;
+    async fn delete_team(&self, id: &str) -> Result<bool>;
+    async fn list_user_teams(&self, user_id: &str) -> Result<Vec<TeamMembership>>;
+
+    // Team members
+    async fn add_team_member(&self, team_id: &str, user_id: &str, role: &str) -> Result<()>;
+    async fn remove_team_member(&self, team_id: &str, user_id: &str) -> Result<bool>;
+    async fn list_team_members(&self, team_id: &str) -> Result<Vec<TeamMemberSummary>>;
+    async fn get_team_member_role(&self, team_id: &str, user_id: &str) -> Result<Option<String>>;
+
+    // OIDC users
+    async fn find_user_by_oidc(&self, issuer: &str, sub: &str) -> Result<Option<User>>;
+    async fn create_oidc_user(&self, user: &NewOidcUser) -> Result<()>;
+
     // Refresh tokens
     async fn store_refresh_token(&self, jti: &str, user_id: &str, device_id: Option<&str>, expires_at: i64) -> Result<()>;
     async fn is_refresh_token_revoked(&self, jti: &str) -> Result<bool>;
