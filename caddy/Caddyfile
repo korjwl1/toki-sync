@@ -2,27 +2,30 @@
 # Requires caddy-l4 plugin (see caddy/Dockerfile)
 #
 # Topology:
-#   Client → Caddy :443 HTTPS → toki-sync HTTP :9091
-#   Client → Caddy :9090 TLS passthrough → toki-sync TCP :9090
+#   Client -> Caddy :443 HTTPS -> toki-sync HTTP :9091
+#   Client -> Caddy :9090 TLS passthrough -> toki-sync TCP :9090
+#
+# Modes:
+#   Domain mode (Let's Encrypt): set TOKI_DOMAIN=yourserver.duckdns.org
+#   Self-signed mode (IP-only):  leave TOKI_DOMAIN unset (defaults to localhost)
+#     Client must use: toki sync enable --server <ip>:9090 --insecure --username admin
 
 {
     # Global options
     admin off
 }
 
-# ── HTTPS: /api/v1/* and /login ────────────────────────────────────────────────
-{$TOKI_DOMAIN} {
-    # TLS via Let's Encrypt (ACME) — set TOKI_DOMAIN to your domain
-    # For DuckDNS: add caddy-dns/duckdns plugin and set DUCKDNS_TOKEN env
-    tls {
-        # Uncomment for DuckDNS wildcard certs:
-        # dns duckdns {env.DUCKDNS_TOKEN}
-    }
+# -- HTTPS: /api/v1/* and /login -----------------------------------------------
+# When TOKI_DOMAIN is unset, defaults to "localhost" with self-signed TLS.
+# When TOKI_DOMAIN is set (e.g. yourserver.duckdns.org), uses Let's Encrypt.
+{$TOKI_DOMAIN:localhost} {
+    tls {$TLS_MODE:internal}
 
     reverse_proxy toki-sync-server:9091
 }
 
-# ── Layer 4: TCP sync with TLS termination on port 9090 ────────────────────────
+# -- Layer 4: TCP sync with TLS termination on port 9090 -----------------------
+# Uses the same certificate store as the HTTPS site block above.
 {
     layer4 {
         :9090 {

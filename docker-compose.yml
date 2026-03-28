@@ -43,6 +43,8 @@ services:
       retries: 3
 
   caddy:
+    # Self-signed mode (no domain): omit TOKI_EXTERNAL_URL and DUCKDNS_TOKEN
+    # Client must use: toki sync enable --server <ip>:9090 --insecure --username admin
     profiles: ["caddy"]
     build:
       context: ./caddy
