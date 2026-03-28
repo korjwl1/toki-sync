@@ -20,11 +20,13 @@ pub async fn run_tcp_server(
     jwt: Arc<JwtManager>,
     vm:  Arc<VictoriaMetrics>,
     addr: SocketAddr,
+    max_concurrent_writes: usize,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let semaphore = Arc::new(Semaphore::new(MAX_TCP_CONNECTIONS));
-    tracing::info!("TCP sync server listening on {addr}");
+    let batch_semaphore = Arc::new(Semaphore::new(max_concurrent_writes));
+    tracing::info!("TCP sync server listening on {addr} (max_concurrent_writes={max_concurrent_writes})");
 
     loop {
         tokio::select! {
@@ -41,10 +43,11 @@ pub async fn run_tcp_server(
                 let db  = db.clone();
                 let jwt = jwt.clone();
                 let vm  = vm.clone();
+                let batch_sem = batch_semaphore.clone();
 
                 tokio::spawn(async move {
                     tracing::debug!("TCP connection from {peer_addr}");
-                    if let Err(e) = handle_connection(stream, db, jwt, vm).await {
+                    if let Err(e) = handle_connection(stream, db, jwt, vm, batch_sem).await {
                         tracing::warn!("TCP connection error from {peer_addr}: {e}");
                     }
                     drop(permit); // released when connection closes

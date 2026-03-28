@@ -105,9 +105,10 @@ async fn main() -> Result<()> {
     let tcp_db  = state.db.clone();
     let tcp_jwt = state.jwt.clone();
     let tcp_vm  = state.vm.clone();
+    let max_concurrent_writes = config.server.max_concurrent_writes;
 
     tokio::spawn(async move {
-        if let Err(e) = run_tcp_server(tcp_db, tcp_jwt, tcp_vm, tcp_addr, shutdown_rx).await {
+        if let Err(e) = run_tcp_server(tcp_db, tcp_jwt, tcp_vm, tcp_addr, max_concurrent_writes, shutdown_rx).await {
             tracing::error!("TCP server error: {e}");
         }
     });

@@ -35,11 +35,16 @@ pub struct ServerConfig {
     /// Example: "https://sync.example.com"
     #[serde(default)]
     pub external_url: String,
+    /// Maximum number of concurrent VM write operations across all TCP connections.
+    /// Limits bulk-batch thundering-herd pressure on VictoriaMetrics.
+    #[serde(default = "default_max_concurrent_writes")]
+    pub max_concurrent_writes: usize,
 }
 
 fn default_http_port() -> u16 { 9091 }
 fn default_tcp_port() -> u16 { 9090 }
 fn default_bind() -> String { "0.0.0.0".to_string() }
+fn default_max_concurrent_writes() -> usize { 10 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -48,6 +53,7 @@ impl Default for ServerConfig {
             tcp_port: default_tcp_port(),
             bind: default_bind(),
             external_url: String::new(),
+            max_concurrent_writes: default_max_concurrent_writes(),
         }
     }
 }

@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::net::TcpStream;
+use tokio::sync::Semaphore;
 
 use crate::auth::JwtManager;
 use crate::db::DatabaseRepo;
@@ -18,6 +19,7 @@ pub async fn handle_connection(
     db: Arc<dyn DatabaseRepo>,
     jwt: Arc<JwtManager>,
     vm: Arc<VictoriaMetrics>,
+    batch_semaphore: Arc<Semaphore>,
 ) -> Result<()> {
     let (r, w) = tokio::io::split(stream);
     let mut reader = tokio::io::BufReader::new(r);
@@ -133,7 +135,7 @@ pub async fn handle_connection(
                 let batch: SyncBatchPayload = bincode::deserialize(&raw)?;
                 // Ensure cursor exists for this batch's provider (may differ from auth provider)
                 db.ensure_cursor(&device_id, &batch.provider).await?;
-                match handle_sync_batch(&batch, &user_id, &device_id, &batch.provider, &*db, &vm).await {
+                match handle_sync_batch(&batch, &user_id, &device_id, &batch.provider, &*db, &vm, &batch_semaphore).await {
                     Ok(last_ts) => {
                         let ack = SyncAckPayload { last_ts_ms: last_ts };
                         write_frame(&mut writer, MsgType::SyncAck, &bincode::serialize(&ack)?).await?;
@@ -188,6 +190,7 @@ async fn handle_sync_batch(
     provider: &str,
     db: &dyn DatabaseRepo,
     vm: &VictoriaMetrics,
+    batch_semaphore: &Semaphore,
 ) -> Result<i64> {
     if batch.items.is_empty() {
         let current = db.get_last_ts(device_id, provider).await?;
@@ -197,8 +200,15 @@ async fn handle_sync_batch(
     // Build Prometheus text directly (avoids intermediate MetricPoint allocations)
     let prom_text = build_prometheus_text(batch, user_id, device_id, provider);
 
+    // Acquire permit — waits if max concurrent writes already in progress
+    let _permit = batch_semaphore.acquire().await
+        .map_err(|_| anyhow::anyhow!("batch semaphore closed"))?;
+
     // Write to VM first — cursor MUST NOT advance on failure
     vm.write_prometheus_text(prom_text).await?;
+
+    // Drop permit before cursor update (doesn't need the permit)
+    drop(_permit);
 
     // VM write succeeded → advance cursor to max ts in this batch
     let max_ts = batch.items.iter().map(|i| i.ts_ms).max().unwrap_or(0);
