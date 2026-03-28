@@ -28,6 +28,8 @@ pub struct AppState {
     pub oidc_client_secret: String,
     pub oidc_redirect_uri: String,
     pub oidc_state_store: Arc<OidcStateStore>,
+    /// External URL for JWT `iss` claim and OIDC redirect derivation.
+    pub external_url: String,
 }
 
 pub fn build_router(state: AppState) -> Router {

@@ -31,6 +31,10 @@ pub struct ServerConfig {
     pub tcp_port: u16,
     #[serde(default = "default_bind")]
     pub bind: String,
+    /// External URL used for JWT `iss` claim and OIDC redirect_uri derivation.
+    /// Example: "https://sync.example.com"
+    #[serde(default)]
+    pub external_url: String,
 }
 
 fn default_http_port() -> u16 { 9091 }
@@ -43,6 +47,7 @@ impl Default for ServerConfig {
             http_port: default_http_port(),
             tcp_port: default_tcp_port(),
             bind: default_bind(),
+            external_url: String::new(),
         }
     }
 }

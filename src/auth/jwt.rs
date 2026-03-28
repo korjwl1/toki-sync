@@ -18,6 +18,9 @@ pub struct Claims {
     pub exp: i64,
     /// Issued at (Unix seconds)
     pub iat: i64,
+    /// Issuer (external_url if configured)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub iss: Option<String>,
     /// Device id (optional, set for refresh tokens)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub did: Option<String>,
@@ -28,6 +31,8 @@ pub struct JwtManager {
     decoding_key: DecodingKey,
     access_ttl_secs: u64,
     refresh_ttl_secs: u64,
+    /// Issuer for JWT `iss` claim (from external_url). Empty = omitted.
+    issuer: String,
 }
 
 impl JwtManager {
@@ -38,7 +43,18 @@ impl JwtManager {
             decoding_key: DecodingKey::from_secret(key_bytes),
             access_ttl_secs,
             refresh_ttl_secs,
+            issuer: String::new(),
         }
+    }
+
+    /// Set the issuer for JWT `iss` claim (typically from external_url config).
+    pub fn with_issuer(mut self, issuer: &str) -> Self {
+        self.issuer = issuer.to_owned();
+        self
+    }
+
+    fn iss_claim(&self) -> Option<String> {
+        if self.issuer.is_empty() { None } else { Some(self.issuer.clone()) }
     }
 
     pub fn issue_access_token(&self, user_id: &str) -> Result<String> {
@@ -49,6 +65,7 @@ impl JwtManager {
             typ: "access".to_owned(),
             exp: now + self.access_ttl_secs as i64,
             iat: now,
+            iss: self.iss_claim(),
             did: None,
         };
         encode(&Header::new(Algorithm::HS256), &claims, &self.encoding_key)
@@ -63,6 +80,7 @@ impl JwtManager {
             typ: "refresh".to_owned(),
             exp: now + self.refresh_ttl_secs as i64,
             iat: now,
+            iss: self.iss_claim(),
             did: device_id.map(str::to_owned),
         };
         let token = encode(&Header::new(Algorithm::HS256), &claims, &self.encoding_key)

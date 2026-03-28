@@ -22,16 +22,12 @@
     reverse_proxy toki-sync-server:9091
 }
 
-# ── Layer 4: TCP sync passthrough on port 9090 ─────────────────────────────────
+# ── Layer 4: TCP sync with TLS termination on port 9090 ────────────────────────
 {
     layer4 {
         :9090 {
-            # Pass TCP connections directly to toki-sync (TLS handled by toki-sync or plaintext)
-            route {
-                proxy {
-                    upstream toki-sync-server:9090
-                }
-            }
+            tls
+            proxy toki-sync-server:9090
         }
     }
 }

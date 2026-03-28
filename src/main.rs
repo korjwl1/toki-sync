@@ -42,11 +42,16 @@ async fn main() -> Result<()> {
     ensure_admin(&*db).await?;
 
     // Build shared state
-    let jwt = Arc::new(JwtManager::new(
+    let jwt_manager = JwtManager::new(
         &config.auth.jwt_secret,
         config.auth.access_token_ttl_secs,
         config.auth.refresh_token_ttl_secs,
-    ));
+    );
+    let jwt = Arc::new(if !config.server.external_url.is_empty() {
+        jwt_manager.with_issuer(&config.server.external_url)
+    } else {
+        jwt_manager
+    });
     let brute = Arc::new(BruteForceGuard::new(
         config.auth.brute_force_max_attempts,
         config.auth.brute_force_window_secs,
@@ -59,6 +64,17 @@ async fn main() -> Result<()> {
         tracing::info!(issuer = %config.auth.oidc_issuer, "OIDC authentication enabled");
     }
 
+    // Derive OIDC redirect_uri from external_url if not explicitly set
+    let oidc_redirect_uri = if config.auth.oidc_redirect_uri.is_empty() {
+        if !config.server.external_url.is_empty() {
+            format!("{}/auth/callback", config.server.external_url)
+        } else {
+            String::new()
+        }
+    } else {
+        config.auth.oidc_redirect_uri.clone()
+    };
+
     let state = AppState {
         db, jwt, brute, vm,
         allow_registration: config.auth.allow_registration,
@@ -66,8 +82,9 @@ async fn main() -> Result<()> {
         oidc_issuer: config.auth.oidc_issuer.clone(),
         oidc_client_id: config.auth.oidc_client_id.clone(),
         oidc_client_secret: config.auth.oidc_client_secret.clone(),
-        oidc_redirect_uri: config.auth.oidc_redirect_uri.clone(),
+        oidc_redirect_uri,
         oidc_state_store,
+        external_url: config.server.external_url.clone(),
     };
 
     // -- TCP sync server ------------------------------------------------------
