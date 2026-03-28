@@ -137,6 +137,12 @@ pub async fn write_frame<W>(w: &mut W, msg_type: MsgType, payload: &[u8]) -> io:
 where
     W: AsyncWriteExt + Unpin,
 {
+    if payload.len() > MAX_PAYLOAD_SIZE as usize {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("payload too large: {} bytes (max {MAX_PAYLOAD_SIZE})", payload.len()),
+        ));
+    }
     let mut header = [0u8; 8];
     header[..4].copy_from_slice(&(msg_type as u32).to_le_bytes());
     header[4..].copy_from_slice(&(payload.len() as u32).to_le_bytes());

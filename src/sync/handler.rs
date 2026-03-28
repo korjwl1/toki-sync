@@ -88,16 +88,22 @@ pub async fn handle_connection(
     tracing::debug!("sync auth ok: user={user_id} device={device_id} provider={provider}");
 
     // ── Main loop ────────────────────────────────────────────────────────────
+    // Read timeout: 2 missed PING cycles (client sends every 60s) → disconnect.
+    const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
     loop {
-        let (msg_type, payload) = match read_frame(&mut reader).await {
-            Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
-                // MAX_PAYLOAD_SIZE exceeded or unknown msg_type — drop connection immediately
+        let (msg_type, payload) = match tokio::time::timeout(READ_TIMEOUT, read_frame(&mut reader)).await {
+            Err(_elapsed) => {
+                tracing::warn!("TCP read timeout ({READ_TIMEOUT:?}), dropping connection");
+                break;
+            }
+            Ok(Ok(f)) => f,
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::InvalidData => {
                 tracing::warn!("dropping TCP connection: {e}");
                 break;
             }
-            Err(e) => return Err(e.into()),
+            Ok(Err(e)) => return Err(e.into()),
         };
 
         match msg_type {
