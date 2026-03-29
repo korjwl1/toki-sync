@@ -33,6 +33,12 @@ async fn main() -> Result<()> {
         tracing::warn!("Using default JWT secret -- set JWT_SECRET env var for production!");
     }
 
+    let mode = config.auth.effective_registration_mode();
+    if !["open", "approval", "closed"].contains(&mode) {
+        tracing::error!("Invalid registration_mode: '{}'. Must be 'open', 'approval', or 'closed'.", mode);
+        std::process::exit(1);
+    }
+
     // Open database
     let db = open_database(&config.storage)
         .await

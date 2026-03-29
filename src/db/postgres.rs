@@ -648,18 +648,34 @@ impl DatabaseRepo for PostgresRepo {
     }
 
     async fn approve_registration(&self, id: &str) -> Result<bool> {
+        let mut tx = self.pool.begin().await.context("begin tx")?;
+
         let row: Option<(String, String, String, i64)> = sqlx::query_as(
             "SELECT id, username, password_hash, requested_at FROM pending_registrations WHERE id = $1",
         )
         .bind(id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .context("approve_registration: fetch")?;
 
         let (pending_id, username, password_hash, _) = match row {
             Some(r) => r,
-            None => return Ok(false),
+            None => {
+                tx.rollback().await.ok();
+                return Ok(false);
+            }
         };
+
+        // Check if username already exists in users
+        let exists: bool = sqlx::query_scalar("SELECT COUNT(*) > 0 FROM users WHERE username = $1")
+            .bind(&username)
+            .fetch_one(&mut *tx)
+            .await?;
+
+        if exists {
+            tx.rollback().await.ok();
+            anyhow::bail!("UNIQUE constraint: username already exists in users");
+        }
 
         let now = chrono::Utc::now().timestamp();
         let user_id = uuid::Uuid::new_v4().to_string();
@@ -671,16 +687,17 @@ impl DatabaseRepo for PostgresRepo {
         .bind(&password_hash)
         .bind(now)
         .bind(now)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .context("approve_registration: create user")?;
 
         sqlx::query("DELETE FROM pending_registrations WHERE id = $1")
             .bind(&pending_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .context("approve_registration: delete pending")?;
 
+        tx.commit().await.context("commit approve")?;
         Ok(true)
     }
 
