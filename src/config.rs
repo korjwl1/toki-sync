@@ -106,7 +106,7 @@ impl AuthConfig {
 }
 
 fn default_access_ttl() -> u64 { 3600 }         // 1h
-fn default_refresh_ttl() -> u64 { 86400 * 30 }  // 30d
+fn default_refresh_ttl() -> u64 { 86400 * 90 }  // 90d
 fn default_brute_max_attempts() -> u32 { 5 }
 fn default_brute_window() -> u64 { 300 }         // 5m
 fn default_brute_lockout() -> u64 { 900 }        // 15m
