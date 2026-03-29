@@ -78,10 +78,10 @@
     top: 56px;
     left: 0;
     bottom: 0;
-    width: 224px;
+    width: 200px;
     background: #f5f5f7;
     border-right: 1px solid rgba(0,0,0,0.06);
-    padding: 16px 12px;
+    padding: 16px 8px;
     display: flex;
     flex-direction: column;
     overflow-y: auto;
@@ -95,7 +95,7 @@
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: #6b7280;
-    padding: 0 12px;
+    padding: 0 8px;
     margin-bottom: 4px;
   }
   .sidebar-nav {
@@ -135,7 +135,7 @@
 
   /* Main content */
   .main-content {
-    margin-left: 224px;
+    margin-left: 200px;
     flex: 1;
     padding: 24px;
     display: flex;
@@ -813,9 +813,7 @@
         '<td><span class="badge ' + statusClass + '">' + statusText + '</span></td>' +
         '<td>' + fmtTime(u.created_at) + '</td>' +
         '<td><div class="btn-group">' +
-          '<button class="btn-secondary btn-sm" onclick="AdminPanel.changePassword(\'' + esc(u.id) + '\',\'' + esc(u.username) + '\')">Password</button>' +
-          '<button class="btn-secondary btn-sm" onclick="AdminPanel.changeRole(\'' + esc(u.id) + '\',\'' + esc(u.username) + '\',\'' + esc(u.role) + '\')">Role</button>' +
-          toggleBtn +
+          '<button class="btn-secondary btn-sm" onclick="AdminPanel.editUser(\'' + esc(u.id) + '\',\'' + esc(u.username) + '\',\'' + esc(u.role) + '\',' + (u.active !== false) + ')">Edit</button>' +
           '<button class="btn-danger btn-sm" onclick="AdminPanel.deleteUser(\'' + esc(u.id) + '\',\'' + esc(u.username) + '\')">Delete</button>' +
         '</div></td>' +
       '</tr>';
@@ -1101,32 +1099,38 @@
   window.AdminPanel = {
     closeModal: closeModal,
 
-    changePassword: function(userId, username) {
+    editUser: function(userId, username, currentRole, isActive) {
       openModal(
-        '<h3>Change Password: ' + esc(username) + '</h3>' +
-        '<label>New Password</label><input type="password" id="m-new-pw" minlength="8">' +
-        '<div class="modal-actions"><button class="btn-secondary" onclick="AdminPanel.closeModal()">Cancel</button><button class="btn-primary" id="m-pw-ok">Change</button></div>'
+        '<h3>Edit User: ' + esc(username) + '</h3>' +
+        '<div style="margin-bottom:16px;">' +
+          '<label>Role</label>' +
+          '<select id="m-edit-role"><option value="user"' + (currentRole === 'user' ? ' selected' : '') + '>user</option><option value="admin"' + (currentRole === 'admin' ? ' selected' : '') + '>admin</option></select>' +
+        '</div>' +
+        '<div style="margin-bottom:16px;">' +
+          '<label>Status</label>' +
+          '<select id="m-edit-active"><option value="true"' + (isActive ? ' selected' : '') + '>Active</option><option value="false"' + (!isActive ? ' selected' : '') + '>Inactive</option></select>' +
+        '</div>' +
+        '<div style="margin-bottom:16px;">' +
+          '<label>New Password <span style="color:#6b7280;font-weight:normal;">(leave empty to keep current)</span></label>' +
+          '<input type="password" id="m-edit-pw" placeholder="unchanged" minlength="8">' +
+        '</div>' +
+        '<div class="modal-actions"><button class="btn-secondary" onclick="AdminPanel.closeModal()">Cancel</button><button class="btn-primary" id="m-edit-ok">Save</button></div>'
       );
-      document.getElementById('m-pw-ok').addEventListener('click', async function() {
-        var pw = document.getElementById('m-new-pw').value;
-        if (pw.length < 8) { showError('Password must be at least 8 characters'); return; }
+      document.getElementById('m-edit-ok').addEventListener('click', async function() {
+        var newRole = document.getElementById('m-edit-role').value;
+        var newActive = document.getElementById('m-edit-active').value === 'true';
+        var newPw = document.getElementById('m-edit-pw').value;
         try {
-          await apiJson('PATCH', '/admin/users/' + userId + '/password', { password: pw });
-          closeModal();
-        } catch(e) { showError(e.message); }
-      });
-    },
-
-    changeRole: function(userId, username, currentRole) {
-      var newRole = currentRole === 'admin' ? 'user' : 'admin';
-      openModal(
-        '<h3>Change Role: ' + esc(username) + '</h3>' +
-        '<p style="margin-bottom:16px; color:#6b7280;">Change role from <strong>' + esc(currentRole) + '</strong> to <strong>' + esc(newRole) + '</strong>?</p>' +
-        '<div class="modal-actions"><button class="btn-secondary" onclick="AdminPanel.closeModal()">Cancel</button><button class="btn-primary" id="m-role-ok">Confirm</button></div>'
-      );
-      document.getElementById('m-role-ok').addEventListener('click', async function() {
-        try {
-          await apiJson('PATCH', '/admin/users/' + userId + '/role', { role: newRole });
+          if (newRole !== currentRole) {
+            await apiJson('PATCH', '/admin/users/' + userId + '/role', { role: newRole });
+          }
+          if (newActive !== isActive) {
+            await apiJson('PATCH', '/admin/users/' + userId + '/active', { active: newActive });
+          }
+          if (newPw.length > 0) {
+            if (newPw.length < 8) { showError('Password must be at least 8 characters'); return; }
+            await apiJson('PATCH', '/admin/users/' + userId + '/password', { password: newPw });
+          }
           closeModal();
           loadUsers();
         } catch(e) { showError(e.message); }
@@ -1209,25 +1213,6 @@
       } catch(e) { showError(e.message); }
     },
 
-    toggleActive: function(userId, username, activate) {
-      var action = activate ? 'activate' : 'deactivate';
-      var btnClass = activate ? 'btn-primary' : 'btn-danger';
-      openModal(
-        '<h3>' + (activate ? 'Activate' : 'Deactivate') + ' User</h3>' +
-        '<p style="margin-bottom:16px; color:' + (activate ? '#6b7280' : '#dc3545') + ';">' +
-          'Are you sure you want to ' + action + ' <strong>' + esc(username) + '</strong>?' +
-          (activate ? '' : ' They will not be able to log in.') +
-        '</p>' +
-        '<div class="modal-actions"><button class="btn-secondary" onclick="AdminPanel.closeModal()">Cancel</button><button class="' + btnClass + '" id="m-toggle-ok">' + (activate ? 'Activate' : 'Deactivate') + '</button></div>'
-      );
-      document.getElementById('m-toggle-ok').addEventListener('click', async function() {
-        try {
-          await apiJson('PATCH', '/admin/users/' + userId + '/active', { active: activate });
-          closeModal();
-          loadUsers();
-        } catch(e) { showError(e.message); }
-      });
-    },
   };
 
   // ═══════════════════════════════════════════════════════════════════════
