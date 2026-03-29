@@ -651,18 +651,19 @@ fn device_login_html(registration_mode: &str, _oidc_enabled: bool) -> String {
 <style>
   *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
   body {{
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
-    background: #0d1117;
-    color: #c9d1d9;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #f8f8fa;
+    color: #1a1a2e;
     display: flex;
     align-items: center;
     justify-content: center;
     min-height: 100vh;
   }}
   .card {{
-    background: #161b22;
-    border: 1px solid #30363d;
+    background: #ffffff;
+    border: 1px solid rgba(0,0,0,0.08);
     border-radius: 8px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.06);
     padding: 40px;
     width: 100%;
     max-width: 420px;
@@ -670,80 +671,80 @@ fn device_login_html(registration_mode: &str, _oidc_enabled: bool) -> String {
   .card h1 {{
     font-size: 1.4rem;
     font-weight: 600;
-    color: #e6edf3;
+    color: #2d4a7a;
     margin-bottom: 8px;
     text-align: center;
   }}
   .card .subtitle {{
     font-size: 0.85rem;
-    color: #8b949e;
+    color: #6b7280;
     text-align: center;
     margin-bottom: 28px;
   }}
   label {{
     display: block;
     font-size: 0.85rem;
-    color: #8b949e;
+    color: #6b7280;
     margin-bottom: 6px;
   }}
   input[type="text"], input[type="password"] {{
     width: 100%;
     padding: 10px 12px;
-    background: #0d1117;
-    border: 1px solid #30363d;
-    border-radius: 6px;
-    color: #c9d1d9;
+    background: #f8f8fa;
+    border: 1px solid rgba(0,0,0,0.08);
+    border-radius: 8px;
+    color: #1a1a2e;
     font-size: 0.95rem;
     margin-bottom: 16px;
     outline: none;
     transition: border-color 0.2s;
   }}
   input:focus {{
-    border-color: #58a6ff;
+    border-color: #2d4a7a;
   }}
   .code-input {{
     font-size: 2rem;
     text-align: center;
     letter-spacing: 0.3em;
-    font-family: monospace;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     text-transform: uppercase;
   }}
   button {{
     width: 100%;
     padding: 10px;
-    background: #238636;
-    border: 1px solid #2ea043;
-    border-radius: 6px;
+    background: #2d4a7a;
+    border: 1px solid #3a5d94;
+    border-radius: 8px;
     color: #fff;
     font-size: 0.95rem;
     font-weight: 600;
     cursor: pointer;
     transition: background 0.2s;
   }}
-  button:hover {{ background: #2ea043; }}
+  button:hover {{ background: #3a5d94; }}
   button:disabled {{ opacity: 0.6; cursor: not-allowed; }}
   .oidc-btn {{
-    background: #1f6feb;
-    border-color: #388bfd;
+    background: #4a7ab5;
+    border-color: #5a8ac5;
     margin-top: 12px;
   }}
-  .oidc-btn:hover {{ background: #388bfd; }}
+  .oidc-btn:hover {{ background: #5a8ac5; }}
   .error {{
-    background: #da363340;
-    border: 1px solid #da3633;
-    color: #f85149;
+    background: rgba(220,53,69,0.1);
+    border: 1px solid #dc3545;
+    color: #dc3545;
     padding: 8px 12px;
-    border-radius: 6px;
+    border-radius: 8px;
     font-size: 0.85rem;
     margin-bottom: 16px;
     display: none;
   }}
   .success {{
-    background: #23863640;
-    border: 1px solid #238636;
-    color: #3fb950;
+    background: rgba(25,135,84,0.1);
+    border: 1px solid #198754;
+    color: #198754;
     padding: 12px;
-    border-radius: 6px;
+    border-radius: 8px;
     font-size: 0.95rem;
     text-align: center;
     display: none;
@@ -751,14 +752,14 @@ fn device_login_html(registration_mode: &str, _oidc_enabled: bool) -> String {
   .tabs {{
     display: flex;
     margin-bottom: 20px;
-    border-bottom: 1px solid #30363d;
+    border-bottom: 1px solid rgba(0,0,0,0.08);
   }}
   .tab {{
     flex: 1;
     padding: 8px;
     text-align: center;
     cursor: pointer;
-    color: #8b949e;
+    color: #6b7280;
     font-size: 0.85rem;
     border-bottom: 2px solid transparent;
     background: none;
@@ -768,17 +769,17 @@ fn device_login_html(registration_mode: &str, _oidc_enabled: bool) -> String {
     width: auto;
     font-weight: normal;
   }}
-  .tab:hover {{ color: #c9d1d9; background: none; }}
+  .tab:hover {{ color: #1a1a2e; background: none; }}
   .tab.active {{
-    color: #58a6ff;
-    border-bottom-color: #58a6ff;
+    color: #2d4a7a;
+    border-bottom-color: #2d4a7a;
     background: none;
   }}
   .section {{ display: none; }}
   .section.active {{ display: block; }}
   .divider {{
     text-align: center;
-    color: #8b949e;
+    color: #6b7280;
     font-size: 0.8rem;
     margin: 16px 0;
     position: relative;
@@ -789,11 +790,11 @@ fn device_login_html(registration_mode: &str, _oidc_enabled: bool) -> String {
     top: 50%;
     width: 40%;
     height: 1px;
-    background: #30363d;
+    background: rgba(0,0,0,0.08);
   }}
   .divider::before {{ left: 0; }}
   .divider::after {{ right: 0; }}
-  .link {{ color: #58a6ff; cursor: pointer; text-decoration: none; font-size: 0.85rem; }}
+  .link {{ color: #2d4a7a; cursor: pointer; text-decoration: none; font-size: 0.85rem; }}
   .link:hover {{ text-decoration: underline; }}
 </style>
 </head>
@@ -1090,7 +1091,7 @@ fn device_login_html(registration_mode: &str, _oidc_enabled: bool) -> String {
         } else { "" },
         register_section = if show_register && is_approval_mode {
             r#"<div id="register-section" class="section">
-      <div style="background:#1f6feb20; border:1px solid #1f6feb; color:#58a6ff; padding:8px 12px; border-radius:6px; font-size:0.85rem; margin-bottom:12px;">Your request will need admin approval before you can log in.</div>
+      <div style="background:rgba(45,74,122,0.1); border:1px solid #4a7ab5; color:#2d4a7a; padding:8px 12px; border-radius:8px; font-size:0.85rem; margin-bottom:12px;">Your request will need admin approval before you can log in.</div>
       <form id="register-form">
         <label for="reg-username">Username</label>
         <input type="text" id="reg-username" name="username" autocomplete="username" required minlength="3" maxlength="32">
