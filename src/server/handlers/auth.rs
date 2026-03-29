@@ -861,6 +861,12 @@ fn device_login_html(registration_mode: &str, _oidc_enabled: bool) -> String {
     errorEl.style.display = 'none';
     stepCode.classList.remove('active');
     stepLogin.classList.remove('active');
+    // Try to close the tab after a short delay
+    setTimeout(function() {{
+      window.close();
+      // If window.close() didn't work (browser security policy),
+      // the success message is already visible
+    }}, 1500);
   }}
 
   // Auto-format code input: uppercase, auto-insert hyphen
