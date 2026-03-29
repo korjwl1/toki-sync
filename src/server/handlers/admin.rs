@@ -83,6 +83,13 @@ pub async fn admin_delete_user(
 ) -> Result<StatusCode, AppError> {
     require_admin(&headers, &state.jwt, &*state.db).await?;
 
+    // Protect built-in admin account from deletion
+    if let Ok(Some(user)) = state.db.get_user_by_id(&user_id).await {
+        if user.username == "admin" {
+            return Err(AppError::forbidden("the built-in admin account cannot be deleted, only deactivated"));
+        }
+    }
+
     // Delete VM series for all user's devices before cascade
     let device_ids = state.db.get_user_device_ids(&user_id).await.map_err(AppError::internal)?;
 

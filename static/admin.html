@@ -814,7 +814,9 @@
         '<td>' + fmtTime(u.created_at) + '</td>' +
         '<td><div class="btn-group">' +
           '<button class="btn-secondary btn-sm" onclick="AdminPanel.editUser(\'' + esc(u.id) + '\',\'' + esc(u.username) + '\',\'' + esc(u.role) + '\',' + (u.active !== false) + ')">Edit</button>' +
-          '<button class="btn-danger btn-sm" onclick="AdminPanel.deleteUser(\'' + esc(u.id) + '\',\'' + esc(u.username) + '\')">Delete</button>' +
+          (u.username === 'admin'
+            ? '<button class="btn-secondary btn-sm" disabled title="Built-in admin cannot be deleted">Delete</button>'
+            : '<button class="btn-danger btn-sm" onclick="AdminPanel.deleteUser(\'' + esc(u.id) + '\',\'' + esc(u.username) + '\')">Delete</button>') +
         '</div></td>' +
       '</tr>';
     }).join('');
