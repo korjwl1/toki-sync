@@ -39,6 +39,10 @@ pub struct ServerConfig {
     /// Limits bulk-batch thundering-herd pressure on VictoriaMetrics.
     #[serde(default = "default_max_concurrent_writes")]
     pub max_concurrent_writes: usize,
+    /// Trust X-Forwarded-For header (set to true when behind a reverse proxy).
+    /// When false (default), the header is ignored and the direct connection IP is used.
+    #[serde(default)]
+    pub trust_proxy: bool,
 }
 
 fn default_http_port() -> u16 { 9091 }
@@ -54,6 +58,7 @@ impl Default for ServerConfig {
             bind: default_bind(),
             external_url: String::new(),
             max_concurrent_writes: default_max_concurrent_writes(),
+            trust_proxy: false,
         }
     }
 }

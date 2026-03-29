@@ -76,6 +76,9 @@ pub struct AppState {
     pub device_poll_tracker: Arc<std::sync::Mutex<HashMap<String, Instant>>>,
     /// Dynamic settings: DB overrides + config fallback.
     pub dynamic_settings: DynamicSettings,
+    /// Whether to trust X-Forwarded-For header for client IP extraction.
+    /// Set to true when deployed behind a reverse proxy (e.g. Caddy, nginx).
+    pub trust_proxy: bool,
 }
 
 pub async fn get_oidc_discovery(state: &AppState) -> Result<OidcDiscovery, AppError> {
@@ -182,14 +185,22 @@ pub fn validate_username(username: &str) -> Result<(), AppError> {
 
 // ─── Client IP extraction ───────────────────────────────────────────────────
 
-/// Extract the real client IP from X-Forwarded-For header (last entry, proxy-added),
-/// falling back to the direct connection address.
-pub fn extract_client_ip(headers: &HeaderMap, addr: &SocketAddr) -> String {
-    headers.get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').last())  // last entry = proxy-added
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| addr.ip().to_string())
+/// Extract the real client IP, optionally trusting X-Forwarded-For.
+///
+/// When `trust_proxy` is true (deployed behind a reverse proxy), the last entry
+/// in X-Forwarded-For is used (the proxy-appended client IP).
+/// When `trust_proxy` is false (default, direct connections), the header is
+/// ignored entirely to prevent spoofing.
+pub fn extract_client_ip(headers: &HeaderMap, addr: &SocketAddr, trust_proxy: bool) -> String {
+    if trust_proxy {
+        headers.get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.split(',').last())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| addr.ip().to_string())
+    } else {
+        addr.ip().to_string()
+    }
 }
 
 // ─── JWT extraction helper ───────────────────────────────────────────────────

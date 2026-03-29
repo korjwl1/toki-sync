@@ -64,7 +64,7 @@ pub async fn login(
     State(state): State<AppState>,
     Json(body): Json<LoginRequest>,
 ) -> Result<Json<TokenResponse>, AppError> {
-    let ip = extract_client_ip(&headers, &addr);
+    let ip = extract_client_ip(&headers, &addr, state.trust_proxy);
 
     state.brute.check(&ip, &body.username).map_err(AppError::locked_out)?;
 
@@ -133,7 +133,7 @@ pub async fn register(
     State(state): State<AppState>,
     Json(body): Json<RegisterRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
-    let ip = extract_client_ip(&headers, &addr);
+    let ip = extract_client_ip(&headers, &addr, state.trust_proxy);
     state.brute.check(&ip, "__register__").map_err(AppError::locked_out)?;
 
     let mode = state.dynamic_settings.registration_mode().await;
@@ -210,7 +210,7 @@ pub async fn token_refresh(
     State(state): State<AppState>,
     Json(body): Json<RefreshRequest>,
 ) -> Result<Json<TokenResponse>, AppError> {
-    let ip = extract_client_ip(&headers, &addr);
+    let ip = extract_client_ip(&headers, &addr, state.trust_proxy);
     state.brute.check(&ip, "__refresh__").map_err(AppError::locked_out)?;
 
     let result = state.jwt
@@ -506,6 +506,8 @@ pub async fn device_token_poll(
     // Rate limit: if client polls faster than 5s, return slow_down
     {
         let mut tracker = state.device_poll_tracker.lock().unwrap();
+        // Sweep entries older than 15 minutes (device codes expire in 10min)
+        tracker.retain(|_, instant| instant.elapsed() < std::time::Duration::from_secs(900));
         if let Some(last) = tracker.get(&body.device_code) {
             if last.elapsed() < std::time::Duration::from_secs(5) {
                 return Ok((StatusCode::BAD_REQUEST, Json(serde_json::json!({
@@ -547,6 +549,9 @@ pub async fn device_token_poll(
     let refresh_token = dc.refresh_token.unwrap_or_default();
 
     let _ = state.db.delete_device_code(&body.device_code).await;
+
+    // Clean up poll tracker entry now that the device code is consumed
+    state.device_poll_tracker.lock().unwrap().remove(&body.device_code);
 
     Ok(Json(serde_json::json!({
         "access_token": access_token,

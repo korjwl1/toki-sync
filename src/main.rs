@@ -121,6 +121,7 @@ async fn main() -> Result<()> {
         storage_backend: config.storage.backend.clone(),
         device_poll_tracker: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         dynamic_settings,
+        trust_proxy: config.server.trust_proxy,
     };
 
     // -- TCP sync server ------------------------------------------------------
