@@ -37,8 +37,11 @@ pub async fn me_rename_device(
     let claims = extract_jwt(&headers, &state.jwt)?;
 
     let name = body.name.trim().to_string();
-    if name.is_empty() {
-        return Err(AppError { status: StatusCode::UNPROCESSABLE_ENTITY, message: "name must not be empty".into() });
+    if name.is_empty() || name.len() > 64 {
+        return Err(AppError { status: StatusCode::UNPROCESSABLE_ENTITY, message: "device name must be 1-64 characters".into() });
+    }
+    if name.contains(|c: char| c.is_control()) {
+        return Err(AppError { status: StatusCode::UNPROCESSABLE_ENTITY, message: "device name must not contain control characters".into() });
     }
 
     let renamed = state.db.rename_device(&device_id, &claims.sub, &name).await.map_err(AppError::internal)?;

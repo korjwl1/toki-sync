@@ -63,7 +63,13 @@ pub async fn handle_connection(
     let provider = auth.provider.clone();
 
     // Find or create device using the stable device_key UUID
-    let device_id = find_or_create_device(&*db, &user_id, &auth.device_name, &auth.device_key).await?;
+    // Truncate device_name to 64 chars (hostname can be long)
+    let device_name = if auth.device_name.len() > 64 {
+        auth.device_name.chars().take(64).collect::<String>()
+    } else {
+        auth.device_name.clone()
+    };
+    let device_id = find_or_create_device(&*db, &user_id, &device_name, &auth.device_key).await?;
 
     // Schema version guard — delete only this device's series, not all devices for this provider
     if auth.schema_version != SCHEMA_VERSION {
