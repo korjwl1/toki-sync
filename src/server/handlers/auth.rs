@@ -406,19 +406,13 @@ pub async fn auth_info(
 const USER_CODE_CHARS: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 
 fn generate_user_code() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let seed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
-    // Simple PRNG seeded with nanos + uuid randomness
-    let uuid_bytes = uuid::Uuid::new_v4();
-    let bytes = uuid_bytes.as_bytes();
-
+    let bytes = uuid::Uuid::new_v4().into_bytes();
     let mut code = String::with_capacity(9);
     for i in 0..8 {
-        let idx = (bytes[i] as usize + (seed as usize >> (i * 4))) % USER_CODE_CHARS.len();
         if i == 4 {
             code.push('-');
         }
-        code.push(USER_CODE_CHARS[idx] as char);
+        code.push(USER_CODE_CHARS[bytes[i] as usize % USER_CODE_CHARS.len()] as char);
     }
     code
 }
@@ -459,7 +453,21 @@ pub struct DeviceTokenRequest {
 pub async fn device_token_poll(
     State(state): State<AppState>,
     Json(body): Json<DeviceTokenRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<axum::response::Response, AppError> {
+    // Rate limit: if client polls faster than 5s, return slow_down
+    {
+        let mut tracker = state.device_poll_tracker.lock().unwrap();
+        if let Some(last) = tracker.get(&body.device_code) {
+            if last.elapsed() < std::time::Duration::from_secs(5) {
+                return Ok((StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                    "error": "slow_down",
+                    "interval": 10
+                }))).into_response());
+            }
+        }
+        tracker.insert(body.device_code.clone(), std::time::Instant::now());
+    }
+
     let dc = state.db.get_device_code(&body.device_code)
         .await
         .map_err(AppError::internal)?;
@@ -467,7 +475,7 @@ pub async fn device_token_poll(
     let dc = match dc {
         Some(dc) => dc,
         None => {
-            return Ok(Json(serde_json::json!({ "error": "expired_token" })));
+            return Ok((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "expired_token" }))).into_response());
         }
     };
 
@@ -480,7 +488,9 @@ pub async fn device_token_poll(
 
     if dc.approved_by.is_none() {
         // Still pending
-        return Ok(Json(serde_json::json!({ "error": "authorization_pending" })));
+        return Ok((StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": "authorization_pending"
+        }))).into_response());
     }
 
     // Approved — return tokens and delete the device code row
@@ -494,7 +504,7 @@ pub async fn device_token_poll(
         "refresh_token": refresh_token,
         "token_type": "Bearer",
         "expires_in": state.access_token_ttl_secs,
-    })))
+    })).into_response())
 }
 
 /// POST /device/approve — approve a device code (JWT required)
@@ -510,6 +520,8 @@ pub async fn device_approve(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let claims = extract_jwt(&headers, &state.jwt)?;
     let user_id = &claims.sub;
+
+    state.brute.check(user_id, "__device_approve__").map_err(AppError::locked_out)?;
 
     // Normalize user_code: uppercase, ensure hyphen
     let user_code = body.user_code.to_uppercase().replace(' ', "");
@@ -527,6 +539,7 @@ pub async fn device_approve(
     let dc = match dc {
         Some(dc) => dc,
         None => {
+            state.brute.record_failure(user_id, "__device_approve__").ok();
             return Err(AppError::not_found("invalid or expired code"));
         }
     };
@@ -556,9 +569,12 @@ pub async fn device_approve(
         .map_err(AppError::internal)?;
 
     if !approved {
+        // Revoke the orphaned refresh token we just created
+        let _ = state.db.revoke_refresh_token(&refresh_claims.jti).await;
         return Err(AppError::conflict("code already approved or expired"));
     }
 
+    state.brute.record_success(user_id, "__device_approve__");
     tracing::info!(user_id = %user_id, user_code = %user_code, "device code approved");
 
     Ok(Json(serde_json::json!({ "status": "approved" })))

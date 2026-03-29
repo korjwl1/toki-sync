@@ -101,6 +101,7 @@ async fn main() -> Result<()> {
         oidc_discovery_cache: Arc::new(tokio::sync::RwLock::new(None)),
         oidc_http_client: reqwest::Client::new(),
         external_url: config.server.external_url.clone(),
+        device_poll_tracker: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     // -- TCP sync server ------------------------------------------------------

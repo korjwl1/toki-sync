@@ -7,6 +7,7 @@ use axum::{
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::auth::{BruteForceGuard, JwtManager};
@@ -36,6 +37,8 @@ pub struct AppState {
     pub oidc_http_client: reqwest::Client,
     /// External URL for JWT `iss` claim and OIDC redirect derivation.
     pub external_url: String,
+    /// Track last poll time per device_code to enforce slow_down (RFC 8628).
+    pub device_poll_tracker: Arc<std::sync::Mutex<HashMap<String, Instant>>>,
 }
 
 pub async fn get_oidc_discovery(state: &AppState) -> Result<OidcDiscovery, AppError> {
