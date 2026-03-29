@@ -26,6 +26,7 @@ pub struct DynamicSettings {
     pub config_oidc_client_id: String,
     pub config_oidc_client_secret: String,
     pub config_oidc_redirect_uri: String,
+    pub config_max_query_scope: String,
 }
 
 impl DynamicSettings {
@@ -53,6 +54,11 @@ impl DynamicSettings {
         self.db.get_server_setting("oidc_redirect_uri").await
             .ok().flatten()
             .unwrap_or_else(|| self.config_oidc_redirect_uri.clone())
+    }
+    pub async fn max_query_scope(&self) -> String {
+        self.db.get_server_setting("max_query_scope").await
+            .ok().flatten()
+            .unwrap_or_else(|| self.config_max_query_scope.clone())
     }
 }
 

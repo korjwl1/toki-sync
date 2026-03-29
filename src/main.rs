@@ -39,6 +39,12 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
 
+    let scope = config.features.max_query_scope.as_str();
+    if !["self", "team", "all"].contains(&scope) {
+        tracing::error!("Invalid max_query_scope: '{}'. Must be 'self', 'team', or 'all'.", scope);
+        std::process::exit(1);
+    }
+
     // Open database
     let db = open_database(&config.storage)
         .await
@@ -109,6 +115,7 @@ async fn main() -> Result<()> {
         config_oidc_client_id: config.auth.oidc_client_id.clone(),
         config_oidc_client_secret: config.auth.oidc_client_secret.clone(),
         config_oidc_redirect_uri: oidc_redirect_uri.clone(),
+        config_max_query_scope: config.features.max_query_scope.clone(),
     };
 
     let state = AppState {

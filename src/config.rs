@@ -185,6 +185,20 @@ impl Default for LogConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+pub struct FeaturesConfig {
+    #[serde(default = "default_max_query_scope")]
+    pub max_query_scope: String,  // "self" | "team" | "all"
+}
+
+fn default_max_query_scope() -> String { "self".to_string() }
+
+impl Default for FeaturesConfig {
+    fn default() -> Self {
+        Self { max_query_scope: default_max_query_scope() }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     #[serde(default)]
     pub server: ServerConfig,
@@ -195,6 +209,8 @@ pub struct Config {
     pub storage: StorageConfig,
     #[serde(default)]
     pub log: LogConfig,
+    #[serde(default)]
+    pub features: FeaturesConfig,
 }
 
 impl Config {
@@ -232,6 +248,7 @@ impl Config {
                 backend: BackendConfig::default(),
                 storage: StorageConfig::default(),
                 log: LogConfig::default(),
+                features: FeaturesConfig::default(),
             })
         }
     }

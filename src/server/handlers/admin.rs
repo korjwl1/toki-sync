@@ -297,6 +297,7 @@ pub async fn admin_list_settings(
         "oidc_client_id": ds.oidc_client_id().await,
         "oidc_client_secret": ds.oidc_client_secret().await,
         "oidc_redirect_uri": ds.oidc_redirect_uri().await,
+        "max_query_scope": ds.max_query_scope().await,
     })))
 }
 
@@ -311,6 +312,7 @@ const ALLOWED_SETTINGS: &[&str] = &[
     "oidc_client_id",
     "oidc_client_secret",
     "oidc_redirect_uri",
+    "max_query_scope",
 ];
 
 pub async fn admin_update_setting(
@@ -333,6 +335,14 @@ pub async fn admin_update_setting(
         return Err(AppError {
             status: StatusCode::UNPROCESSABLE_ENTITY,
             message: "registration_mode must be 'open', 'approval', or 'closed'".into(),
+        });
+    }
+
+    // Validate max_query_scope values
+    if key == "max_query_scope" && !["self", "team", "all"].contains(&body.value.as_str()) {
+        return Err(AppError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            message: "max_query_scope must be 'self', 'team', or 'all'".into(),
         });
     }
 

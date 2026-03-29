@@ -606,6 +606,13 @@
             <option value="closed">Closed</option>
           </select>
 
+          <label>Max Query Scope</label>
+          <select id="s-max-query-scope">
+            <option value="self">Self only (default)</option>
+            <option value="team">Team members</option>
+            <option value="all">All users (organization-wide)</option>
+          </select>
+
           <h3>OIDC Configuration</h3>
           <label>Issuer URL</label>
           <input type="text" id="s-oidc-issuer" placeholder="https://accounts.google.com">
@@ -1042,6 +1049,7 @@
       // Load editable settings
       var settings = await apiJson('GET', '/admin/settings');
       document.getElementById('s-registration-mode').value = settings.registration_mode || 'closed';
+      document.getElementById('s-max-query-scope').value = settings.max_query_scope || 'self';
       document.getElementById('s-oidc-issuer').value = settings.oidc_issuer || '';
       document.getElementById('s-oidc-client-id').value = settings.oidc_client_id || '';
       // Don't prefill secret for security - show placeholder instead
@@ -1051,6 +1059,7 @@
 
       settingsOriginal = {
         registration_mode: settings.registration_mode || 'closed',
+        max_query_scope: settings.max_query_scope || 'self',
         oidc_issuer: settings.oidc_issuer || '',
         oidc_client_id: settings.oidc_client_id || '',
         oidc_client_secret: settings.oidc_client_secret || '',
@@ -1073,6 +1082,7 @@
 
     var fields = {
       registration_mode: document.getElementById('s-registration-mode').value,
+      max_query_scope: document.getElementById('s-max-query-scope').value,
       oidc_issuer: document.getElementById('s-oidc-issuer').value.trim(),
       oidc_client_id: document.getElementById('s-oidc-client-id').value.trim(),
       oidc_redirect_uri: document.getElementById('s-oidc-redirect-uri').value.trim(),

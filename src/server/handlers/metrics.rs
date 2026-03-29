@@ -14,6 +14,7 @@ use crate::metrics::backend::MetricsBackend;
 pub struct QueryParams {
     pub query: String,
     pub time: Option<i64>,
+    pub scope: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -22,6 +23,82 @@ pub struct QueryRangeParams {
     pub start: i64,
     pub end: i64,
     pub step: Option<String>,
+    pub scope: Option<String>,
+}
+
+// ─── Scope types ─────────────────────────────────────────────────────────────
+
+enum Scope {
+    Self_,
+    Team(String),
+    All,
+    Invalid,
+}
+
+fn parse_scope(s: &str) -> Scope {
+    match s {
+        "self" => Scope::Self_,
+        "all" => Scope::All,
+        s if s.starts_with("team:") => {
+            let id = s.strip_prefix("team:").unwrap_or("");
+            if id.is_empty() { Scope::Invalid } else { Scope::Team(id.to_string()) }
+        }
+        _ => Scope::Invalid,
+    }
+}
+
+/// Resolve the scope parameter into an injected PromQL query.
+/// Returns the rewritten query string with appropriate label filters.
+async fn resolve_scope(
+    state: &AppState,
+    query: &str,
+    user_id: &str,
+    requested_scope: &str,
+) -> Result<String, AppError> {
+    let max_scope = state.dynamic_settings.max_query_scope().await;
+    let is_admin = state.db.user_is_admin(user_id).await.map_err(AppError::internal)?;
+
+    if is_admin {
+        // Admin bypasses all restrictions
+        return Ok(query.to_string());
+    }
+
+    match parse_scope(requested_scope) {
+        Scope::Self_ => {
+            // Always allowed
+            Ok(inject_label_filter(query, &format!("user=\"{}\"", escape_label_value(user_id))))
+        }
+        Scope::Team(team_id) => {
+            // Check: max_scope must be "team" or "all"
+            if max_scope == "self" {
+                return Err(AppError::forbidden("team scope not enabled by server administrator"));
+            }
+            // Check: user must be member of this team
+            let role = state.db.get_team_member_role(&team_id, user_id).await.map_err(AppError::internal)?;
+            if role.is_none() {
+                return Err(AppError::forbidden("not a member of this team"));
+            }
+            // Get team member IDs and build regex
+            let members = state.db.list_team_members(&team_id).await.map_err(AppError::internal)?;
+            let user_ids: Vec<String> = members.iter().map(|m| escape_label_value(&m.user_id)).collect();
+            let regex = user_ids.join("|");
+            Ok(inject_label_filter(query, &format!("user=~\"{}\"", regex)))
+        }
+        Scope::All => {
+            // Check: max_scope must be "all"
+            if max_scope != "all" {
+                return Err(AppError::forbidden("global scope not enabled by server administrator"));
+            }
+            // No label injection -- full access
+            Ok(query.to_string())
+        }
+        Scope::Invalid => {
+            Err(AppError {
+                status: StatusCode::BAD_REQUEST,
+                message: "invalid scope: use 'self', 'team:<id>', or 'all'".into(),
+            })
+        }
+    }
 }
 
 pub async fn promql_query(
@@ -30,7 +107,8 @@ pub async fn promql_query(
     Query(params): Query<QueryParams>,
 ) -> Result<Response, AppError> {
     let claims = extract_jwt(&headers, &state.jwt)?;
-    let injected = inject_user_label(&params.query, &claims.sub);
+    let requested_scope = params.scope.as_deref().unwrap_or("self");
+    let injected = resolve_scope(&state, &params.query, &claims.sub, requested_scope).await?;
     let result = state.vm.query(&injected, params.time).await.map_err(AppError::bad_gateway)?;
     Ok((
         StatusCode::OK,
@@ -45,7 +123,8 @@ pub async fn promql_query_range(
     Query(params): Query<QueryRangeParams>,
 ) -> Result<Response, AppError> {
     let claims = extract_jwt(&headers, &state.jwt)?;
-    let injected = inject_user_label(&params.query, &claims.sub);
+    let requested_scope = params.scope.as_deref().unwrap_or("self");
+    let injected = resolve_scope(&state, &params.query, &claims.sub, requested_scope).await?;
     let step = params.step.as_deref().unwrap_or("60s");
     let result = state.vm.query_range(&injected, params.start, params.end, step)
         .await
@@ -88,6 +167,7 @@ pub fn escape_label_value(s: &str) -> String {
 ///   - aggregation with groupby: `sum by (model)(toki_tokens_total)`
 ///
 /// All injected values are escaped; no string interpolation from user input.
+#[allow(dead_code)]
 pub fn inject_user_label(expr: &str, user_id: &str) -> String {
     let escaped = escape_label_value(user_id);
     inject_label_filter(expr, &format!("user=\"{escaped}\""))
@@ -389,5 +469,36 @@ mod tests {
             "sum(increase(toki_tokens_total[1h])) by (model)", "leo");
         assert!(result.contains("toki_tokens_total{user=\"leo\"}"), "got: {result}");
         assert!(!result.contains("model{"), "model label must not be injected, got: {result}");
+    }
+
+    // ─── Scope parsing tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_scope_self() {
+        assert!(matches!(parse_scope("self"), Scope::Self_));
+    }
+
+    #[test]
+    fn test_parse_scope_all() {
+        assert!(matches!(parse_scope("all"), Scope::All));
+    }
+
+    #[test]
+    fn test_parse_scope_team() {
+        match parse_scope("team:abc-123") {
+            Scope::Team(id) => assert_eq!(id, "abc-123"),
+            _ => panic!("expected Scope::Team"),
+        }
+    }
+
+    #[test]
+    fn test_parse_scope_team_empty_id() {
+        assert!(matches!(parse_scope("team:"), Scope::Invalid));
+    }
+
+    #[test]
+    fn test_parse_scope_invalid() {
+        assert!(matches!(parse_scope("foo"), Scope::Invalid));
+        assert!(matches!(parse_scope(""), Scope::Invalid));
     }
 }
