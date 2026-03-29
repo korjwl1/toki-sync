@@ -48,6 +48,13 @@ async fn main() -> Result<()> {
         tracing::info!("cleaned up {cleaned} expired/revoked refresh tokens");
     }
 
+    // Cleanup expired device codes
+    let cleaned_dc = db.cleanup_expired_device_codes().await
+        .context("failed to cleanup expired device codes")?;
+    if cleaned_dc > 0 {
+        tracing::info!("cleaned up {cleaned_dc} expired device codes");
+    }
+
     // Build shared state
     let jwt_manager = JwtManager::new(
         &config.auth.jwt_secret,

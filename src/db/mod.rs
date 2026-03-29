@@ -62,6 +62,14 @@ pub trait DatabaseRepo: Send + Sync {
     async fn revoke_user_refresh_tokens(&self, user_id: &str) -> Result<()>;
     async fn rotate_refresh_token(&self, old_jti: &str, new_jti: &str, user_id: &str, device_id: Option<&str>, expires_at: i64) -> Result<()>;
 
+    // Device codes (OAuth 2.0 Device Authorization Grant)
+    async fn create_device_code(&self, device_code: &str, user_code: &str, expires_at: i64) -> Result<()>;
+    async fn get_device_code(&self, device_code: &str) -> Result<Option<DeviceCode>>;
+    async fn get_device_code_by_user_code(&self, user_code: &str) -> Result<Option<DeviceCode>>;
+    async fn approve_device_code(&self, user_code: &str, user_id: &str, access_token: &str, refresh_token: &str) -> Result<bool>;
+    async fn delete_device_code(&self, device_code: &str) -> Result<()>;
+    async fn cleanup_expired_device_codes(&self) -> Result<u64>;
+
     // Cleanup
     async fn cleanup_expired_tokens(&self) -> Result<u64>;
 }

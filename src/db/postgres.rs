@@ -150,6 +150,23 @@ impl PostgresRepo {
         )
         .execute(&self.pool).await.context("migrate: idx_users_oidc")?;
 
+        // Migration: device_codes table (OAuth 2.0 Device Authorization Grant)
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS device_codes (
+                device_code   TEXT PRIMARY KEY,
+                user_code     TEXT NOT NULL UNIQUE,
+                expires_at    BIGINT NOT NULL,
+                approved_by   TEXT,
+                access_token  TEXT,
+                refresh_token TEXT
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await
+        .context("migrate: create device_codes")?;
+
         Ok(())
     }
 }
@@ -690,6 +707,83 @@ impl DatabaseRepo for PostgresRepo {
 
         tx.commit().await.context("failed to commit rotation transaction")?;
         Ok(())
+    }
+
+    // ── Device codes ────────────────────────────────────────────────────
+
+    async fn create_device_code(&self, device_code: &str, user_code: &str, expires_at: i64) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO device_codes (device_code, user_code, expires_at) VALUES ($1, $2, $3)",
+        )
+        .bind(device_code)
+        .bind(user_code)
+        .bind(expires_at)
+        .execute(&self.pool)
+        .await
+        .context("create_device_code")?;
+        Ok(())
+    }
+
+    async fn get_device_code(&self, device_code: &str) -> Result<Option<DeviceCode>> {
+        let row: Option<(String, String, i64, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT device_code, user_code, expires_at, approved_by, access_token, refresh_token FROM device_codes WHERE device_code = $1",
+        )
+        .bind(device_code)
+        .fetch_optional(&self.pool)
+        .await
+        .context("get_device_code")?;
+
+        Ok(row.map(|(device_code, user_code, expires_at, approved_by, access_token, refresh_token)| DeviceCode {
+            device_code, user_code, expires_at, approved_by, access_token, refresh_token,
+        }))
+    }
+
+    async fn get_device_code_by_user_code(&self, user_code: &str) -> Result<Option<DeviceCode>> {
+        let row: Option<(String, String, i64, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT device_code, user_code, expires_at, approved_by, access_token, refresh_token FROM device_codes WHERE user_code = $1",
+        )
+        .bind(user_code)
+        .fetch_optional(&self.pool)
+        .await
+        .context("get_device_code_by_user_code")?;
+
+        Ok(row.map(|(device_code, user_code, expires_at, approved_by, access_token, refresh_token)| DeviceCode {
+            device_code, user_code, expires_at, approved_by, access_token, refresh_token,
+        }))
+    }
+
+    async fn approve_device_code(&self, user_code: &str, user_id: &str, access_token: &str, refresh_token: &str) -> Result<bool> {
+        let affected = sqlx::query(
+            "UPDATE device_codes SET approved_by = $1, access_token = $2, refresh_token = $3 WHERE user_code = $4 AND approved_by IS NULL",
+        )
+        .bind(user_id)
+        .bind(access_token)
+        .bind(refresh_token)
+        .bind(user_code)
+        .execute(&self.pool)
+        .await
+        .context("approve_device_code")?
+        .rows_affected();
+        Ok(affected > 0)
+    }
+
+    async fn delete_device_code(&self, device_code: &str) -> Result<()> {
+        sqlx::query("DELETE FROM device_codes WHERE device_code = $1")
+            .bind(device_code)
+            .execute(&self.pool)
+            .await
+            .context("delete_device_code")?;
+        Ok(())
+    }
+
+    async fn cleanup_expired_device_codes(&self) -> Result<u64> {
+        let now = chrono::Utc::now().timestamp();
+        let result = sqlx::query("DELETE FROM device_codes WHERE expires_at < $1")
+            .bind(now)
+            .execute(&self.pool)
+            .await
+            .context("cleanup_expired_device_codes")?;
+        Ok(result.rows_affected())
     }
 
     async fn cleanup_expired_tokens(&self) -> Result<u64> {

@@ -75,3 +75,12 @@ pub struct TeamMemberSummary {
     pub role: String,
     pub joined_at: i64,
 }
+
+pub struct DeviceCode {
+    pub device_code: String,
+    pub user_code: String,
+    pub expires_at: i64,
+    pub approved_by: Option<String>,
+    pub access_token: Option<String>,
+    pub refresh_token: Option<String>,
+}

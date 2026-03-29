@@ -1,13 +1,13 @@
 use axum::{
     extract::{ConnectInfo, Query, State},
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Redirect},
+    response::{Html, IntoResponse, Redirect},
     Json,
 };
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
-use super::super::http::{AppError, AppState, extract_client_ip, get_oidc_discovery, validate_username};
+use super::super::http::{AppError, AppState, extract_client_ip, extract_jwt, get_oidc_discovery, validate_username};
 
 // ─── /health ────────────────────────────────────────────────────────────────
 
@@ -387,4 +387,639 @@ pub async fn oidc_callback(
         state.access_token_ttl_secs,
     );
     Ok(Redirect::temporary(&dashboard_url).into_response())
+}
+
+// ─── GET /auth/info ────────────────────────────────────────────────────────
+
+pub async fn auth_info(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "allow_registration": state.allow_registration,
+        "oidc_enabled": !state.oidc_issuer.is_empty(),
+    }))
+}
+
+// ─── Device Authorization Grant (RFC 8628) ─────────────────────────────────
+
+/// Characters for user_code generation (uppercase alphanumeric, excluding ambiguous chars)
+const USER_CODE_CHARS: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+
+fn generate_user_code() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let seed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    // Simple PRNG seeded with nanos + uuid randomness
+    let uuid_bytes = uuid::Uuid::new_v4();
+    let bytes = uuid_bytes.as_bytes();
+
+    let mut code = String::with_capacity(9);
+    for i in 0..8 {
+        let idx = (bytes[i] as usize + (seed as usize >> (i * 4))) % USER_CODE_CHARS.len();
+        if i == 4 {
+            code.push('-');
+        }
+        code.push(USER_CODE_CHARS[idx] as char);
+    }
+    code
+}
+
+/// POST /device/code — initiate device authorization
+pub async fn device_code_request(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let device_code = uuid::Uuid::new_v4().to_string();
+    let user_code = generate_user_code();
+    let expires_at = chrono::Utc::now().timestamp() + 600; // 10 minutes
+
+    state.db.create_device_code(&device_code, &user_code, expires_at)
+        .await
+        .map_err(AppError::internal)?;
+
+    let verification_url = if state.external_url.is_empty() {
+        "/login/device".to_string()
+    } else {
+        format!("{}/login/device", state.external_url)
+    };
+
+    Ok(Json(serde_json::json!({
+        "device_code": device_code,
+        "user_code": user_code,
+        "verification_url": verification_url,
+        "expires_in": 600,
+        "interval": 5,
+    })))
+}
+
+/// POST /device/token — poll for device authorization result
+#[derive(Deserialize)]
+pub struct DeviceTokenRequest {
+    pub device_code: String,
+}
+
+pub async fn device_token_poll(
+    State(state): State<AppState>,
+    Json(body): Json<DeviceTokenRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let dc = state.db.get_device_code(&body.device_code)
+        .await
+        .map_err(AppError::internal)?;
+
+    let dc = match dc {
+        Some(dc) => dc,
+        None => {
+            return Ok(Json(serde_json::json!({ "error": "expired_token" })));
+        }
+    };
+
+    let now = chrono::Utc::now().timestamp();
+    if now > dc.expires_at {
+        // Clean up expired code
+        let _ = state.db.delete_device_code(&body.device_code).await;
+        return Err(AppError { status: StatusCode::GONE, message: "expired_token".into() });
+    }
+
+    if dc.approved_by.is_none() {
+        // Still pending
+        return Ok(Json(serde_json::json!({ "error": "authorization_pending" })));
+    }
+
+    // Approved — return tokens and delete the device code row
+    let access_token = dc.access_token.unwrap_or_default();
+    let refresh_token = dc.refresh_token.unwrap_or_default();
+
+    let _ = state.db.delete_device_code(&body.device_code).await;
+
+    Ok(Json(serde_json::json!({
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "Bearer",
+        "expires_in": state.access_token_ttl_secs,
+    })))
+}
+
+/// POST /device/approve — approve a device code (JWT required)
+#[derive(Deserialize)]
+pub struct DeviceApproveRequest {
+    pub user_code: String,
+}
+
+pub async fn device_approve(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Json(body): Json<DeviceApproveRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let claims = extract_jwt(&headers, &state.jwt)?;
+    let user_id = &claims.sub;
+
+    // Normalize user_code: uppercase, ensure hyphen
+    let user_code = body.user_code.to_uppercase().replace(' ', "");
+    let user_code = if user_code.len() == 8 && !user_code.contains('-') {
+        format!("{}-{}", &user_code[..4], &user_code[4..])
+    } else {
+        user_code
+    };
+
+    // Verify the device code exists and is not expired
+    let dc = state.db.get_device_code_by_user_code(&user_code)
+        .await
+        .map_err(AppError::internal)?;
+
+    let dc = match dc {
+        Some(dc) => dc,
+        None => {
+            return Err(AppError::not_found("invalid or expired code"));
+        }
+    };
+
+    let now = chrono::Utc::now().timestamp();
+    if now > dc.expires_at {
+        let _ = state.db.delete_device_code(&dc.device_code).await;
+        return Err(AppError { status: StatusCode::GONE, message: "code expired".into() });
+    }
+
+    if dc.approved_by.is_some() {
+        return Err(AppError::conflict("code already approved"));
+    }
+
+    // Issue JWT pair for the user
+    let access = state.jwt.issue_access_token(user_id).map_err(AppError::internal)?;
+    let (refresh, refresh_claims) = state.jwt
+        .issue_refresh_token(user_id, None)
+        .map_err(AppError::internal)?;
+    state.jwt.store_refresh_token(&*state.db, &refresh_claims)
+        .await
+        .map_err(AppError::internal)?;
+
+    // Store tokens in the device code row
+    let approved = state.db.approve_device_code(&user_code, user_id, &access, &refresh)
+        .await
+        .map_err(AppError::internal)?;
+
+    if !approved {
+        return Err(AppError::conflict("code already approved or expired"));
+    }
+
+    tracing::info!(user_id = %user_id, user_code = %user_code, "device code approved");
+
+    Ok(Json(serde_json::json!({ "status": "approved" })))
+}
+
+/// GET /login/device — device authorization web page
+pub async fn device_login_page(
+    State(state): State<AppState>,
+) -> Html<String> {
+    let allow_registration = state.allow_registration;
+    let oidc_enabled = !state.oidc_issuer.is_empty();
+    Html(device_login_html(allow_registration, oidc_enabled))
+}
+
+fn device_login_html(allow_registration: bool, _oidc_enabled: bool) -> String {
+    format!(r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>toki-sync - Device Login</title>
+<style>
+  *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
+    background: #0d1117;
+    color: #c9d1d9;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+  }}
+  .card {{
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 40px;
+    width: 100%;
+    max-width: 420px;
+  }}
+  .card h1 {{
+    font-size: 1.4rem;
+    font-weight: 600;
+    color: #e6edf3;
+    margin-bottom: 8px;
+    text-align: center;
+  }}
+  .card .subtitle {{
+    font-size: 0.85rem;
+    color: #8b949e;
+    text-align: center;
+    margin-bottom: 28px;
+  }}
+  label {{
+    display: block;
+    font-size: 0.85rem;
+    color: #8b949e;
+    margin-bottom: 6px;
+  }}
+  input[type="text"], input[type="password"] {{
+    width: 100%;
+    padding: 10px 12px;
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    color: #c9d1d9;
+    font-size: 0.95rem;
+    margin-bottom: 16px;
+    outline: none;
+    transition: border-color 0.2s;
+  }}
+  input:focus {{
+    border-color: #58a6ff;
+  }}
+  .code-input {{
+    font-size: 2rem;
+    text-align: center;
+    letter-spacing: 0.3em;
+    font-family: monospace;
+    text-transform: uppercase;
+  }}
+  button {{
+    width: 100%;
+    padding: 10px;
+    background: #238636;
+    border: 1px solid #2ea043;
+    border-radius: 6px;
+    color: #fff;
+    font-size: 0.95rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s;
+  }}
+  button:hover {{ background: #2ea043; }}
+  button:disabled {{ opacity: 0.6; cursor: not-allowed; }}
+  .oidc-btn {{
+    background: #1f6feb;
+    border-color: #388bfd;
+    margin-top: 12px;
+  }}
+  .oidc-btn:hover {{ background: #388bfd; }}
+  .error {{
+    background: #da363340;
+    border: 1px solid #da3633;
+    color: #f85149;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    margin-bottom: 16px;
+    display: none;
+  }}
+  .success {{
+    background: #23863640;
+    border: 1px solid #238636;
+    color: #3fb950;
+    padding: 12px;
+    border-radius: 6px;
+    font-size: 0.95rem;
+    text-align: center;
+    display: none;
+  }}
+  .tabs {{
+    display: flex;
+    margin-bottom: 20px;
+    border-bottom: 1px solid #30363d;
+  }}
+  .tab {{
+    flex: 1;
+    padding: 8px;
+    text-align: center;
+    cursor: pointer;
+    color: #8b949e;
+    font-size: 0.85rem;
+    border-bottom: 2px solid transparent;
+    background: none;
+    border-left: none;
+    border-right: none;
+    border-top: none;
+    width: auto;
+    font-weight: normal;
+  }}
+  .tab:hover {{ color: #c9d1d9; background: none; }}
+  .tab.active {{
+    color: #58a6ff;
+    border-bottom-color: #58a6ff;
+    background: none;
+  }}
+  .section {{ display: none; }}
+  .section.active {{ display: block; }}
+  .divider {{
+    text-align: center;
+    color: #8b949e;
+    font-size: 0.8rem;
+    margin: 16px 0;
+    position: relative;
+  }}
+  .divider::before, .divider::after {{
+    content: '';
+    position: absolute;
+    top: 50%;
+    width: 40%;
+    height: 1px;
+    background: #30363d;
+  }}
+  .divider::before {{ left: 0; }}
+  .divider::after {{ right: 0; }}
+  .link {{ color: #58a6ff; cursor: pointer; text-decoration: none; font-size: 0.85rem; }}
+  .link:hover {{ text-decoration: underline; }}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>toki-sync</h1>
+  <p class="subtitle">Authorize your device</p>
+  <div id="error" class="error"></div>
+  <div id="success" class="success">Device approved! You can return to your terminal.</div>
+
+  <!-- Step 1: Enter device code -->
+  <div id="step-code" class="section active">
+    <label for="user-code">Enter the code shown in your terminal</label>
+    <input type="text" id="user-code" class="code-input" placeholder="XXXX-XXXX" maxlength="9" autocomplete="off" autofocus>
+    <button type="button" id="verify-code-btn">Verify Code</button>
+  </div>
+
+  <!-- Step 2: Login (if not already authenticated) -->
+  <div id="step-login" class="section">
+    <div class="tabs" id="login-tabs">
+      <button class="tab active" data-tab="signin">Sign in</button>
+      {register_tab}
+    </div>
+
+    <div id="signin-section" class="section active">
+      <form id="login-form">
+        <label for="username">Username</label>
+        <input type="text" id="username" name="username" autocomplete="username" required>
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" autocomplete="current-password" required>
+        <button type="submit" id="login-btn">Sign in & Approve</button>
+      </form>
+      <div id="oidc-section" style="display:none">
+        <div class="divider">or</div>
+        <button type="button" id="oidc-btn" class="oidc-btn">Sign in with OIDC</button>
+      </div>
+    </div>
+
+    {register_section}
+  </div>
+</div>
+<script>
+(function() {{
+  const errorEl = document.getElementById('error');
+  const successEl = document.getElementById('success');
+  const stepCode = document.getElementById('step-code');
+  const stepLogin = document.getElementById('step-login');
+  const codeInput = document.getElementById('user-code');
+  const verifyBtn = document.getElementById('verify-code-btn');
+
+  let pendingUserCode = '';
+
+  function showError(msg) {{
+    errorEl.textContent = msg;
+    errorEl.style.display = 'block';
+    successEl.style.display = 'none';
+  }}
+  function hideError() {{
+    errorEl.style.display = 'none';
+  }}
+  function showSuccess() {{
+    successEl.style.display = 'block';
+    errorEl.style.display = 'none';
+    stepCode.classList.remove('active');
+    stepLogin.classList.remove('active');
+  }}
+
+  // Auto-format code input: uppercase, auto-insert hyphen
+  codeInput.addEventListener('input', function() {{
+    let v = this.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (v.length > 4) {{
+      v = v.substring(0, 4) + '-' + v.substring(4, 8);
+    }}
+    this.value = v;
+  }});
+
+  // Tab switching
+  document.querySelectorAll('.tab').forEach(function(tab) {{
+    tab.addEventListener('click', function() {{
+      document.querySelectorAll('.tab').forEach(function(t) {{ t.classList.remove('active'); }});
+      tab.classList.add('active');
+      var tabName = tab.getAttribute('data-tab');
+      document.querySelectorAll('#step-login > .section').forEach(function(s) {{ s.classList.remove('active'); }});
+      var target = document.getElementById(tabName + '-section');
+      if (target) target.classList.add('active');
+    }});
+  }});
+
+  // Step 1: Verify code exists
+  verifyBtn.addEventListener('click', async function() {{
+    hideError();
+    var code = codeInput.value.trim().toUpperCase();
+    if (code.length < 8) {{
+      showError('Please enter a valid 8-character code');
+      return;
+    }}
+    // Normalize: ensure XXXX-XXXX format
+    var normalized = code.replace(/[^A-Z0-9]/g, '');
+    if (normalized.length !== 8) {{
+      showError('Code must be exactly 8 characters');
+      return;
+    }}
+    pendingUserCode = normalized.substring(0, 4) + '-' + normalized.substring(4, 8);
+
+    // Check if already logged in (JWT in localStorage)
+    var existingToken = localStorage.getItem('access_token');
+    if (existingToken) {{
+      // Try to approve directly
+      await doApprove(existingToken);
+      return;
+    }}
+
+    // Show login step
+    stepCode.classList.remove('active');
+    stepLogin.classList.add('active');
+
+    // Check auth method for OIDC
+    try {{
+      var resp = await fetch('/auth-method', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ username: '' }}),
+      }});
+      if (resp.ok) {{
+        var data = await resp.json();
+        if (data.method === 'oidc' && data.auth_url) {{
+          document.getElementById('oidc-section').style.display = 'block';
+          document.getElementById('oidc-btn').addEventListener('click', function() {{
+            // Store pending code in sessionStorage so we can approve after OIDC callback
+            sessionStorage.setItem('pending_device_code', pendingUserCode);
+            window.location.href = data.auth_url;
+          }});
+        }}
+      }}
+    }} catch (_) {{}}
+  }});
+
+  codeInput.addEventListener('keydown', function(e) {{
+    if (e.key === 'Enter') verifyBtn.click();
+  }});
+
+  // Step 2: Login form
+  var loginForm = document.getElementById('login-form');
+  if (loginForm) {{
+    loginForm.addEventListener('submit', async function(e) {{
+      e.preventDefault();
+      hideError();
+      var loginBtn = document.getElementById('login-btn');
+      loginBtn.disabled = true;
+      loginBtn.textContent = 'Signing in...';
+
+      var username = document.getElementById('username').value.trim();
+      var pw = document.getElementById('password').value;
+
+      try {{
+        var resp = await fetch('/login', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{ username: username, password: pw }}),
+        }});
+        if (!resp.ok) {{
+          var data = await resp.json().catch(function() {{ return {{}}; }});
+          throw new Error(data.error || 'Login failed (' + resp.status + ')');
+        }}
+        var tokens = await resp.json();
+        localStorage.setItem('access_token', tokens.access_token);
+        localStorage.setItem('refresh_token', tokens.refresh_token);
+        if (tokens.expires_in) localStorage.setItem('expires_in', String(tokens.expires_in));
+
+        // Now approve the device code
+        await doApprove(tokens.access_token);
+      }} catch (err) {{
+        showError(err.message);
+        loginBtn.disabled = false;
+        loginBtn.textContent = 'Sign in & Approve';
+      }}
+    }});
+  }}
+
+  // Register form
+  var registerForm = document.getElementById('register-form');
+  if (registerForm) {{
+    registerForm.addEventListener('submit', async function(e) {{
+      e.preventDefault();
+      hideError();
+      var btn = document.getElementById('register-btn');
+      btn.disabled = true;
+      btn.textContent = 'Creating account...';
+
+      var username = document.getElementById('reg-username').value.trim();
+      var pw = document.getElementById('reg-password').value;
+
+      try {{
+        // Register
+        var resp = await fetch('/register', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{ username: username, password: pw }}),
+        }});
+        if (!resp.ok) {{
+          var data = await resp.json().catch(function() {{ return {{}}; }});
+          throw new Error(data.error || 'Registration failed (' + resp.status + ')');
+        }}
+
+        // Login after registration
+        var loginResp = await fetch('/login', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{ username: username, password: pw }}),
+        }});
+        if (!loginResp.ok) {{
+          throw new Error('Account created but login failed. Try signing in.');
+        }}
+        var tokens = await loginResp.json();
+        localStorage.setItem('access_token', tokens.access_token);
+        localStorage.setItem('refresh_token', tokens.refresh_token);
+        if (tokens.expires_in) localStorage.setItem('expires_in', String(tokens.expires_in));
+
+        await doApprove(tokens.access_token);
+      }} catch (err) {{
+        showError(err.message);
+        btn.disabled = false;
+        btn.textContent = 'Create account & Approve';
+      }}
+    }});
+  }}
+
+  async function doApprove(token) {{
+    hideError();
+    try {{
+      var resp = await fetch('/device/approve', {{
+        method: 'POST',
+        headers: {{
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + token,
+        }},
+        body: JSON.stringify({{ user_code: pendingUserCode }}),
+      }});
+      if (!resp.ok) {{
+        var data = await resp.json().catch(function() {{ return {{}}; }});
+        throw new Error(data.error || 'Approval failed (' + resp.status + ')');
+      }}
+      showSuccess();
+    }} catch (err) {{
+      showError(err.message);
+    }}
+  }}
+
+  // Check for OIDC callback tokens in hash (after redirect back)
+  if (window.location.hash) {{
+    var params = new URLSearchParams(window.location.hash.substring(1));
+    var at = params.get('access_token');
+    var rt = params.get('refresh_token');
+    if (at && rt) {{
+      localStorage.setItem('access_token', at);
+      localStorage.setItem('refresh_token', rt);
+      var ei = params.get('expires_in');
+      if (ei) localStorage.setItem('expires_in', ei);
+      window.location.hash = '';
+      // Check for pending device code from before OIDC redirect
+      var pending = sessionStorage.getItem('pending_device_code');
+      if (pending) {{
+        pendingUserCode = pending;
+        sessionStorage.removeItem('pending_device_code');
+        doApprove(at);
+      }}
+    }}
+  }}
+
+  // Pre-fill code from query string if provided
+  var urlParams = new URLSearchParams(window.location.search);
+  var codeParam = urlParams.get('code');
+  if (codeParam) {{
+    codeInput.value = codeParam.toUpperCase();
+    // Auto-verify
+    setTimeout(function() {{ verifyBtn.click(); }}, 100);
+  }}
+}})();
+</script>
+</body>
+</html>"##,
+        register_tab = if allow_registration {
+            r#"<button class="tab" data-tab="register">Create account</button>"#
+        } else { "" },
+        register_section = if allow_registration {
+            r#"<div id="register-section" class="section">
+      <form id="register-form">
+        <label for="reg-username">Username</label>
+        <input type="text" id="reg-username" name="username" autocomplete="username" required minlength="3" maxlength="32">
+        <label for="reg-password">Password</label>
+        <input type="password" id="reg-password" name="password" autocomplete="new-password" required minlength="8">
+        <button type="submit" id="register-btn">Create account & Approve</button>
+      </form>
+    </div>"#
+        } else { "" },
+    )
 }

@@ -122,6 +122,19 @@
     <div class="divider">or</div>
     <button type="button" id="oidc-btn" class="oidc-btn">Sign in with OIDC</button>
   </div>
+  <div id="register-link" style="display:none; text-align:center; margin-top:16px; font-size:0.85rem; color:#8b949e;">
+    Don't have an account? <a href="#" id="show-register" style="color:#58a6ff;">Create one</a>
+  </div>
+  <div id="register-section" style="display:none; margin-top:16px;">
+    <div class="divider">create account</div>
+    <form id="register-form">
+      <label for="reg-username">Username</label>
+      <input type="text" id="reg-username" name="username" autocomplete="username" required minlength="3" maxlength="32">
+      <label for="reg-password">Password</label>
+      <input type="password" id="reg-password" name="password" autocomplete="new-password" required minlength="8">
+      <button type="submit" id="register-btn" style="background:#1f6feb; border-color:#388bfd;">Create account</button>
+    </form>
+  </div>
 </div>
 <script>
 (function() {
@@ -165,6 +178,68 @@
       }
     } catch (_) { /* ignore, password form remains available */ }
   })();
+
+  // Check if registration is enabled
+  (async function() {
+    try {
+      const resp = await fetch('/auth/info');
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data.allow_registration) {
+          document.getElementById('register-link').style.display = 'block';
+          document.getElementById('show-register').addEventListener('click', function(e) {
+            e.preventDefault();
+            document.getElementById('register-link').style.display = 'none';
+            document.getElementById('register-section').style.display = 'block';
+          });
+        }
+      }
+    } catch (_) {}
+  })();
+
+  // Register form
+  var regForm = document.getElementById('register-form');
+  regForm.addEventListener('submit', async function(e) {
+    e.preventDefault();
+    errorEl.style.display = 'none';
+    var regBtn = document.getElementById('register-btn');
+    regBtn.disabled = true;
+    regBtn.textContent = 'Creating account...';
+
+    var username = document.getElementById('reg-username').value.trim();
+    var password = document.getElementById('reg-password').value;
+
+    try {
+      var resp = await fetch('/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: username, password: password }),
+      });
+      if (!resp.ok) {
+        var data = await resp.json().catch(function() { return {}; });
+        throw new Error(data.error || 'Registration failed (' + resp.status + ')');
+      }
+      // Auto-login after registration
+      var loginResp = await fetch('/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: username, password: password }),
+      });
+      if (!loginResp.ok) {
+        throw new Error('Account created! Please sign in.');
+      }
+      var tokens = await loginResp.json();
+      localStorage.setItem('access_token', tokens.access_token);
+      localStorage.setItem('refresh_token', tokens.refresh_token);
+      if (tokens.expires_in) localStorage.setItem('expires_in', String(tokens.expires_in));
+      window.location.href = '/dashboard';
+    } catch (err) {
+      errorEl.textContent = err.message;
+      errorEl.style.display = 'block';
+      regBtn.disabled = false;
+      regBtn.textContent = 'Create account';
+    }
+  });
 
   const form = document.getElementById('login-form');
   const errorEl = document.getElementById('error');
