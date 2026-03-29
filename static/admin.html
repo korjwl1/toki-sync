@@ -494,7 +494,13 @@
   try {
     var payload = JSON.parse(atob(token.split('.')[1]));
     if (payload.sub) {
-      document.getElementById('current-user').textContent = payload.sub;
+      // Fetch username from admin/users (we're admin)
+      apiFetch('/admin/users').then(function(data) {
+        var me = (data.users || []).find(function(u) { return u.id === payload.sub; });
+        document.getElementById('current-user').textContent = me ? me.username : payload.sub;
+      }).catch(function() {
+        document.getElementById('current-user').textContent = payload.sub;
+      });
     }
   } catch(_) {}
 
