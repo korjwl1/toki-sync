@@ -253,9 +253,23 @@ fn build_prometheus_text(
     let esc_user = escape_prom_value(user_id);
     let esc_device = escape_prom_value(device_id);
 
+    // Validate and sanitize token_columns: only allow [a-zA-Z0-9_]
+    let safe_columns: Vec<String> = batch.token_columns.iter().map(|name| {
+        name.chars().filter(|c| c.is_alphanumeric() || *c == '_').collect::<String>()
+    }).collect();
+
     let mut out = String::with_capacity(batch.items.len() * 200);
 
     for item in &batch.items {
+        // Skip if token count doesn't match column count
+        if item.event.tokens.len() != safe_columns.len() {
+            tracing::warn!(
+                "token/column count mismatch: {} tokens vs {} columns, skipping event",
+                item.event.tokens.len(), safe_columns.len()
+            );
+            continue;
+        }
+
         let model = escape_prom_value(batch.dict.get(&item.event.model_id).unwrap_or(&empty));
         let session = escape_prom_value(batch.dict.get(&item.event.session_id).unwrap_or(&empty));
         let project = batch.dict
@@ -264,8 +278,8 @@ fn build_prometheus_text(
             .map(|s| escape_prom_value(s))
             .unwrap_or_default();
 
-        for (count_val, col_name) in item.event.tokens.iter().zip(batch.token_columns.iter()) {
-            if *count_val == 0 {
+        for (count_val, col_name) in item.event.tokens.iter().zip(safe_columns.iter()) {
+            if *count_val == 0 || col_name.is_empty() {
                 continue;
             }
             write!(
