@@ -264,21 +264,13 @@ fn build_prometheus_text(
             .map(|s| escape_prom_value(s))
             .unwrap_or_default();
 
-        let token_types: [(u64, &str); 4] = [
-            (item.event.input_tokens, "input"),
-            (item.event.output_tokens, "output"),
-            (item.event.cache_creation_input_tokens, "cache_create"),
-            (item.event.cache_read_input_tokens, "cache_read"),
-        ];
-
-        for (count, type_label) in &token_types {
-            if *count == 0 {
+        for (count_val, col_name) in item.event.tokens.iter().zip(batch.token_columns.iter()) {
+            if *count_val == 0 {
                 continue;
             }
             write!(
                 out,
-                "toki_tokens_total{{model=\"{model}\",session=\"{session}\",provider=\"{esc_provider}\",user=\"{esc_user}\",device=\"{esc_device}\",project=\"{project}\",type=\"{type_label}\"}} {count} {ts}\n",
-                count = count,
+                "toki_tokens_total{{model=\"{model}\",session=\"{session}\",provider=\"{esc_provider}\",user=\"{esc_user}\",device=\"{esc_device}\",project=\"{project}\",type=\"{col_name}\"}} {count_val} {ts}\n",
                 ts = item.ts_ms,
             )
             .unwrap();
@@ -322,21 +314,14 @@ fn build_metric_points(
 
         let ts = item.ts_ms;
 
-        let token_types: [(u64, &str); 4] = [
-            (item.event.input_tokens,                  "input"),
-            (item.event.output_tokens,                 "output"),
-            (item.event.cache_creation_input_tokens,   "cache_create"),
-            (item.event.cache_read_input_tokens,       "cache_read"),
-        ];
-
-        for (count, type_label) in &token_types {
-            if *count == 0 { continue; }
+        for (count_val, col_name) in item.event.tokens.iter().zip(batch.token_columns.iter()) {
+            if *count_val == 0 { continue; }
             let mut labels = base.clone();
-            labels.push(("type".into(), type_label.to_string()));
+            labels.push(("type".into(), col_name.clone()));
             points.push(MetricPoint {
                 name: "toki_tokens_total".to_string(),
                 labels,
-                value: *count as f64,
+                value: *count_val as f64,
                 timestamp_ms: ts,
             });
         }
@@ -353,12 +338,16 @@ mod tests {
     use super::*;
 
     fn make_batch(items: Vec<SyncItem>) -> SyncBatchPayload {
+        make_batch_with_columns(items, vec!["input".into(), "output".into(), "cache_create".into(), "cache_read".into()])
+    }
+
+    fn make_batch_with_columns(items: Vec<SyncItem>, token_columns: Vec<String>) -> SyncBatchPayload {
         let mut dict = HashMap::new();
         dict.insert(1u32, "claude-opus-4-6".to_string());
         dict.insert(2u32, "sess-abc".to_string());
         dict.insert(3u32, "/path/to/file.jsonl".to_string());
         dict.insert(4u32, "my-project".to_string());
-        SyncBatchPayload { items, dict, provider: "claude_code".to_string() }
+        SyncBatchPayload { items, dict, provider: "claude_code".to_string(), token_columns }
     }
 
     #[test]
@@ -370,10 +359,7 @@ mod tests {
                 session_id: 2,
                 source_file_id:  3,
                 project_name_id: 4,
-                input_tokens:  100,
-                output_tokens: 50,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens:     0,
+                tokens: vec![100, 50, 0, 0],
             },
         };
         let batch  = make_batch(vec![item]);
@@ -398,10 +384,7 @@ mod tests {
                 session_id: 2,
                 source_file_id:  3,
                 project_name_id: 4,
-                input_tokens:  10,
-                output_tokens: 20,
-                cache_creation_input_tokens: 5,
-                cache_read_input_tokens:     3,
+                tokens: vec![10, 20, 5, 3],
             },
         };
         let batch  = make_batch(vec![item]);
@@ -418,10 +401,7 @@ mod tests {
                 session_id: 2,
                 source_file_id:  3,
                 project_name_id: 4,
-                input_tokens:  1,
-                output_tokens: 0,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
+                tokens: vec![1, 0, 0, 0],
             },
         };
         let batch  = make_batch(vec![item]);
@@ -442,6 +422,38 @@ mod tests {
     }
 
     #[test]
+    fn test_build_prometheus_text_codex_labels() {
+        let item = SyncItem {
+            ts_ms: 1_700_000_000_000,
+            event: StoredEvent {
+                model_id:   1,
+                session_id: 2,
+                source_file_id:  3,
+                project_name_id: 4,
+                tokens: vec![200, 100, 30, 50],
+            },
+        };
+        let batch = make_batch_with_columns(
+            vec![item],
+            vec!["input".into(), "output".into(), "cached_input".into(), "reasoning_output".into()],
+        );
+        let text = build_prometheus_text(&batch, "user-1", "device-1", "codex");
+        let lines: Vec<&str> = text.trim().lines().collect();
+        assert_eq!(lines.len(), 4);
+        assert!(lines[0].contains("type=\"input\""));
+        assert!(lines[0].contains("200"));
+        assert!(lines[1].contains("type=\"output\""));
+        assert!(lines[1].contains("100"));
+        assert!(lines[2].contains("type=\"cached_input\""));
+        assert!(lines[2].contains("30"));
+        assert!(lines[3].contains("type=\"reasoning_output\""));
+        assert!(lines[3].contains("50"));
+        // Ensure no claude-specific labels appear
+        assert!(!text.contains("cache_create"));
+        assert!(!text.contains("cache_read"));
+    }
+
+    #[test]
     fn test_build_prometheus_text_basic() {
         let item = SyncItem {
             ts_ms: 1_700_000_000_000,
@@ -450,10 +462,7 @@ mod tests {
                 session_id: 2,
                 source_file_id:  3,
                 project_name_id: 4,
-                input_tokens:  100,
-                output_tokens: 50,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens:     0,
+                tokens: vec![100, 50, 0, 0],
             },
         };
         let batch = make_batch(vec![item]);
