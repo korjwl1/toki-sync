@@ -1,5 +1,5 @@
 use axum::{
-    extract::State,
+    extract::{Path, State},
     http::{HeaderMap, StatusCode},
     Json,
 };
@@ -151,6 +151,35 @@ pub async fn admin_list_devices(
     Ok(Json(serde_json::json!({ "devices": devices })))
 }
 
+// --- /admin/users/:id/role ------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct AdminChangeRoleRequest {
+    pub role: String,
+}
+
+pub async fn admin_change_user_role(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    Json(body): Json<AdminChangeRoleRequest>,
+) -> Result<StatusCode, AppError> {
+    require_admin(&headers, &state.jwt, &*state.db).await?;
+
+    if body.role != "user" && body.role != "admin" {
+        return Err(AppError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            message: "role must be 'user' or 'admin'".into(),
+        });
+    }
+
+    let updated = state.db.update_user_role(&user_id, &body.role).await.map_err(AppError::internal)?;
+    if !updated {
+        return Err(AppError::not_found("user not found"));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub async fn admin_delete_device(
     headers: HeaderMap,
     State(state): State<AppState>,
@@ -168,4 +197,72 @@ pub async fn admin_delete_device(
         return Err(AppError::not_found("device not found"));
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+// --- /admin/pending -------------------------------------------------------
+
+pub async fn admin_list_pending(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_admin(&headers, &state.jwt, &*state.db).await?;
+
+    let rows = state.db.list_pending_registrations().await.map_err(AppError::internal)?;
+
+    let pending: Vec<_> = rows.into_iter().map(|p| {
+        serde_json::json!({ "id": p.id, "username": p.username, "requested_at": p.requested_at })
+    }).collect();
+
+    Ok(Json(serde_json::json!({ "pending": pending })))
+}
+
+pub async fn admin_approve_pending(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(pending_id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    require_admin(&headers, &state.jwt, &*state.db).await?;
+
+    let approved = state.db.approve_registration(&pending_id).await.map_err(|e| {
+        if e.to_string().contains("UNIQUE") {
+            AppError::conflict("username already exists")
+        } else {
+            AppError::internal(e)
+        }
+    })?;
+    if !approved {
+        return Err(AppError::not_found("pending registration not found"));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn admin_reject_pending(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(pending_id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    require_admin(&headers, &state.jwt, &*state.db).await?;
+
+    let rejected = state.db.reject_registration(&pending_id).await.map_err(AppError::internal)?;
+    if !rejected {
+        return Err(AppError::not_found("pending registration not found"));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// --- /admin/server-info ---------------------------------------------------
+
+pub async fn admin_server_info(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_admin(&headers, &state.jwt, &*state.db).await?;
+
+    Ok(Json(serde_json::json!({
+        "registration_mode": state.registration_mode,
+        "oidc_enabled": !state.oidc_issuer.is_empty(),
+        "oidc_issuer": if state.oidc_issuer.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(state.oidc_issuer.clone()) },
+        "storage_backend": state.storage_backend,
+        "version": env!("CARGO_PKG_VERSION"),
+    })))
 }

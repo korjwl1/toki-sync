@@ -76,6 +76,12 @@ pub struct TeamMemberSummary {
     pub joined_at: i64,
 }
 
+pub struct PendingRegistration {
+    pub id: String,
+    pub username: String,
+    pub requested_at: i64,
+}
+
 pub struct DeviceCode {
     pub device_code: String,
     pub user_code: String,

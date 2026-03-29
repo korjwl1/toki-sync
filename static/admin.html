@@ -1,0 +1,896 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>toki-sync - Admin</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
+    background: #0d1117;
+    color: #c9d1d9;
+    min-height: 100vh;
+  }
+  a { color: #58a6ff; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* Header */
+  .header {
+    background: #161b22;
+    border-bottom: 1px solid #30363d;
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .header h1 {
+    font-size: 1.2rem;
+    font-weight: 600;
+    color: #e6edf3;
+  }
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 0.85rem;
+    color: #8b949e;
+  }
+  .header-right button {
+    background: transparent;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    color: #c9d1d9;
+    padding: 4px 12px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    width: auto;
+  }
+  .header-right button:hover { border-color: #8b949e; }
+
+  /* Tabs */
+  .tabs {
+    display: flex;
+    background: #161b22;
+    border-bottom: 1px solid #30363d;
+    padding: 0 24px;
+    overflow-x: auto;
+  }
+  .tab {
+    padding: 10px 16px;
+    cursor: pointer;
+    color: #8b949e;
+    font-size: 0.9rem;
+    border-bottom: 2px solid transparent;
+    white-space: nowrap;
+    background: none;
+    border-left: none;
+    border-right: none;
+    border-top: none;
+    width: auto;
+    font-weight: normal;
+  }
+  .tab:hover { color: #c9d1d9; }
+  .tab.active { color: #58a6ff; border-bottom-color: #58a6ff; }
+
+  /* Content */
+  .content {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 24px;
+  }
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  /* Tables */
+  .toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .toolbar h2 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #e6edf3;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+  }
+  th, td {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 1px solid #21262d;
+  }
+  th {
+    color: #8b949e;
+    font-weight: 500;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  tr:hover { background: #161b22; }
+  .empty-state {
+    text-align: center;
+    color: #8b949e;
+    padding: 40px 0;
+    font-size: 0.9rem;
+  }
+
+  /* Buttons */
+  button {
+    width: auto;
+    padding: 6px 14px;
+    background: #238636;
+    border: 1px solid #2ea043;
+    border-radius: 6px;
+    color: #fff;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+  button:hover { background: #2ea043; }
+  button:disabled { opacity: 0.6; cursor: not-allowed; }
+  .btn-danger { background: #da3633; border-color: #f85149; }
+  .btn-danger:hover { background: #f85149; }
+  .btn-secondary { background: #30363d; border-color: #484f58; }
+  .btn-secondary:hover { background: #484f58; }
+  .btn-primary { background: #1f6feb; border-color: #388bfd; }
+  .btn-primary:hover { background: #388bfd; }
+  .btn-sm { padding: 3px 8px; font-size: 0.8rem; }
+  .btn-group { display: flex; gap: 6px; }
+
+  /* Badge */
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+  .badge-admin { background: #388bfd30; color: #58a6ff; }
+  .badge-user { background: #30363d; color: #8b949e; }
+
+  /* Modal */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 24px;
+    width: 100%;
+    max-width: 420px;
+  }
+  .modal h3 {
+    font-size: 1.1rem;
+    color: #e6edf3;
+    margin-bottom: 16px;
+  }
+  .modal label {
+    display: block;
+    font-size: 0.85rem;
+    color: #8b949e;
+    margin-bottom: 4px;
+  }
+  .modal input, .modal select {
+    width: 100%;
+    padding: 8px 10px;
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    color: #c9d1d9;
+    font-size: 0.9rem;
+    margin-bottom: 12px;
+    outline: none;
+  }
+  .modal input:focus, .modal select:focus { border-color: #58a6ff; }
+  .modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 8px;
+  }
+
+  /* Filter */
+  select.filter-select {
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    color: #c9d1d9;
+    padding: 6px 10px;
+    font-size: 0.85rem;
+    outline: none;
+  }
+  select.filter-select:focus { border-color: #58a6ff; }
+
+  /* Server info */
+  .info-grid {
+    display: grid;
+    grid-template-columns: 180px 1fr;
+    gap: 0;
+  }
+  .info-grid dt {
+    color: #8b949e;
+    padding: 10px 12px;
+    border-bottom: 1px solid #21262d;
+    font-size: 0.85rem;
+  }
+  .info-grid dd {
+    padding: 10px 12px;
+    border-bottom: 1px solid #21262d;
+    font-size: 0.9rem;
+    color: #e6edf3;
+  }
+
+  /* Error */
+  .error-banner {
+    background: #da363340;
+    border: 1px solid #da3633;
+    color: #f85149;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    margin-bottom: 16px;
+    display: none;
+  }
+
+  /* Responsive */
+  @media (max-width: 768px) {
+    .content { padding: 12px; }
+    th, td { padding: 8px 6px; font-size: 0.8rem; }
+    .info-grid { grid-template-columns: 1fr; }
+    .info-grid dt { border-bottom: none; padding-bottom: 2px; font-weight: 600; }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>toki-sync admin</h1>
+  <div class="header-right">
+    <span id="current-user"></span>
+    <button id="logout-btn">Sign out</button>
+  </div>
+</div>
+
+<div class="tabs" id="tab-nav">
+  <button class="tab active" data-panel="users">Users</button>
+  <button class="tab" data-panel="devices">Devices</button>
+  <button class="tab" data-panel="teams">Teams</button>
+  <button class="tab" data-panel="pending" id="pending-tab" style="display:none">Pending</button>
+  <button class="tab" data-panel="server">Server</button>
+</div>
+
+<div class="content">
+  <div id="global-error" class="error-banner"></div>
+
+  <!-- Users Panel -->
+  <div id="panel-users" class="panel active">
+    <div class="toolbar">
+      <h2>Users</h2>
+      <button id="create-user-btn" class="btn-primary">Create User</button>
+    </div>
+    <table>
+      <thead>
+        <tr><th>Username</th><th>Role</th><th>Created</th><th>Actions</th></tr>
+      </thead>
+      <tbody id="users-body"></tbody>
+    </table>
+    <div id="users-empty" class="empty-state" style="display:none">No users found.</div>
+  </div>
+
+  <!-- Devices Panel -->
+  <div id="panel-devices" class="panel">
+    <div class="toolbar">
+      <h2>Devices</h2>
+      <select id="device-user-filter" class="filter-select">
+        <option value="">All users</option>
+      </select>
+    </div>
+    <table>
+      <thead>
+        <tr><th>Name</th><th>User</th><th>Last Seen</th><th>Actions</th></tr>
+      </thead>
+      <tbody id="devices-body"></tbody>
+    </table>
+    <div id="devices-empty" class="empty-state" style="display:none">No devices found.</div>
+  </div>
+
+  <!-- Teams Panel -->
+  <div id="panel-teams" class="panel">
+    <div class="toolbar">
+      <h2>Teams</h2>
+      <button id="create-team-btn" class="btn-primary">Create Team</button>
+    </div>
+    <table>
+      <thead>
+        <tr><th>Name</th><th>Members</th><th>Created</th><th>Actions</th></tr>
+      </thead>
+      <tbody id="teams-body"></tbody>
+    </table>
+    <div id="teams-empty" class="empty-state" style="display:none">No teams found.</div>
+    <!-- Team detail -->
+    <div id="team-detail" style="display:none; margin-top:24px;">
+      <div class="toolbar">
+        <h2 id="team-detail-name"></h2>
+        <div class="btn-group">
+          <button id="add-member-btn" class="btn-primary btn-sm">Add Member</button>
+          <button id="close-detail-btn" class="btn-secondary btn-sm">Close</button>
+        </div>
+      </div>
+      <table>
+        <thead><tr><th>Username</th><th>Role</th><th>Joined</th><th>Actions</th></tr></thead>
+        <tbody id="team-members-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Pending Panel -->
+  <div id="panel-pending" class="panel">
+    <div class="toolbar">
+      <h2>Pending Registrations</h2>
+    </div>
+    <table>
+      <thead>
+        <tr><th>Username</th><th>Requested At</th><th>Actions</th></tr>
+      </thead>
+      <tbody id="pending-body"></tbody>
+    </table>
+    <div id="pending-empty" class="empty-state" style="display:none">No pending registrations.</div>
+  </div>
+
+  <!-- Server Panel -->
+  <div id="panel-server" class="panel">
+    <div class="toolbar"><h2>Server Info</h2></div>
+    <dl class="info-grid" id="server-info"></dl>
+  </div>
+</div>
+
+<!-- Modals -->
+<div id="modal-overlay" class="modal-overlay">
+  <div class="modal" id="modal-content"></div>
+</div>
+
+<script>
+(function() {
+  'use strict';
+
+  // ─── XSS prevention ──────────────────────────────────────────────────
+  function esc(s) {
+    var d = document.createElement('div');
+    d.appendChild(document.createTextNode(s || ''));
+    return d.innerHTML;
+  }
+
+  // ─── Auth ─────────────────────────────────────────────────────────────
+  // Check for tokens in URL fragment (OIDC callback)
+  if (window.location.hash) {
+    var params = new URLSearchParams(window.location.hash.substring(1));
+    var at = params.get('access_token');
+    var rt = params.get('refresh_token');
+    var ei = params.get('expires_in');
+    if (at && rt) {
+      localStorage.setItem('access_token', at);
+      localStorage.setItem('refresh_token', rt);
+      if (ei) localStorage.setItem('expires_in', ei);
+      window.location.hash = '';
+    }
+  }
+
+  var token = localStorage.getItem('access_token');
+  if (!token) {
+    window.location.href = '/login';
+    return;
+  }
+
+  function authHeaders() {
+    return { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
+  }
+
+  async function api(method, url, body) {
+    var opts = { method: method, headers: authHeaders() };
+    if (body !== undefined) opts.body = JSON.stringify(body);
+    var resp = await fetch(url, opts);
+    if (resp.status === 401) {
+      localStorage.removeItem('access_token');
+      localStorage.removeItem('refresh_token');
+      window.location.href = '/login';
+      throw new Error('Session expired');
+    }
+    return resp;
+  }
+
+  async function apiJson(method, url, body) {
+    var resp = await api(method, url, body);
+    if (!resp.ok) {
+      var data = await resp.json().catch(function() { return {}; });
+      throw new Error(data.error || 'Request failed (' + resp.status + ')');
+    }
+    if (resp.status === 204) return null;
+    return resp.json();
+  }
+
+  // ─── Error display ────────────────────────────────────────────────────
+  var globalError = document.getElementById('global-error');
+  function showError(msg) {
+    globalError.textContent = msg;
+    globalError.style.display = 'block';
+    setTimeout(function() { globalError.style.display = 'none'; }, 5000);
+  }
+
+  // ─── Tab navigation ───────────────────────────────────────────────────
+  var tabs = document.querySelectorAll('.tab');
+  tabs.forEach(function(tab) {
+    tab.addEventListener('click', function() {
+      tabs.forEach(function(t) { t.classList.remove('active'); });
+      tab.classList.add('active');
+      document.querySelectorAll('.panel').forEach(function(p) { p.classList.remove('active'); });
+      var panel = document.getElementById('panel-' + tab.dataset.panel);
+      if (panel) panel.classList.add('active');
+      // Load data for panel
+      loadPanel(tab.dataset.panel);
+    });
+  });
+
+  function loadPanel(name) {
+    switch(name) {
+      case 'users': loadUsers(); break;
+      case 'devices': loadDevices(); break;
+      case 'teams': loadTeams(); break;
+      case 'pending': loadPending(); break;
+      case 'server': loadServerInfo(); break;
+    }
+  }
+
+  // ─── Modal ────────────────────────────────────────────────────────────
+  var modalOverlay = document.getElementById('modal-overlay');
+  var modalContent = document.getElementById('modal-content');
+
+  function openModal(html) {
+    modalContent.innerHTML = html;
+    modalOverlay.classList.add('open');
+  }
+  function closeModal() {
+    modalOverlay.classList.remove('open');
+    modalContent.innerHTML = '';
+  }
+  modalOverlay.addEventListener('click', function(e) {
+    if (e.target === modalOverlay) closeModal();
+  });
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') closeModal();
+  });
+
+  // ─── Time formatting ──────────────────────────────────────────────────
+  function fmtTime(ts) {
+    if (!ts) return '-';
+    var d = new Date(ts * 1000);
+    return d.toLocaleString();
+  }
+
+  // ─── Logout ───────────────────────────────────────────────────────────
+  document.getElementById('logout-btn').addEventListener('click', function() {
+    localStorage.removeItem('access_token');
+    localStorage.removeItem('refresh_token');
+    localStorage.removeItem('expires_in');
+    window.location.href = '/login';
+  });
+
+  // ─── Current user display ─────────────────────────────────────────────
+  try {
+    var payload = JSON.parse(atob(token.split('.')[1]));
+    if (payload.sub) {
+      document.getElementById('current-user').textContent = payload.sub;
+    }
+  } catch(_) {}
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // USERS
+  // ═══════════════════════════════════════════════════════════════════════
+  var usersCache = [];
+
+  async function loadUsers() {
+    try {
+      var data = await apiJson('GET', '/admin/users');
+      usersCache = data.users || [];
+      renderUsers(usersCache);
+    } catch(e) { showError(e.message); }
+  }
+
+  function renderUsers(users) {
+    var body = document.getElementById('users-body');
+    var empty = document.getElementById('users-empty');
+    if (!users.length) {
+      body.innerHTML = '';
+      empty.style.display = 'block';
+      return;
+    }
+    empty.style.display = 'none';
+    body.innerHTML = users.map(function(u) {
+      var badgeClass = u.role === 'admin' ? 'badge-admin' : 'badge-user';
+      return '<tr>' +
+        '<td>' + esc(u.username) + '</td>' +
+        '<td><span class="badge ' + badgeClass + '">' + esc(u.role) + '</span></td>' +
+        '<td>' + fmtTime(u.created_at) + '</td>' +
+        '<td><div class="btn-group">' +
+          '<button class="btn-secondary btn-sm" onclick="AdminPanel.changePassword(\'' + esc(u.id) + '\',\'' + esc(u.username) + '\')">Password</button>' +
+          '<button class="btn-secondary btn-sm" onclick="AdminPanel.changeRole(\'' + esc(u.id) + '\',\'' + esc(u.username) + '\',\'' + esc(u.role) + '\')">Role</button>' +
+          '<button class="btn-danger btn-sm" onclick="AdminPanel.deleteUser(\'' + esc(u.id) + '\',\'' + esc(u.username) + '\')">Delete</button>' +
+        '</div></td>' +
+      '</tr>';
+    }).join('');
+  }
+
+  document.getElementById('create-user-btn').addEventListener('click', function() {
+    openModal(
+      '<h3>Create User</h3>' +
+      '<label>Username</label><input type="text" id="m-username" minlength="3" maxlength="32">' +
+      '<label>Password</label><input type="password" id="m-password" minlength="8">' +
+      '<label>Role</label><select id="m-role"><option value="user">user</option><option value="admin">admin</option></select>' +
+      '<div class="modal-actions"><button class="btn-secondary" onclick="AdminPanel.closeModal()">Cancel</button><button class="btn-primary" id="m-create-user-ok">Create</button></div>'
+    );
+    document.getElementById('m-create-user-ok').addEventListener('click', async function() {
+      var username = document.getElementById('m-username').value.trim();
+      var password = document.getElementById('m-password').value;
+      var role = document.getElementById('m-role').value;
+      if (!username || !password) return;
+      try {
+        await apiJson('POST', '/admin/users', { username: username, password: password, role: role });
+        closeModal();
+        loadUsers();
+      } catch(e) { showError(e.message); }
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // DEVICES
+  // ═══════════════════════════════════════════════════════════════════════
+  var devicesCache = [];
+
+  async function loadDevices() {
+    try {
+      var data = await apiJson('GET', '/admin/devices');
+      devicesCache = data.devices || [];
+      populateDeviceFilter(devicesCache);
+      renderDevices(devicesCache);
+    } catch(e) { showError(e.message); }
+  }
+
+  function populateDeviceFilter(devices) {
+    var sel = document.getElementById('device-user-filter');
+    var current = sel.value;
+    var usernames = [];
+    devices.forEach(function(d) {
+      if (usernames.indexOf(d.username) === -1) usernames.push(d.username);
+    });
+    usernames.sort();
+    sel.innerHTML = '<option value="">All users</option>' +
+      usernames.map(function(u) { return '<option value="' + esc(u) + '">' + esc(u) + '</option>'; }).join('');
+    sel.value = current;
+  }
+
+  document.getElementById('device-user-filter').addEventListener('change', function() {
+    var filter = this.value;
+    if (!filter) {
+      renderDevices(devicesCache);
+    } else {
+      renderDevices(devicesCache.filter(function(d) { return d.username === filter; }));
+    }
+  });
+
+  function renderDevices(devices) {
+    var body = document.getElementById('devices-body');
+    var empty = document.getElementById('devices-empty');
+    if (!devices.length) {
+      body.innerHTML = '';
+      empty.style.display = 'block';
+      return;
+    }
+    empty.style.display = 'none';
+    body.innerHTML = devices.map(function(d) {
+      return '<tr>' +
+        '<td>' + esc(d.name) + '</td>' +
+        '<td>' + esc(d.username) + '</td>' +
+        '<td>' + fmtTime(d.last_seen_at) + '</td>' +
+        '<td><button class="btn-danger btn-sm" onclick="AdminPanel.deleteDevice(\'' + esc(d.id) + '\',\'' + esc(d.name) + '\')">Delete</button></td>' +
+      '</tr>';
+    }).join('');
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // TEAMS
+  // ═══════════════════════════════════════════════════════════════════════
+  var teamsCache = [];
+  var currentTeamId = null;
+
+  async function loadTeams() {
+    try {
+      var data = await apiJson('GET', '/admin/teams');
+      teamsCache = data.teams || [];
+      renderTeams(teamsCache);
+    } catch(e) { showError(e.message); }
+  }
+
+  function renderTeams(teams) {
+    var body = document.getElementById('teams-body');
+    var empty = document.getElementById('teams-empty');
+    if (!teams.length) {
+      body.innerHTML = '';
+      empty.style.display = 'block';
+      return;
+    }
+    empty.style.display = 'none';
+    body.innerHTML = teams.map(function(t) {
+      return '<tr>' +
+        '<td><a href="#" onclick="AdminPanel.viewTeam(\'' + esc(t.id) + '\',\'' + esc(t.name) + '\'); return false;">' + esc(t.name) + '</a></td>' +
+        '<td>' + (t.member_count || 0) + '</td>' +
+        '<td>' + fmtTime(t.created_at) + '</td>' +
+        '<td><button class="btn-danger btn-sm" onclick="AdminPanel.deleteTeam(\'' + esc(t.id) + '\',\'' + esc(t.name) + '\')">Delete</button></td>' +
+      '</tr>';
+    }).join('');
+  }
+
+  document.getElementById('create-team-btn').addEventListener('click', function() {
+    openModal(
+      '<h3>Create Team</h3>' +
+      '<label>Name</label><input type="text" id="m-teamname">' +
+      '<div class="modal-actions"><button class="btn-secondary" onclick="AdminPanel.closeModal()">Cancel</button><button class="btn-primary" id="m-create-team-ok">Create</button></div>'
+    );
+    document.getElementById('m-create-team-ok').addEventListener('click', async function() {
+      var name = document.getElementById('m-teamname').value.trim();
+      if (!name) return;
+      try {
+        await apiJson('POST', '/admin/teams', { name: name });
+        closeModal();
+        loadTeams();
+      } catch(e) { showError(e.message); }
+    });
+  });
+
+  async function viewTeam(teamId, teamName) {
+    currentTeamId = teamId;
+    document.getElementById('team-detail').style.display = 'block';
+    document.getElementById('team-detail-name').textContent = teamName + ' - Members';
+    try {
+      var data = await apiJson('GET', '/admin/teams/' + teamId + '/members');
+      var members = data.members || [];
+      var body = document.getElementById('team-members-body');
+      if (!members.length) {
+        body.innerHTML = '<tr><td colspan="4" style="text-align:center; color:#8b949e;">No members</td></tr>';
+      } else {
+        body.innerHTML = members.map(function(m) {
+          return '<tr>' +
+            '<td>' + esc(m.username) + '</td>' +
+            '<td>' + esc(m.role) + '</td>' +
+            '<td>' + fmtTime(m.joined_at) + '</td>' +
+            '<td><button class="btn-danger btn-sm" onclick="AdminPanel.removeTeamMember(\'' + esc(teamId) + '\',\'' + esc(m.user_id) + '\',\'' + esc(m.username) + '\')">Remove</button></td>' +
+          '</tr>';
+        }).join('');
+      }
+    } catch(e) { showError(e.message); }
+  }
+
+  document.getElementById('close-detail-btn').addEventListener('click', function() {
+    document.getElementById('team-detail').style.display = 'none';
+    currentTeamId = null;
+  });
+
+  document.getElementById('add-member-btn').addEventListener('click', function() {
+    // Build user options from cache
+    var options = usersCache.map(function(u) {
+      return '<option value="' + esc(u.id) + '">' + esc(u.username) + '</option>';
+    }).join('');
+    openModal(
+      '<h3>Add Member</h3>' +
+      '<label>User</label><select id="m-member-user">' + options + '</select>' +
+      '<label>Role</label><select id="m-member-role"><option value="member">member</option><option value="admin">admin</option></select>' +
+      '<div class="modal-actions"><button class="btn-secondary" onclick="AdminPanel.closeModal()">Cancel</button><button class="btn-primary" id="m-add-member-ok">Add</button></div>'
+    );
+    document.getElementById('m-add-member-ok').addEventListener('click', async function() {
+      var userId = document.getElementById('m-member-user').value;
+      var role = document.getElementById('m-member-role').value;
+      if (!userId) return;
+      try {
+        await apiJson('POST', '/admin/teams/' + currentTeamId + '/members', { user_id: userId, role: role });
+        closeModal();
+        viewTeam(currentTeamId, document.getElementById('team-detail-name').textContent.replace(' - Members', ''));
+      } catch(e) { showError(e.message); }
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // PENDING
+  // ═══════════════════════════════════════════════════════════════════════
+  async function loadPending() {
+    try {
+      var data = await apiJson('GET', '/admin/pending');
+      var pending = data.pending || [];
+      renderPending(pending);
+    } catch(e) { showError(e.message); }
+  }
+
+  function renderPending(pending) {
+    var body = document.getElementById('pending-body');
+    var empty = document.getElementById('pending-empty');
+    if (!pending.length) {
+      body.innerHTML = '';
+      empty.style.display = 'block';
+      return;
+    }
+    empty.style.display = 'none';
+    body.innerHTML = pending.map(function(p) {
+      return '<tr>' +
+        '<td>' + esc(p.username) + '</td>' +
+        '<td>' + fmtTime(p.requested_at) + '</td>' +
+        '<td><div class="btn-group">' +
+          '<button class="btn-primary btn-sm" onclick="AdminPanel.approvePending(\'' + esc(p.id) + '\')">Approve</button>' +
+          '<button class="btn-danger btn-sm" onclick="AdminPanel.rejectPending(\'' + esc(p.id) + '\')">Reject</button>' +
+        '</div></td>' +
+      '</tr>';
+    }).join('');
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // SERVER INFO
+  // ═══════════════════════════════════════════════════════════════════════
+  async function loadServerInfo() {
+    try {
+      var data = await apiJson('GET', '/admin/server-info');
+      var grid = document.getElementById('server-info');
+      grid.innerHTML =
+        '<dt>Registration Mode</dt><dd>' + esc(data.registration_mode) + '</dd>' +
+        '<dt>OIDC</dt><dd>' + (data.oidc_enabled ? 'Enabled (' + esc(data.oidc_issuer || '') + ')' : 'Disabled') + '</dd>' +
+        '<dt>Storage Backend</dt><dd>' + esc(data.storage_backend) + '</dd>' +
+        '<dt>Version</dt><dd>' + esc(data.version) + '</dd>';
+    } catch(e) { showError(e.message); }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // PUBLIC API (for onclick handlers)
+  // ═══════════════════════════════════════════════════════════════════════
+  window.AdminPanel = {
+    closeModal: closeModal,
+
+    changePassword: function(userId, username) {
+      openModal(
+        '<h3>Change Password: ' + esc(username) + '</h3>' +
+        '<label>New Password</label><input type="password" id="m-new-pw" minlength="8">' +
+        '<div class="modal-actions"><button class="btn-secondary" onclick="AdminPanel.closeModal()">Cancel</button><button class="btn-primary" id="m-pw-ok">Change</button></div>'
+      );
+      document.getElementById('m-pw-ok').addEventListener('click', async function() {
+        var pw = document.getElementById('m-new-pw').value;
+        if (pw.length < 8) { showError('Password must be at least 8 characters'); return; }
+        try {
+          await apiJson('PATCH', '/admin/users/' + userId + '/password', { password: pw });
+          closeModal();
+        } catch(e) { showError(e.message); }
+      });
+    },
+
+    changeRole: function(userId, username, currentRole) {
+      var newRole = currentRole === 'admin' ? 'user' : 'admin';
+      openModal(
+        '<h3>Change Role: ' + esc(username) + '</h3>' +
+        '<p style="margin-bottom:16px; color:#8b949e;">Change role from <strong>' + esc(currentRole) + '</strong> to <strong>' + esc(newRole) + '</strong>?</p>' +
+        '<div class="modal-actions"><button class="btn-secondary" onclick="AdminPanel.closeModal()">Cancel</button><button class="btn-primary" id="m-role-ok">Confirm</button></div>'
+      );
+      document.getElementById('m-role-ok').addEventListener('click', async function() {
+        try {
+          await apiJson('PATCH', '/admin/users/' + userId + '/role', { role: newRole });
+          closeModal();
+          loadUsers();
+        } catch(e) { showError(e.message); }
+      });
+    },
+
+    deleteUser: function(userId, username) {
+      openModal(
+        '<h3>Delete User</h3>' +
+        '<p style="margin-bottom:16px; color:#f85149;">Are you sure you want to delete <strong>' + esc(username) + '</strong>? This will also delete all their devices and data.</p>' +
+        '<div class="modal-actions"><button class="btn-secondary" onclick="AdminPanel.closeModal()">Cancel</button><button class="btn-danger" id="m-del-ok">Delete</button></div>'
+      );
+      document.getElementById('m-del-ok').addEventListener('click', async function() {
+        try {
+          await apiJson('DELETE', '/admin/users/' + userId);
+          closeModal();
+          loadUsers();
+        } catch(e) { showError(e.message); }
+      });
+    },
+
+    deleteDevice: function(deviceId, name) {
+      openModal(
+        '<h3>Delete Device</h3>' +
+        '<p style="margin-bottom:16px; color:#f85149;">Delete device <strong>' + esc(name) + '</strong>?</p>' +
+        '<div class="modal-actions"><button class="btn-secondary" onclick="AdminPanel.closeModal()">Cancel</button><button class="btn-danger" id="m-del-dev-ok">Delete</button></div>'
+      );
+      document.getElementById('m-del-dev-ok').addEventListener('click', async function() {
+        try {
+          await apiJson('DELETE', '/admin/devices/' + deviceId);
+          closeModal();
+          loadDevices();
+        } catch(e) { showError(e.message); }
+      });
+    },
+
+    viewTeam: viewTeam,
+
+    deleteTeam: function(teamId, name) {
+      openModal(
+        '<h3>Delete Team</h3>' +
+        '<p style="margin-bottom:16px; color:#f85149;">Delete team <strong>' + esc(name) + '</strong>?</p>' +
+        '<div class="modal-actions"><button class="btn-secondary" onclick="AdminPanel.closeModal()">Cancel</button><button class="btn-danger" id="m-del-team-ok">Delete</button></div>'
+      );
+      document.getElementById('m-del-team-ok').addEventListener('click', async function() {
+        try {
+          await apiJson('DELETE', '/admin/teams/' + teamId);
+          closeModal();
+          loadTeams();
+        } catch(e) { showError(e.message); }
+      });
+    },
+
+    removeTeamMember: function(teamId, userId, username) {
+      openModal(
+        '<h3>Remove Member</h3>' +
+        '<p style="margin-bottom:16px; color:#f85149;">Remove <strong>' + esc(username) + '</strong> from team?</p>' +
+        '<div class="modal-actions"><button class="btn-secondary" onclick="AdminPanel.closeModal()">Cancel</button><button class="btn-danger" id="m-rm-member-ok">Remove</button></div>'
+      );
+      document.getElementById('m-rm-member-ok').addEventListener('click', async function() {
+        try {
+          await apiJson('DELETE', '/admin/teams/' + teamId + '/members/' + userId);
+          closeModal();
+          viewTeam(teamId, document.getElementById('team-detail-name').textContent.replace(' - Members', ''));
+        } catch(e) { showError(e.message); }
+      });
+    },
+
+    approvePending: async function(pendingId) {
+      try {
+        await apiJson('POST', '/admin/pending/' + pendingId + '/approve');
+        loadPending();
+      } catch(e) { showError(e.message); }
+    },
+
+    rejectPending: async function(pendingId) {
+      try {
+        await apiJson('POST', '/admin/pending/' + pendingId + '/reject');
+        loadPending();
+      } catch(e) { showError(e.message); }
+    },
+  };
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // INIT
+  // ═══════════════════════════════════════════════════════════════════════
+  (async function() {
+    // Check registration mode to show/hide pending tab
+    try {
+      var info = await apiJson('GET', '/admin/server-info');
+      if (info.registration_mode === 'approval') {
+        document.getElementById('pending-tab').style.display = '';
+      }
+    } catch(_) {}
+
+    // Load initial panel
+    loadUsers();
+  })();
+
+})();
+</script>
+</body>
+</html>

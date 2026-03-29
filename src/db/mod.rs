@@ -51,6 +51,16 @@ pub trait DatabaseRepo: Send + Sync {
     async fn list_team_members(&self, team_id: &str) -> Result<Vec<TeamMemberSummary>>;
     async fn get_team_member_role(&self, team_id: &str, user_id: &str) -> Result<Option<String>>;
 
+    // Pending registrations
+    async fn create_pending_registration(&self, id: &str, username: &str, password_hash: &str) -> Result<()>;
+    async fn list_pending_registrations(&self) -> Result<Vec<PendingRegistration>>;
+    async fn approve_registration(&self, id: &str) -> Result<bool>;
+    async fn reject_registration(&self, id: &str) -> Result<bool>;
+    async fn cleanup_old_pending_registrations(&self, max_age_secs: i64) -> Result<u64>;
+
+    // User role
+    async fn update_user_role(&self, user_id: &str, role: &str) -> Result<bool>;
+
     // OIDC users
     async fn find_user_by_oidc(&self, issuer: &str, sub: &str) -> Result<Option<User>>;
     async fn create_oidc_user(&self, user: &NewOidcUser) -> Result<()>;

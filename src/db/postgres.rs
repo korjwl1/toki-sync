@@ -167,6 +167,21 @@ impl PostgresRepo {
         .await
         .context("migrate: create device_codes")?;
 
+        // Migration: pending_registrations table
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS pending_registrations (
+                id            TEXT PRIMARY KEY,
+                username      TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                requested_at  BIGINT NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await
+        .context("migrate: create pending_registrations")?;
+
         Ok(())
     }
 }
@@ -579,6 +594,114 @@ impl DatabaseRepo for PostgresRepo {
         .await
         .context("get_team_member_role")?;
         Ok(role)
+    }
+
+    // ── User role ───────────────────────────────────────────────────────────
+
+    async fn update_user_role(&self, user_id: &str, role: &str) -> Result<bool> {
+        let now = chrono::Utc::now().timestamp();
+        let affected = sqlx::query("UPDATE users SET role = $1, updated_at = $2 WHERE id = $3")
+            .bind(role)
+            .bind(now)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await
+            .context("update_user_role")?
+            .rows_affected();
+        Ok(affected > 0)
+    }
+
+    // ── Pending registrations ──────────────────────────────────────────────
+
+    async fn create_pending_registration(&self, id: &str, username: &str, password_hash: &str) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        sqlx::query(
+            "INSERT INTO pending_registrations (id, username, password_hash, requested_at) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(id)
+        .bind(username)
+        .bind(password_hash)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| {
+            if e.to_string().contains("UNIQUE") || e.to_string().contains("duplicate key") {
+                anyhow::anyhow!("UNIQUE constraint violation: username already pending")
+            } else {
+                anyhow::anyhow!("create_pending_registration: {e}")
+            }
+        })?;
+        Ok(())
+    }
+
+    async fn list_pending_registrations(&self) -> Result<Vec<PendingRegistration>> {
+        let rows: Vec<(String, String, i64)> = sqlx::query_as(
+            "SELECT id, username, requested_at FROM pending_registrations ORDER BY requested_at",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("list_pending_registrations")?;
+
+        Ok(rows.into_iter().map(|(id, username, requested_at)| PendingRegistration {
+            id, username, requested_at,
+        }).collect())
+    }
+
+    async fn approve_registration(&self, id: &str) -> Result<bool> {
+        let row: Option<(String, String, String, i64)> = sqlx::query_as(
+            "SELECT id, username, password_hash, requested_at FROM pending_registrations WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("approve_registration: fetch")?;
+
+        let (pending_id, username, password_hash, _) = match row {
+            Some(r) => r,
+            None => return Ok(false),
+        };
+
+        let now = chrono::Utc::now().timestamp();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, role, created_at, updated_at) VALUES ($1, $2, $3, 'user', $4, $5)",
+        )
+        .bind(&user_id)
+        .bind(&username)
+        .bind(&password_hash)
+        .bind(now)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .context("approve_registration: create user")?;
+
+        sqlx::query("DELETE FROM pending_registrations WHERE id = $1")
+            .bind(&pending_id)
+            .execute(&self.pool)
+            .await
+            .context("approve_registration: delete pending")?;
+
+        Ok(true)
+    }
+
+    async fn reject_registration(&self, id: &str) -> Result<bool> {
+        let affected = sqlx::query("DELETE FROM pending_registrations WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .context("reject_registration")?
+            .rows_affected();
+        Ok(affected > 0)
+    }
+
+    async fn cleanup_old_pending_registrations(&self, max_age_secs: i64) -> Result<u64> {
+        let cutoff = chrono::Utc::now().timestamp() - max_age_secs;
+        let result = sqlx::query("DELETE FROM pending_registrations WHERE requested_at < $1")
+            .bind(cutoff)
+            .execute(&self.pool)
+            .await
+            .context("cleanup_old_pending_registrations")?;
+        Ok(result.rows_affected())
     }
 
     // ── OIDC users ─────────────────────────────────────────────────────────

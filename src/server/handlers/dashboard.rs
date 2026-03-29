@@ -1,9 +1,9 @@
 use axum::response::{Html, Redirect};
 
-// ─── Dashboard redirect ─────────────────────────────────────────────────────
+// ─── Admin redirect ─────────────────────────────────────────────────────────
 
-pub async fn dashboard_redirect() -> Redirect {
-    Redirect::permanent("/dashboard")
+pub async fn admin_redirect() -> Redirect {
+    Redirect::permanent("/admin")
 }
 
 // ─── Login page ─────────────────────────────────────────────────────────────
@@ -12,8 +12,8 @@ pub async fn login_page() -> Html<&'static str> {
     Html(include_str!("../../../static/login.html"))
 }
 
-// ─── Dashboard page ─────────────────────────────────────────────────────────
+// ─── Admin page ─────────────────────────────────────────────────────────────
 
-pub async fn dashboard_page() -> Html<&'static str> {
-    Html(include_str!("../../../static/dashboard.html"))
+pub async fn admin_page() -> Html<&'static str> {
+    Html(include_str!("../../../static/admin.html"))
 }

@@ -129,8 +129,12 @@ pub async fn register(
     let ip = extract_client_ip(&headers, &addr);
     state.brute.check(&ip, "__register__").map_err(AppError::locked_out)?;
 
-    if !state.allow_registration {
-        return Err(AppError { status: StatusCode::FORBIDDEN, message: "registration is disabled".into() });
+    let mode = &state.registration_mode;
+    match mode.as_str() {
+        "open" | "approval" => { /* allowed */ }
+        _ => {
+            return Err(AppError::forbidden("registration is disabled"));
+        }
     }
 
     validate_username(&body.username)?;
@@ -146,8 +150,26 @@ pub async fn register(
         .map_err(AppError::internal)?;
 
     let id = uuid::Uuid::new_v4().to_string();
-
     let username = body.username.clone();
+
+    if mode == "approval" {
+        // Insert into pending_registrations, not users
+        state.db.create_pending_registration(&id, &username, &hash).await.map_err(|e| {
+            if e.to_string().contains("UNIQUE") {
+                state.brute.record_failure(&ip, "__register__").ok();
+                AppError::conflict("username already exists or pending")
+            } else {
+                AppError::internal(e)
+            }
+        })?;
+
+        state.brute.record_success(&ip, "__register__");
+        return Ok((StatusCode::ACCEPTED, Json(serde_json::json!({
+            "message": "registration pending admin approval"
+        }))));
+    }
+
+    // "open" mode: create user immediately
     let new_user = crate::db::models::NewUser {
         id: id.clone(),
         username: username.clone(),
@@ -379,14 +401,14 @@ pub async fn oidc_callback(
         }
     }
 
-    // Browser flow: redirect to dashboard with tokens in URL fragment
-    let dashboard_url = format!(
-        "/dashboard#access_token={}&refresh_token={}&expires_in={}",
+    // Browser flow: redirect to admin panel with tokens in URL fragment
+    let admin_url = format!(
+        "/admin#access_token={}&refresh_token={}&expires_in={}",
         urlencoding::encode(&access),
         urlencoding::encode(&refresh),
         state.access_token_ttl_secs,
     );
-    Ok(Redirect::temporary(&dashboard_url).into_response())
+    Ok(Redirect::temporary(&admin_url).into_response())
 }
 
 // ─── GET /auth/info ────────────────────────────────────────────────────────
@@ -395,7 +417,7 @@ pub async fn auth_info(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
     Json(serde_json::json!({
-        "allow_registration": state.allow_registration,
+        "registration_mode": state.registration_mode,
         "oidc_enabled": !state.oidc_issuer.is_empty(),
     }))
 }
@@ -584,12 +606,14 @@ pub async fn device_approve(
 pub async fn device_login_page(
     State(state): State<AppState>,
 ) -> Html<String> {
-    let allow_registration = state.allow_registration;
+    let registration_mode = state.registration_mode.clone();
     let oidc_enabled = !state.oidc_issuer.is_empty();
-    Html(device_login_html(allow_registration, oidc_enabled))
+    Html(device_login_html(&registration_mode, oidc_enabled))
 }
 
-fn device_login_html(allow_registration: bool, _oidc_enabled: bool) -> String {
+fn device_login_html(registration_mode: &str, _oidc_enabled: bool) -> String {
+    let show_register = registration_mode == "open" || registration_mode == "approval";
+    let is_approval_mode = registration_mode == "approval";
     format!(r##"<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -791,6 +815,7 @@ fn device_login_html(allow_registration: bool, _oidc_enabled: bool) -> String {
   const stepLogin = document.getElementById('step-login');
   const codeInput = document.getElementById('user-code');
   const verifyBtn = document.getElementById('verify-code-btn');
+  const REGISTRATION_MODE = '{registration_mode}';
 
   let pendingUserCode = '';
 
@@ -946,7 +971,15 @@ fn device_login_html(allow_registration: bool, _oidc_enabled: bool) -> String {
           throw new Error(data.error || 'Registration failed (' + resp.status + ')');
         }}
 
-        // Login after registration
+        // If approval mode, show pending message -- cannot auto-login
+        if (resp.status === 202 || REGISTRATION_MODE === 'approval') {{
+          successEl.textContent = 'Account pending approval. Come back and try again after admin approves.';
+          successEl.style.display = 'block';
+          stepLogin.classList.remove('active');
+          return;
+        }}
+
+        // Login after registration (open mode)
         var loginResp = await fetch('/login', {{
           method: 'POST',
           headers: {{ 'Content-Type': 'application/json' }},
@@ -964,7 +997,7 @@ fn device_login_html(allow_registration: bool, _oidc_enabled: bool) -> String {
       }} catch (err) {{
         showError(err.message);
         btn.disabled = false;
-        btn.textContent = 'Create account & Approve';
+        btn.textContent = REGISTRATION_MODE === 'approval' ? 'Create account' : 'Create account & Approve';
       }}
     }});
   }}
@@ -1023,10 +1056,22 @@ fn device_login_html(allow_registration: bool, _oidc_enabled: bool) -> String {
 </script>
 </body>
 </html>"##,
-        register_tab = if allow_registration {
+        registration_mode = registration_mode,
+        register_tab = if show_register {
             r#"<button class="tab" data-tab="register">Create account</button>"#
         } else { "" },
-        register_section = if allow_registration {
+        register_section = if show_register && is_approval_mode {
+            r#"<div id="register-section" class="section">
+      <div style="background:#1f6feb20; border:1px solid #1f6feb; color:#58a6ff; padding:8px 12px; border-radius:6px; font-size:0.85rem; margin-bottom:12px;">Your request will need admin approval before you can log in.</div>
+      <form id="register-form">
+        <label for="reg-username">Username</label>
+        <input type="text" id="reg-username" name="username" autocomplete="username" required minlength="3" maxlength="32">
+        <label for="reg-password">Password</label>
+        <input type="password" id="reg-password" name="password" autocomplete="new-password" required minlength="8">
+        <button type="submit" id="register-btn">Create account</button>
+      </form>
+    </div>"#
+        } else if show_register {
             r#"<div id="register-section" class="section">
       <form id="register-form">
         <label for="reg-username">Username</label>

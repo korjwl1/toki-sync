@@ -72,9 +72,12 @@ pub struct AuthConfig {
     pub brute_force_window_secs: u64,
     #[serde(default = "default_brute_lockout")]
     pub brute_force_lockout_secs: u64,
-    /// Allow open self-registration via POST /register. Default: false (admin-only).
+    /// Registration mode: "open" | "approval" | "closed". Default: "closed".
+    #[serde(default = "default_registration_mode")]
+    pub registration_mode: String,
+    /// Legacy compat: if old `allow_registration` is present, map true -> "open", false -> "closed".
     #[serde(default)]
-    pub allow_registration: bool,
+    pub allow_registration: Option<bool>,
     /// OIDC configuration (Phase 3). Empty = disabled.
     #[serde(default)]
     pub oidc_issuer: String,
@@ -84,6 +87,22 @@ pub struct AuthConfig {
     pub oidc_client_secret: String,
     #[serde(default)]
     pub oidc_redirect_uri: String,
+}
+
+fn default_registration_mode() -> String { "closed".to_string() }
+
+impl AuthConfig {
+    /// Resolve the effective registration mode, supporting legacy `allow_registration` field.
+    pub fn effective_registration_mode(&self) -> &str {
+        if !self.registration_mode.is_empty() && self.registration_mode != "closed" {
+            return &self.registration_mode;
+        }
+        // Legacy fallback
+        match self.allow_registration {
+            Some(true) => "open",
+            _ => &self.registration_mode,
+        }
+    }
 }
 
 fn default_access_ttl() -> u64 { 3600 }         // 1h
@@ -198,7 +217,8 @@ impl Config {
                     brute_force_max_attempts: default_brute_max_attempts(),
                     brute_force_window_secs: default_brute_window(),
                     brute_force_lockout_secs: default_brute_lockout(),
-                    allow_registration: false,
+                    registration_mode: default_registration_mode(),
+                    allow_registration: None,
                     oidc_issuer: String::new(),
                     oidc_client_id: String::new(),
                     oidc_client_secret: String::new(),

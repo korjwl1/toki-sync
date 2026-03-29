@@ -23,7 +23,7 @@ pub struct AppState {
     pub jwt: Arc<JwtManager>,
     pub brute: Arc<BruteForceGuard>,
     pub vm: Arc<VictoriaMetrics>,
-    pub allow_registration: bool,
+    pub registration_mode: String,
     pub access_token_ttl_secs: u64,
     /// OIDC config (Phase 3). Empty strings = disabled.
     pub oidc_issuer: String,
@@ -37,6 +37,8 @@ pub struct AppState {
     pub oidc_http_client: reqwest::Client,
     /// External URL for JWT `iss` claim and OIDC redirect derivation.
     pub external_url: String,
+    /// Storage backend name (e.g. "sqlite", "postgres") for server-info endpoint.
+    pub storage_backend: String,
     /// Track last poll time per device_code to enforce slow_down (RFC 8628).
     pub device_poll_tracker: Arc<std::sync::Mutex<HashMap<String, Instant>>>,
 }
@@ -66,9 +68,9 @@ pub async fn get_oidc_discovery(state: &AppState) -> Result<OidcDiscovery, AppEr
 
 pub fn build_router(state: AppState) -> Router {
     Router::new()
-        // Dashboard (public HTML pages)
-        .route("/", get(dashboard::dashboard_redirect))
-        .route("/dashboard", get(dashboard::dashboard_page))
+        // Admin panel (public HTML pages)
+        .route("/", get(dashboard::admin_redirect))
+        .route("/admin", get(dashboard::admin_page))
         // Public
         .route("/health", get(auth::health))
         .route("/auth-method", post(auth::auth_method))
@@ -98,8 +100,15 @@ pub fn build_router(state: AppState) -> Router {
         .route("/admin/users", get(admin::admin_list_users).post(admin::admin_create_user))
         .route("/admin/users/:user_id", delete(admin::admin_delete_user))
         .route("/admin/users/:user_id/password", axum::routing::patch(admin::admin_change_user_password))
+        .route("/admin/users/:user_id/role", axum::routing::patch(admin::admin_change_user_role))
         .route("/admin/devices", get(admin::admin_list_devices))
         .route("/admin/devices/:device_id", delete(admin::admin_delete_device))
+        // Admin: pending registrations
+        .route("/admin/pending", get(admin::admin_list_pending))
+        .route("/admin/pending/:id/approve", post(admin::admin_approve_pending))
+        .route("/admin/pending/:id/reject", post(admin::admin_reject_pending))
+        // Admin: server info
+        .route("/admin/server-info", get(admin::admin_server_info))
         // Admin: teams
         .route("/admin/teams", get(teams::admin_list_teams).post(teams::admin_create_team))
         .route("/admin/teams/:team_id", delete(teams::admin_delete_team))

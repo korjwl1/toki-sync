@@ -48,6 +48,13 @@ async fn main() -> Result<()> {
         tracing::info!("cleaned up {cleaned} expired/revoked refresh tokens");
     }
 
+    // Cleanup old pending registrations (older than 7 days)
+    let cleaned_pending = db.cleanup_old_pending_registrations(7 * 86400).await
+        .context("failed to cleanup old pending registrations")?;
+    if cleaned_pending > 0 {
+        tracing::info!("cleaned up {cleaned_pending} old pending registrations");
+    }
+
     // Cleanup expired device codes
     let cleaned_dc = db.cleanup_expired_device_codes().await
         .context("failed to cleanup expired device codes")?;
@@ -91,7 +98,7 @@ async fn main() -> Result<()> {
 
     let state = AppState {
         db, jwt, brute, vm,
-        allow_registration: config.auth.allow_registration,
+        registration_mode: config.auth.effective_registration_mode().to_string(),
         access_token_ttl_secs: config.auth.access_token_ttl_secs,
         oidc_issuer: config.auth.oidc_issuer.clone(),
         oidc_client_id: config.auth.oidc_client_id.clone(),
@@ -101,6 +108,7 @@ async fn main() -> Result<()> {
         oidc_discovery_cache: Arc::new(tokio::sync::RwLock::new(None)),
         oidc_http_client: reqwest::Client::new(),
         external_url: config.server.external_url.clone(),
+        storage_backend: config.storage.backend.clone(),
         device_poll_tracker: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
 

@@ -109,7 +109,7 @@
 <body>
 <div class="login-card">
   <h1>toki-sync</h1>
-  <p class="subtitle">Sign in to your dashboard</p>
+  <p class="subtitle">Sign in to continue</p>
   <div id="error" class="error"></div>
   <form id="login-form">
     <label for="username">Username</label>
@@ -148,14 +148,14 @@
       localStorage.setItem('access_token', at);
       localStorage.setItem('refresh_token', rt);
       if (ei) localStorage.setItem('expires_in', ei);
-      window.location.href = '/dashboard';
+      window.location.href = '/admin';
       return;
     }
   }
 
   // If already logged in, redirect
   if (localStorage.getItem('access_token')) {
-    window.location.href = '/dashboard';
+    window.location.href = '/admin';
     return;
   }
 
@@ -179,14 +179,24 @@
     } catch (_) { /* ignore, password form remains available */ }
   })();
 
-  // Check if registration is enabled
+  // Check registration mode
+  var registrationMode = 'closed';
   (async function() {
     try {
       const resp = await fetch('/auth/info');
       if (resp.ok) {
         const data = await resp.json();
-        if (data.allow_registration) {
+        registrationMode = data.registration_mode || 'closed';
+        if (registrationMode === 'open' || registrationMode === 'approval') {
           document.getElementById('register-link').style.display = 'block';
+          if (registrationMode === 'approval') {
+            // Add approval note above register form
+            var note = document.createElement('div');
+            note.style.cssText = 'background:#1f6feb20; border:1px solid #1f6feb; color:#58a6ff; padding:8px 12px; border-radius:6px; font-size:0.85rem; margin-bottom:12px;';
+            note.textContent = 'Your request will need admin approval.';
+            var regForm = document.getElementById('register-form');
+            regForm.parentNode.insertBefore(note, regForm);
+          }
           document.getElementById('show-register').addEventListener('click', function(e) {
             e.preventDefault();
             document.getElementById('register-link').style.display = 'none';
@@ -219,7 +229,18 @@
         var data = await resp.json().catch(function() { return {}; });
         throw new Error(data.error || 'Registration failed (' + resp.status + ')');
       }
-      // Auto-login after registration
+      // Approval mode: show pending message
+      if (resp.status === 202) {
+        errorEl.style.display = 'none';
+        var msg = document.createElement('div');
+        msg.style.cssText = 'background:#23863640; border:1px solid #238636; color:#3fb950; padding:12px; border-radius:6px; font-size:0.95rem; text-align:center; margin-top:12px;';
+        msg.textContent = 'Registration pending admin approval. Please wait for an admin to approve your account.';
+        document.getElementById('register-section').appendChild(msg);
+        regBtn.disabled = true;
+        regBtn.textContent = 'Pending approval';
+        return;
+      }
+      // Auto-login after registration (open mode)
       var loginResp = await fetch('/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -232,7 +253,7 @@
       localStorage.setItem('access_token', tokens.access_token);
       localStorage.setItem('refresh_token', tokens.refresh_token);
       if (tokens.expires_in) localStorage.setItem('expires_in', String(tokens.expires_in));
-      window.location.href = '/dashboard';
+      window.location.href = '/admin';
     } catch (err) {
       errorEl.textContent = err.message;
       errorEl.style.display = 'block';
@@ -270,7 +291,7 @@
       localStorage.setItem('access_token', data.access_token);
       localStorage.setItem('refresh_token', data.refresh_token);
       localStorage.setItem('expires_in', String(data.expires_in));
-      window.location.href = '/dashboard';
+      window.location.href = '/admin';
     } catch (err) {
       errorEl.textContent = err.message;
       errorEl.style.display = 'block';
