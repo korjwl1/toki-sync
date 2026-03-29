@@ -17,19 +17,52 @@ use crate::metrics::vm::VictoriaMetrics;
 
 use super::handlers::{admin, auth, dashboard, me, metrics, teams};
 
+/// Dynamic settings that check DB first, then fall back to config file values.
+#[derive(Clone)]
+pub struct DynamicSettings {
+    pub db: Arc<dyn DatabaseRepo>,
+    pub config_registration_mode: String,
+    pub config_oidc_issuer: String,
+    pub config_oidc_client_id: String,
+    pub config_oidc_client_secret: String,
+    pub config_oidc_redirect_uri: String,
+}
+
+impl DynamicSettings {
+    pub async fn registration_mode(&self) -> String {
+        self.db.get_server_setting("registration_mode").await
+            .ok().flatten()
+            .unwrap_or_else(|| self.config_registration_mode.clone())
+    }
+    pub async fn oidc_issuer(&self) -> String {
+        self.db.get_server_setting("oidc_issuer").await
+            .ok().flatten()
+            .unwrap_or_else(|| self.config_oidc_issuer.clone())
+    }
+    pub async fn oidc_client_id(&self) -> String {
+        self.db.get_server_setting("oidc_client_id").await
+            .ok().flatten()
+            .unwrap_or_else(|| self.config_oidc_client_id.clone())
+    }
+    pub async fn oidc_client_secret(&self) -> String {
+        self.db.get_server_setting("oidc_client_secret").await
+            .ok().flatten()
+            .unwrap_or_else(|| self.config_oidc_client_secret.clone())
+    }
+    pub async fn oidc_redirect_uri(&self) -> String {
+        self.db.get_server_setting("oidc_redirect_uri").await
+            .ok().flatten()
+            .unwrap_or_else(|| self.config_oidc_redirect_uri.clone())
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: Arc<dyn DatabaseRepo>,
     pub jwt: Arc<JwtManager>,
     pub brute: Arc<BruteForceGuard>,
     pub vm: Arc<VictoriaMetrics>,
-    pub registration_mode: String,
     pub access_token_ttl_secs: u64,
-    /// OIDC config (Phase 3). Empty strings = disabled.
-    pub oidc_issuer: String,
-    pub oidc_client_id: String,
-    pub oidc_client_secret: String,
-    pub oidc_redirect_uri: String,
     pub oidc_state_store: Arc<OidcStateStore>,
     /// Cached OIDC discovery result with TTL.
     pub oidc_discovery_cache: Arc<tokio::sync::RwLock<Option<(OidcDiscovery, Instant)>>>,
@@ -41,6 +74,8 @@ pub struct AppState {
     pub storage_backend: String,
     /// Track last poll time per device_code to enforce slow_down (RFC 8628).
     pub device_poll_tracker: Arc<std::sync::Mutex<HashMap<String, Instant>>>,
+    /// Dynamic settings: DB overrides + config fallback.
+    pub dynamic_settings: DynamicSettings,
 }
 
 pub async fn get_oidc_discovery(state: &AppState) -> Result<OidcDiscovery, AppError> {
@@ -56,8 +91,11 @@ pub async fn get_oidc_discovery(state: &AppState) -> Result<OidcDiscovery, AppEr
         }
     }
 
+    // Use dynamic issuer
+    let issuer = state.dynamic_settings.oidc_issuer().await;
+
     // Fetch fresh
-    let disc = crate::auth::oidc::discover(&state.oidc_issuer, &state.oidc_http_client)
+    let disc = crate::auth::oidc::discover(&issuer, &state.oidc_http_client)
         .await
         .map_err(AppError::internal)?;
 
@@ -107,8 +145,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/admin/pending", get(admin::admin_list_pending))
         .route("/admin/pending/:id/approve", post(admin::admin_approve_pending))
         .route("/admin/pending/:id/reject", post(admin::admin_reject_pending))
-        // Admin: server info
+        // Admin: server info & settings
         .route("/admin/server-info", get(admin::admin_server_info))
+        .route("/admin/settings", get(admin::admin_list_settings))
+        .route("/admin/settings/:key", axum::routing::put(admin::admin_update_setting))
+        // Admin: user active status
+        .route("/admin/users/:user_id/active", axum::routing::patch(admin::admin_set_user_active))
         // Admin: teams
         .route("/admin/teams", get(teams::admin_list_teams).post(teams::admin_create_team))
         .route("/admin/teams/:team_id", delete(teams::admin_delete_team))

@@ -27,11 +27,13 @@ pub async fn auth_method(
     Json(body): Json<AuthMethodRequest>,
 ) -> impl IntoResponse {
     let _ = body.username;
-    if !state.oidc_issuer.is_empty() {
+    let oidc_issuer = state.dynamic_settings.oidc_issuer().await;
+    if !oidc_issuer.is_empty() {
+        let oidc_redirect_uri = state.dynamic_settings.oidc_redirect_uri().await;
         // Build OIDC authorize URL for the client to redirect to
         let auth_url = format!(
             "/auth/oidc/authorize?redirect_uri={}",
-            urlencoding::encode(&state.oidc_redirect_uri),
+            urlencoding::encode(&oidc_redirect_uri),
         );
         Json(serde_json::json!({ "method": "oidc", "auth_url": auth_url }))
     } else {
@@ -75,6 +77,11 @@ pub async fn login(
             return Err(AppError::unauthorized("invalid credentials"));
         }
     };
+
+    // Check active status
+    if !user.active {
+        return Err(AppError::unauthorized("account deactivated"));
+    }
 
     let user_id = user.id;
     let password_hash = user.password_hash;
@@ -129,7 +136,7 @@ pub async fn register(
     let ip = extract_client_ip(&headers, &addr);
     state.brute.check(&ip, "__register__").map_err(AppError::locked_out)?;
 
-    let mode = &state.registration_mode;
+    let mode = state.dynamic_settings.registration_mode().await;
     match mode.as_str() {
         "open" | "approval" => { /* allowed */ }
         _ => {
@@ -152,7 +159,7 @@ pub async fn register(
     let id = uuid::Uuid::new_v4().to_string();
     let username = body.username.clone();
 
-    if mode == "approval" {
+    if mode.as_str() == "approval" {
         // Insert into pending_registrations, not users
         state.db.create_pending_registration(&id, &username, &hash).await.map_err(|e| {
             if e.to_string().contains("UNIQUE") {
@@ -239,7 +246,8 @@ pub async fn oidc_authorize(
     State(state): State<AppState>,
     Query(params): Query<OidcAuthorizeQuery>,
 ) -> Result<Redirect, AppError> {
-    if state.oidc_issuer.is_empty() {
+    let oidc_issuer = state.dynamic_settings.oidc_issuer().await;
+    if oidc_issuer.is_empty() {
         return Err(AppError { status: StatusCode::NOT_FOUND, message: "OIDC not configured".into() });
     }
 
@@ -258,11 +266,14 @@ pub async fn oidc_authorize(
     };
     state.oidc_state_store.insert(csrf_state.clone(), client_redirect, nonce.clone());
 
+    let oidc_client_id = state.dynamic_settings.oidc_client_id().await;
+    let oidc_redirect_uri = state.dynamic_settings.oidc_redirect_uri().await;
+
     // Build the authorization URL
     let auth_url = crate::auth::oidc::build_auth_url(
         &discovery,
-        &state.oidc_client_id,
-        &state.oidc_redirect_uri,
+        &oidc_client_id,
+        &oidc_redirect_uri,
         &csrf_state,
         &nonce,
     );
@@ -284,7 +295,8 @@ pub async fn oidc_callback(
     State(state): State<AppState>,
     Query(params): Query<OidcCallbackQuery>,
 ) -> Result<axum::response::Response, AppError> {
-    if state.oidc_issuer.is_empty() {
+    let oidc_issuer = state.dynamic_settings.oidc_issuer().await;
+    if oidc_issuer.is_empty() {
         return Err(AppError { status: StatusCode::NOT_FOUND, message: "OIDC not configured".into() });
     }
 
@@ -300,12 +312,16 @@ pub async fn oidc_callback(
     // Discover provider endpoints (cached with TTL)
     let discovery = get_oidc_discovery(&state).await?;
 
+    let oidc_client_id = state.dynamic_settings.oidc_client_id().await;
+    let oidc_client_secret = state.dynamic_settings.oidc_client_secret().await;
+    let oidc_redirect_uri = state.dynamic_settings.oidc_redirect_uri().await;
+
     // Exchange code for tokens
     let token_resp = crate::auth::oidc::exchange_code(
         &discovery,
-        &state.oidc_client_id,
-        &state.oidc_client_secret,
-        &state.oidc_redirect_uri,
+        &oidc_client_id,
+        &oidc_client_secret,
+        &oidc_redirect_uri,
         &params.code,
         &state.oidc_http_client,
     )
@@ -317,8 +333,8 @@ pub async fn oidc_callback(
     let user_info = crate::auth::oidc::extract_user_info(
         &token_resp,
         &discovery,
-        &state.oidc_issuer,
-        &state.oidc_client_id,
+        &oidc_issuer,
+        &oidc_client_id,
         nonce_ref,
         &state.oidc_http_client,
     )
@@ -326,12 +342,18 @@ pub async fn oidc_callback(
         .map_err(AppError::internal)?;
 
     // Find or create user by OIDC subject
-    let user = state.db.find_user_by_oidc(&state.oidc_issuer, &user_info.sub)
+    let user = state.db.find_user_by_oidc(&oidc_issuer, &user_info.sub)
         .await
         .map_err(AppError::internal)?;
 
     let user_id = match user {
-        Some(u) => u.id,
+        Some(u) => {
+            // Check active status for existing OIDC users
+            if !u.active {
+                return Err(AppError::unauthorized("account deactivated"));
+            }
+            u.id
+        }
         None => {
             // Create new OIDC user
             let id = uuid::Uuid::new_v4().to_string();
@@ -344,7 +366,7 @@ pub async fn oidc_callback(
                 username,
                 role: "user".to_string(),
                 oidc_sub: user_info.sub.clone(),
-                oidc_issuer: state.oidc_issuer.clone(),
+                oidc_issuer: oidc_issuer.clone(),
             };
             match state.db.create_oidc_user(&new_user).await {
                 Ok(()) => {
@@ -354,12 +376,15 @@ pub async fn oidc_callback(
                 Err(e) => {
                     // On UNIQUE constraint violation (concurrent creation), retry find
                     if e.to_string().contains("UNIQUE") {
-                        let retry_user = state.db.find_user_by_oidc(&state.oidc_issuer, &user_info.sub)
+                        let retry_user = state.db.find_user_by_oidc(&oidc_issuer, &user_info.sub)
                             .await
                             .map_err(AppError::internal)?
                             .ok_or_else(|| AppError::internal(anyhow::anyhow!(
                                 "OIDC user creation conflict but user not found on retry"
                             )))?;
+                        if !retry_user.active {
+                            return Err(AppError::unauthorized("account deactivated"));
+                        }
                         retry_user.id
                     } else {
                         return Err(AppError::internal(e));
@@ -416,9 +441,11 @@ pub async fn oidc_callback(
 pub async fn auth_info(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
+    let reg_mode = state.dynamic_settings.registration_mode().await;
+    let oidc_issuer = state.dynamic_settings.oidc_issuer().await;
     Json(serde_json::json!({
-        "registration_mode": state.registration_mode,
-        "oidc_enabled": !state.oidc_issuer.is_empty(),
+        "registration_mode": reg_mode,
+        "oidc_enabled": !oidc_issuer.is_empty(),
     }))
 }
 
@@ -606,8 +633,9 @@ pub async fn device_approve(
 pub async fn device_login_page(
     State(state): State<AppState>,
 ) -> Html<String> {
-    let registration_mode = state.registration_mode.clone();
-    let oidc_enabled = !state.oidc_issuer.is_empty();
+    let registration_mode = state.dynamic_settings.registration_mode().await;
+    let oidc_issuer = state.dynamic_settings.oidc_issuer().await;
+    let oidc_enabled = !oidc_issuer.is_empty();
     Html(device_login_html(&registration_mode, oidc_enabled))
 }
 

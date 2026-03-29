@@ -226,6 +226,23 @@ impl SqliteRepo {
         .await
         .context("migrate: create pending_registrations")?;
 
+        // Migration: server_settings table
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS server_settings (
+                key        TEXT PRIMARY KEY,
+                value      TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            )",
+        )
+        .execute(&self.pool)
+        .await
+        .context("migrate: create server_settings")?;
+
+        // Migration: add active column to users
+        let _ = sqlx::query("ALTER TABLE users ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
+            .execute(&self.pool)
+            .await;
+
         Ok(())
     }
 }
@@ -235,30 +252,30 @@ impl DatabaseRepo for SqliteRepo {
     // ── Users ───────────────────────────────────────────────────────────────
 
     async fn get_user_by_username(&self, username: &str) -> Result<Option<User>> {
-        let row: Option<(String, String, String, String, i64, i64, Option<String>, Option<String>)> = sqlx::query_as(
-            "SELECT id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer FROM users WHERE username = ?",
+        let row: Option<(String, String, String, String, i64, i64, Option<String>, Option<String>, bool)> = sqlx::query_as(
+            "SELECT id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer, active != 0 FROM users WHERE username = ?",
         )
         .bind(username)
         .fetch_optional(&self.pool)
         .await
         .context("get_user_by_username")?;
 
-        Ok(row.map(|(id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer)| User {
-            id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer,
+        Ok(row.map(|(id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer, active)| User {
+            id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer, active,
         }))
     }
 
     async fn get_user_by_id(&self, id: &str) -> Result<Option<User>> {
-        let row: Option<(String, String, String, String, i64, i64, Option<String>, Option<String>)> = sqlx::query_as(
-            "SELECT id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer FROM users WHERE id = ?",
+        let row: Option<(String, String, String, String, i64, i64, Option<String>, Option<String>, bool)> = sqlx::query_as(
+            "SELECT id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer, active != 0 FROM users WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
         .await
         .context("get_user_by_id")?;
 
-        Ok(row.map(|(id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer)| User {
-            id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer,
+        Ok(row.map(|(id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer, active)| User {
+            id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer, active,
         }))
     }
 
@@ -308,15 +325,15 @@ impl DatabaseRepo for SqliteRepo {
     }
 
     async fn list_users(&self) -> Result<Vec<UserSummary>> {
-        let rows: Vec<(String, String, String, i64)> = sqlx::query_as(
-            "SELECT id, username, role, created_at FROM users ORDER BY created_at",
+        let rows: Vec<(String, String, String, i64, bool)> = sqlx::query_as(
+            "SELECT id, username, role, created_at, active != 0 FROM users ORDER BY created_at",
         )
         .fetch_all(&self.pool)
         .await
         .context("list_users")?;
 
-        Ok(rows.into_iter().map(|(id, username, role, created_at)| UserSummary {
-            id, username, role, created_at,
+        Ok(rows.into_iter().map(|(id, username, role, created_at, active)| UserSummary {
+            id, username, role, created_at, active,
         }).collect())
     }
 
@@ -771,8 +788,8 @@ impl DatabaseRepo for SqliteRepo {
     // ── OIDC users ─────────────────────────────────────────────────────────
 
     async fn find_user_by_oidc(&self, issuer: &str, sub: &str) -> Result<Option<User>> {
-        let row: Option<(String, String, String, String, i64, i64, Option<String>, Option<String>)> = sqlx::query_as(
-            "SELECT id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer FROM users WHERE oidc_issuer = ? AND oidc_sub = ?",
+        let row: Option<(String, String, String, String, i64, i64, Option<String>, Option<String>, bool)> = sqlx::query_as(
+            "SELECT id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer, active != 0 FROM users WHERE oidc_issuer = ? AND oidc_sub = ?",
         )
         .bind(issuer)
         .bind(sub)
@@ -780,8 +797,8 @@ impl DatabaseRepo for SqliteRepo {
         .await
         .context("find_user_by_oidc")?;
 
-        Ok(row.map(|(id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer)| User {
-            id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer,
+        Ok(row.map(|(id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer, active)| User {
+            id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer, active,
         }))
     }
 
@@ -981,5 +998,70 @@ impl DatabaseRepo for SqliteRepo {
             .await
             .context("cleanup_expired_tokens")?;
         Ok(result.rows_affected())
+    }
+
+    // ── Server settings ────────────────────────────────────────────────
+
+    async fn get_server_setting(&self, key: &str) -> Result<Option<String>> {
+        let value: Option<String> = sqlx::query_scalar(
+            "SELECT value FROM server_settings WHERE key = ?",
+        )
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await
+        .context("get_server_setting")?;
+        Ok(value)
+    }
+
+    async fn set_server_setting(&self, key: &str, value: &str) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        sqlx::query(
+            "INSERT INTO server_settings (key, value, updated_at) VALUES (?, ?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        )
+        .bind(key)
+        .bind(value)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .context("set_server_setting")?;
+        Ok(())
+    }
+
+    async fn list_server_settings(&self) -> Result<Vec<(String, String)>> {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT key, value FROM server_settings ORDER BY key",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("list_server_settings")?;
+        Ok(rows)
+    }
+
+    // ── User active status ─────────────────────────────────────────────
+
+    async fn set_user_active(&self, user_id: &str, active: bool) -> Result<bool> {
+        let now = chrono::Utc::now().timestamp();
+        let val: i32 = if active { 1 } else { 0 };
+        let affected = sqlx::query("UPDATE users SET active = ?, updated_at = ? WHERE id = ?")
+            .bind(val)
+            .bind(now)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await
+            .context("set_user_active")?
+            .rows_affected();
+        Ok(affected > 0)
+    }
+
+    async fn count_active_admins_except(&self, username: &str) -> Result<i64> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM users WHERE role = 'admin' AND active = 1 AND username != ?"
+        )
+        .bind(username)
+        .fetch_one(&self.pool)
+        .await
+        .context("count_active_admins_except")?;
+        Ok(count)
     }
 }

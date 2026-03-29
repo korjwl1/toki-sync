@@ -7,77 +7,143 @@
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
-    background: #0d1117;
-    color: #c9d1d9;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #f8f8fa;
+    color: #1a1a2e;
     min-height: 100vh;
+    font-size: 14px;
+    display: flex;
+    flex-direction: column;
   }
-  a { color: #58a6ff; text-decoration: none; }
+  a { color: #2d4a7a; text-decoration: none; }
   a:hover { text-decoration: underline; }
 
-  /* Header */
-  .header {
-    background: #161b22;
-    border-bottom: 1px solid #30363d;
-    padding: 12px 24px;
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.15); border-radius: 3px; }
+
+  /* Navbar */
+  .navbar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 56px;
+    background: rgba(255,255,255,0.5);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border-bottom: 1px solid rgba(0,0,0,0.08);
     display: flex;
     align-items: center;
     justify-content: space-between;
+    padding: 0 24px;
+    z-index: 50;
   }
-  .header h1 {
-    font-size: 1.2rem;
+  .navbar-brand {
+    font-size: 18px;
     font-weight: 600;
-    color: #e6edf3;
+    color: #2d4a7a;
   }
-  .header-right {
+  .navbar-right {
     display: flex;
     align-items: center;
     gap: 12px;
-    font-size: 0.85rem;
-    color: #8b949e;
+    font-size: 13px;
+    color: #6b7280;
   }
-  .header-right button {
-    background: transparent;
-    border: 1px solid #30363d;
-    border-radius: 6px;
-    color: #c9d1d9;
-    padding: 4px 12px;
-    font-size: 0.8rem;
+  .navbar-right button {
+    background: white;
+    border: 1px solid rgba(0,0,0,0.08);
+    border-radius: 8px;
+    color: #1a1a2e;
+    padding: 0 12px;
+    height: 32px;
+    font-size: 13px;
     cursor: pointer;
-    width: auto;
+    transition: background 0.15s;
   }
-  .header-right button:hover { border-color: #8b949e; }
+  .navbar-right button:hover { background: #f0f1f3; }
 
-  /* Tabs */
-  .tabs {
+  /* Layout */
+  .app-layout {
     display: flex;
-    background: #161b22;
-    border-bottom: 1px solid #30363d;
-    padding: 0 24px;
-    overflow-x: auto;
+    margin-top: 56px;
+    min-height: calc(100vh - 56px);
   }
-  .tab {
-    padding: 10px 16px;
-    cursor: pointer;
-    color: #8b949e;
-    font-size: 0.9rem;
-    border-bottom: 2px solid transparent;
-    white-space: nowrap;
-    background: none;
-    border-left: none;
-    border-right: none;
-    border-top: none;
-    width: auto;
-    font-weight: normal;
-  }
-  .tab:hover { color: #c9d1d9; }
-  .tab.active { color: #58a6ff; border-bottom-color: #58a6ff; }
 
-  /* Content */
-  .content {
-    max-width: 1100px;
-    margin: 0 auto;
+  /* Sidebar */
+  .sidebar {
+    position: fixed;
+    top: 56px;
+    left: 0;
+    bottom: 0;
+    width: 224px;
+    background: #f5f5f7;
+    border-right: 1px solid rgba(0,0,0,0.06);
+    padding: 16px 12px;
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    z-index: 40;
+  }
+  .sidebar-section {
+    margin-bottom: 16px;
+  }
+  .sidebar-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #6b7280;
+    padding: 0 12px;
+    margin-bottom: 4px;
+  }
+  .sidebar-nav {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .nav-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 14px;
+    color: rgba(0,0,0,0.5);
+    cursor: pointer;
+    border: none;
+    background: none;
+    width: 100%;
+    text-align: left;
+    transition: background 0.15s, color 0.15s;
+  }
+  .nav-item:hover { background: rgba(0,0,0,0.02); color: rgba(0,0,0,0.7); }
+  .nav-item.active {
+    background: rgba(0,0,0,0.04);
+    color: #2d4a7a;
+    font-weight: 500;
+  }
+  .nav-item svg { width: 16px; height: 16px; flex-shrink: 0; opacity: 0.7; }
+  .nav-item.active svg { opacity: 1; }
+  .sidebar-footer {
+    margin-top: auto;
+    padding: 12px;
+    font-size: 10px;
+    color: rgba(0,0,0,0.3);
+  }
+
+  /* Main content */
+  .main-content {
+    margin-left: 224px;
+    flex: 1;
     padding: 24px;
+    display: flex;
+    justify-content: center;
+  }
+  .content {
+    max-width: 1024px;
+    width: 100%;
   }
   .panel { display: none; }
   .panel.active { display: block; }
@@ -92,271 +158,474 @@
     flex-wrap: wrap;
   }
   .toolbar h2 {
-    font-size: 1.1rem;
+    font-size: 16px;
     font-weight: 600;
-    color: #e6edf3;
+    color: #1a1a2e;
+  }
+  .table-card {
+    background: #ffffff;
+    border: 1px solid rgba(0,0,0,0.08);
+    border-radius: 8px;
+    overflow: hidden;
   }
   table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 0.9rem;
+    font-size: 14px;
   }
   th, td {
     text-align: left;
-    padding: 10px 12px;
-    border-bottom: 1px solid #21262d;
+    padding: 12px 16px;
   }
   th {
-    color: #8b949e;
+    color: #6b7280;
     font-weight: 500;
-    font-size: 0.8rem;
+    font-size: 12px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
+    height: 40px;
+    background: transparent;
+    border-bottom: 1px solid rgba(0,0,0,0.08);
   }
-  tr:hover { background: #161b22; }
+  td {
+    border-bottom: 1px solid rgba(0,0,0,0.04);
+  }
+  tr:hover td { background: #f8f9fa; }
+  tbody tr:last-child td { border-bottom: none; }
   .empty-state {
     text-align: center;
-    color: #8b949e;
+    color: #6b7280;
     padding: 40px 0;
-    font-size: 0.9rem;
+    font-size: 14px;
   }
 
   /* Buttons */
   button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     width: auto;
-    padding: 6px 14px;
-    background: #238636;
-    border: 1px solid #2ea043;
-    border-radius: 6px;
-    color: #fff;
-    font-size: 0.85rem;
-    font-weight: 600;
+    padding: 0 14px;
+    height: 32px;
+    background: #2d4a7a;
+    border: none;
+    border-radius: 8px;
+    color: #f8f8fa;
+    font-size: 13px;
+    font-weight: 500;
     cursor: pointer;
-    transition: background 0.2s;
+    transition: background 0.15s, transform 0.1s;
   }
-  button:hover { background: #2ea043; }
-  button:disabled { opacity: 0.6; cursor: not-allowed; }
-  .btn-danger { background: #da3633; border-color: #f85149; }
-  .btn-danger:hover { background: #f85149; }
-  .btn-secondary { background: #30363d; border-color: #484f58; }
-  .btn-secondary:hover { background: #484f58; }
-  .btn-primary { background: #1f6feb; border-color: #388bfd; }
-  .btn-primary:hover { background: #388bfd; }
-  .btn-sm { padding: 3px 8px; font-size: 0.8rem; }
+  button:hover { background: #3a5a8e; }
+  button:active { transform: translateY(1px); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+  .btn-danger {
+    background: rgba(220,53,69,0.1);
+    color: #dc3545;
+    border: none;
+  }
+  .btn-danger:hover { background: rgba(220,53,69,0.18); }
+  .btn-secondary {
+    background: white;
+    border: 1px solid rgba(0,0,0,0.08);
+    color: #1a1a2e;
+  }
+  .btn-secondary:hover { background: #f0f1f3; }
+  .btn-primary { background: #2d4a7a; color: #f8f8fa; }
+  .btn-primary:hover { background: #3a5a8e; }
+  .btn-warning {
+    background: rgba(220,53,69,0.1);
+    color: #dc3545;
+    border: none;
+  }
+  .btn-warning:hover { background: rgba(220,53,69,0.18); }
+  .btn-sm { padding: 0 8px; height: 28px; font-size: 12px; }
   .btn-group { display: flex; gap: 6px; }
+  .btn-ghost {
+    background: transparent;
+    color: #6b7280;
+    border: none;
+  }
+  .btn-ghost:hover { background: rgba(0,0,0,0.04); }
 
   /* Badge */
   .badge {
-    display: inline-block;
-    padding: 2px 8px;
-    border-radius: 10px;
-    font-size: 0.75rem;
-    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    height: 20px;
+    padding: 0 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 500;
   }
-  .badge-admin { background: #388bfd30; color: #58a6ff; }
-  .badge-user { background: #30363d; color: #8b949e; }
+  .badge-admin { background: rgba(45,74,122,0.1); color: #2d4a7a; }
+  .badge-user { background: #f0f1f3; color: #6b7280; }
+  .badge-active { background: rgba(25,135,84,0.1); color: #198754; }
+  .badge-inactive { background: rgba(220,53,69,0.1); color: #dc3545; }
 
   /* Modal */
   .modal-overlay {
     display: none;
     position: fixed;
     top: 0; left: 0; right: 0; bottom: 0;
-    background: rgba(0,0,0,0.6);
+    background: rgba(0,0,0,0.1);
+    backdrop-filter: blur(2px);
+    -webkit-backdrop-filter: blur(2px);
     z-index: 100;
     align-items: center;
     justify-content: center;
   }
   .modal-overlay.open { display: flex; }
   .modal {
-    background: #161b22;
-    border: 1px solid #30363d;
-    border-radius: 8px;
-    padding: 24px;
+    background: #ffffff;
+    border-radius: 12px;
     width: 100%;
-    max-width: 420px;
+    max-width: 400px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+    overflow: hidden;
   }
   .modal h3 {
-    font-size: 1.1rem;
-    color: #e6edf3;
+    font-size: 16px;
+    font-weight: 600;
+    color: #1a1a2e;
+    padding: 20px 20px 0;
     margin-bottom: 16px;
+  }
+  .modal p {
+    padding: 0 20px;
   }
   .modal label {
     display: block;
-    font-size: 0.85rem;
-    color: #8b949e;
+    font-size: 12px;
+    color: #6b7280;
     margin-bottom: 4px;
+    padding: 0 20px;
   }
   .modal input, .modal select {
-    width: 100%;
-    padding: 8px 10px;
-    background: #0d1117;
-    border: 1px solid #30363d;
-    border-radius: 6px;
-    color: #c9d1d9;
-    font-size: 0.9rem;
+    width: calc(100% - 40px);
+    margin: 0 20px;
+    padding: 0 10px;
+    height: 32px;
+    background: #ffffff;
+    border: 1px solid rgba(0,0,0,0.08);
+    border-radius: 8px;
+    color: #1a1a2e;
+    font-size: 14px;
     margin-bottom: 12px;
     outline: none;
+    transition: border-color 0.15s;
   }
-  .modal input:focus, .modal select:focus { border-color: #58a6ff; }
+  .modal input:focus, .modal select:focus { border-color: #2d4a7a; }
   .modal-actions {
     display: flex;
     justify-content: flex-end;
     gap: 8px;
+    padding: 16px 20px;
     margin-top: 8px;
+    background: #f8f9fa;
+    border-top: 1px solid rgba(0,0,0,0.08);
+    border-radius: 0 0 12px 12px;
   }
 
   /* Filter */
   select.filter-select {
-    background: #0d1117;
-    border: 1px solid #30363d;
-    border-radius: 6px;
-    color: #c9d1d9;
-    padding: 6px 10px;
-    font-size: 0.85rem;
+    background: #ffffff;
+    border: 1px solid rgba(0,0,0,0.08);
+    border-radius: 8px;
+    color: #1a1a2e;
+    padding: 0 10px;
+    height: 32px;
+    font-size: 13px;
     outline: none;
+    transition: border-color 0.15s;
   }
-  select.filter-select:focus { border-color: #58a6ff; }
+  select.filter-select:focus { border-color: #2d4a7a; }
 
   /* Server info */
   .info-grid {
     display: grid;
     grid-template-columns: 180px 1fr;
     gap: 0;
+    background: #ffffff;
+    border: 1px solid rgba(0,0,0,0.08);
+    border-radius: 8px;
+    overflow: hidden;
   }
   .info-grid dt {
-    color: #8b949e;
-    padding: 10px 12px;
-    border-bottom: 1px solid #21262d;
-    font-size: 0.85rem;
+    color: #6b7280;
+    padding: 12px 16px;
+    border-bottom: 1px solid rgba(0,0,0,0.04);
+    font-size: 13px;
   }
   .info-grid dd {
-    padding: 10px 12px;
-    border-bottom: 1px solid #21262d;
-    font-size: 0.9rem;
-    color: #e6edf3;
+    padding: 12px 16px;
+    border-bottom: 1px solid rgba(0,0,0,0.04);
+    font-size: 14px;
+    color: #1a1a2e;
+  }
+
+  /* Settings form */
+  .settings-form {
+    max-width: 600px;
+  }
+  .settings-form label {
+    display: block;
+    font-size: 12px;
+    color: #6b7280;
+    margin-bottom: 4px;
+  }
+  .settings-form input,
+  .settings-form select {
+    width: 100%;
+    height: 32px;
+    padding: 0 10px;
+    background: #ffffff;
+    border: 1px solid rgba(0,0,0,0.08);
+    border-radius: 8px;
+    color: #1a1a2e;
+    font-size: 14px;
+    margin-bottom: 12px;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  .settings-form input:focus,
+  .settings-form select:focus { border-color: #2d4a7a; }
+  .settings-form h3 {
+    font-size: 15px;
+    font-weight: 600;
+    color: #1a1a2e;
+    margin: 16px 0 12px;
   }
 
   /* Error */
   .error-banner {
-    background: #da363340;
-    border: 1px solid #da3633;
-    color: #f85149;
+    background: rgba(220,53,69,0.1);
+    border: 1px solid rgba(220,53,69,0.2);
+    color: #dc3545;
     padding: 8px 12px;
-    border-radius: 6px;
-    font-size: 0.85rem;
+    border-radius: 8px;
+    font-size: 13px;
     margin-bottom: 16px;
     display: none;
   }
 
   /* Responsive */
   @media (max-width: 768px) {
-    .content { padding: 12px; }
-    th, td { padding: 8px 6px; font-size: 0.8rem; }
+    .sidebar { display: none; }
+    .main-content { margin-left: 0; padding: 16px; }
+    .content { padding: 0; }
+    th, td { padding: 8px 10px; font-size: 13px; }
     .info-grid { grid-template-columns: 1fr; }
     .info-grid dt { border-bottom: none; padding-bottom: 2px; font-weight: 600; }
+    /* Show mobile nav bar */
+    .mobile-tabs {
+      display: flex !important;
+    }
   }
+  .mobile-tabs {
+    display: none;
+    background: #ffffff;
+    border-bottom: 1px solid rgba(0,0,0,0.08);
+    padding: 0 16px;
+    overflow-x: auto;
+    position: fixed;
+    top: 56px;
+    left: 0;
+    right: 0;
+    z-index: 40;
+  }
+  .mobile-tabs .tab {
+    padding: 10px 16px;
+    cursor: pointer;
+    color: #6b7280;
+    font-size: 13px;
+    border: none;
+    border-bottom: 2px solid transparent;
+    white-space: nowrap;
+    background: none;
+    height: auto;
+  }
+  .mobile-tabs .tab:hover { color: #1a1a2e; }
+  .mobile-tabs .tab.active { color: #2d4a7a; border-bottom-color: #2d4a7a; }
 </style>
 </head>
 <body>
 
-<div class="header">
-  <h1>toki-sync admin</h1>
-  <div class="header-right">
+<nav class="navbar">
+  <span class="navbar-brand">toki-sync admin</span>
+  <div class="navbar-right">
     <span id="current-user"></span>
     <button id="logout-btn">Sign out</button>
   </div>
-</div>
+</nav>
 
-<div class="tabs" id="tab-nav">
-  <button class="tab active" data-panel="users">Users</button>
-  <button class="tab" data-panel="devices">Devices</button>
-  <button class="tab" data-panel="teams">Teams</button>
-  <button class="tab" data-panel="pending" id="pending-tab" style="display:none">Pending</button>
-  <button class="tab" data-panel="server">Server</button>
-</div>
-
-<div class="content">
-  <div id="global-error" class="error-banner"></div>
-
-  <!-- Users Panel -->
-  <div id="panel-users" class="panel active">
-    <div class="toolbar">
-      <h2>Users</h2>
-      <button id="create-user-btn" class="btn-primary">Create User</button>
+<div class="app-layout">
+  <aside class="sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-label">Management</div>
+      <nav class="sidebar-nav" id="tab-nav">
+        <button class="nav-item active" data-panel="users">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor"><path d="M10.561 8.073a6.005 6.005 0 0 1 3.432 5.142.75.75 0 1 1-1.498.07 4.5 4.5 0 0 0-8.99 0 .75.75 0 0 1-1.498-.07 6.004 6.004 0 0 1 3.431-5.142 3.999 3.999 0 1 1 5.123 0ZM10.5 5a2.5 2.5 0 1 0-5 0 2.5 2.5 0 0 0 5 0Z"/></svg>
+          Users
+        </button>
+        <button class="nav-item" data-panel="devices">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor"><path d="M3.75 0A1.75 1.75 0 0 0 2 1.75v12.5c0 .966.784 1.75 1.75 1.75h8.5A1.75 1.75 0 0 0 14 14.25V1.75A1.75 1.75 0 0 0 12.25 0h-8.5ZM3.5 1.75a.25.25 0 0 1 .25-.25h8.5a.25.25 0 0 1 .25.25v12.5a.25.25 0 0 1-.25.25h-8.5a.25.25 0 0 1-.25-.25V1.75ZM8 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z"/></svg>
+          Devices
+        </button>
+        <button class="nav-item" data-panel="teams">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor"><path d="M2 5.5a3.5 3.5 0 1 1 5.898 2.549 5.508 5.508 0 0 1 3.034 4.084.75.75 0 1 1-1.482.235 4.001 4.001 0 0 0-6.9 0 .75.75 0 0 1-1.482-.236A5.507 5.507 0 0 1 4.6 8.049 3.5 3.5 0 0 1 2 5.5ZM5.5 4a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3Zm5.5 0a3 3 0 0 1 2.959 3.523.75.75 0 0 1-1.49-.168A1.5 1.5 0 1 0 11 5.5a.75.75 0 0 1 0-1.5Zm2.5 6.5a.75.75 0 0 1 .75.75v.75a.75.75 0 0 1-1.5 0v-.75a.75.75 0 0 1 .75-.75Z"/></svg>
+          Teams
+        </button>
+        <button class="nav-item" data-panel="pending" id="pending-tab" style="display:none">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Zm7.25-3.25v2.992l2.028.812a.75.75 0 0 1-.557 1.392l-2.5-1A.751.751 0 0 1 7.25 8.25v-3.5a.75.75 0 0 1 1.5 0Z"/></svg>
+          Pending
+        </button>
+      </nav>
     </div>
-    <table>
-      <thead>
-        <tr><th>Username</th><th>Role</th><th>Created</th><th>Actions</th></tr>
-      </thead>
-      <tbody id="users-body"></tbody>
-    </table>
-    <div id="users-empty" class="empty-state" style="display:none">No users found.</div>
+    <div class="sidebar-section">
+      <div class="sidebar-label">System</div>
+      <nav class="sidebar-nav">
+        <button class="nav-item" data-panel="server">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor"><path d="M0 2.75C0 1.784.784 1 1.75 1h12.5c.966 0 1.75.784 1.75 1.75v2.5A1.75 1.75 0 0 1 14.25 7H1.75A1.75 1.75 0 0 1 0 5.25v-2.5Zm1.75-.25a.25.25 0 0 0-.25.25v2.5c0 .138.112.25.25.25h12.5a.25.25 0 0 0 .25-.25v-2.5a.25.25 0 0 0-.25-.25H1.75ZM0 10.75c0-.966.784-1.75 1.75-1.75h12.5c.966 0 1.75.784 1.75 1.75v2.5A1.75 1.75 0 0 1 14.25 15H1.75A1.75 1.75 0 0 1 0 13.25v-2.5Zm1.75-.25a.25.25 0 0 0-.25.25v2.5c0 .138.112.25.25.25h12.5a.25.25 0 0 0 .25-.25v-2.5a.25.25 0 0 0-.25-.25H1.75ZM3 4a1 1 0 1 1 2 0 1 1 0 0 1-2 0Zm1 8a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"/></svg>
+          Server
+        </button>
+      </nav>
+    </div>
+    <div class="sidebar-footer">
+      toki-sync
+    </div>
+  </aside>
+
+  <!-- Mobile tabs fallback -->
+  <div class="mobile-tabs">
+    <button class="tab active" data-panel="users">Users</button>
+    <button class="tab" data-panel="devices">Devices</button>
+    <button class="tab" data-panel="teams">Teams</button>
+    <button class="tab" data-panel="pending" style="display:none">Pending</button>
+    <button class="tab" data-panel="server">Server</button>
   </div>
 
-  <!-- Devices Panel -->
-  <div id="panel-devices" class="panel">
-    <div class="toolbar">
-      <h2>Devices</h2>
-      <select id="device-user-filter" class="filter-select">
-        <option value="">All users</option>
-      </select>
-    </div>
-    <table>
-      <thead>
-        <tr><th>Name</th><th>User</th><th>Last Seen</th><th>Actions</th></tr>
-      </thead>
-      <tbody id="devices-body"></tbody>
-    </table>
-    <div id="devices-empty" class="empty-state" style="display:none">No devices found.</div>
-  </div>
+  <div class="main-content">
+    <div class="content">
+      <div id="global-error" class="error-banner"></div>
 
-  <!-- Teams Panel -->
-  <div id="panel-teams" class="panel">
-    <div class="toolbar">
-      <h2>Teams</h2>
-      <button id="create-team-btn" class="btn-primary">Create Team</button>
-    </div>
-    <table>
-      <thead>
-        <tr><th>Name</th><th>Members</th><th>Created</th><th>Actions</th></tr>
-      </thead>
-      <tbody id="teams-body"></tbody>
-    </table>
-    <div id="teams-empty" class="empty-state" style="display:none">No teams found.</div>
-    <!-- Team detail -->
-    <div id="team-detail" style="display:none; margin-top:24px;">
-      <div class="toolbar">
-        <h2 id="team-detail-name"></h2>
-        <div class="btn-group">
-          <button id="add-member-btn" class="btn-primary btn-sm">Add Member</button>
-          <button id="close-detail-btn" class="btn-secondary btn-sm">Close</button>
+      <!-- Users Panel -->
+      <div id="panel-users" class="panel active">
+        <div class="toolbar">
+          <h2>Users</h2>
+          <button id="create-user-btn" class="btn-primary">Create User</button>
+        </div>
+        <div class="table-card">
+          <table>
+            <thead>
+              <tr><th>Username</th><th>Role</th><th>Status</th><th>Created</th><th>Actions</th></tr>
+            </thead>
+            <tbody id="users-body"></tbody>
+          </table>
+        </div>
+        <div id="users-empty" class="empty-state" style="display:none">No users found.</div>
+      </div>
+
+      <!-- Devices Panel -->
+      <div id="panel-devices" class="panel">
+        <div class="toolbar">
+          <h2>Devices</h2>
+          <select id="device-user-filter" class="filter-select">
+            <option value="">All users</option>
+          </select>
+        </div>
+        <div class="table-card">
+          <table>
+            <thead>
+              <tr><th>Name</th><th>User</th><th>Last Seen</th><th>Actions</th></tr>
+            </thead>
+            <tbody id="devices-body"></tbody>
+          </table>
+        </div>
+        <div id="devices-empty" class="empty-state" style="display:none">No devices found.</div>
+      </div>
+
+      <!-- Teams Panel -->
+      <div id="panel-teams" class="panel">
+        <div class="toolbar">
+          <h2>Teams</h2>
+          <button id="create-team-btn" class="btn-primary">Create Team</button>
+        </div>
+        <div class="table-card">
+          <table>
+            <thead>
+              <tr><th>Name</th><th>Members</th><th>Created</th><th>Actions</th></tr>
+            </thead>
+            <tbody id="teams-body"></tbody>
+          </table>
+        </div>
+        <div id="teams-empty" class="empty-state" style="display:none">No teams found.</div>
+        <!-- Team detail -->
+        <div id="team-detail" style="display:none; margin-top:24px;">
+          <div class="toolbar">
+            <h2 id="team-detail-name"></h2>
+            <div class="btn-group">
+              <button id="add-member-btn" class="btn-primary btn-sm">Add Member</button>
+              <button id="close-detail-btn" class="btn-secondary btn-sm">Close</button>
+            </div>
+          </div>
+          <div class="table-card">
+            <table>
+              <thead><tr><th>Username</th><th>Role</th><th>Joined</th><th>Actions</th></tr></thead>
+              <tbody id="team-members-body"></tbody>
+            </table>
+          </div>
         </div>
       </div>
-      <table>
-        <thead><tr><th>Username</th><th>Role</th><th>Joined</th><th>Actions</th></tr></thead>
-        <tbody id="team-members-body"></tbody>
-      </table>
-    </div>
-  </div>
 
-  <!-- Pending Panel -->
-  <div id="panel-pending" class="panel">
-    <div class="toolbar">
-      <h2>Pending Registrations</h2>
-    </div>
-    <table>
-      <thead>
-        <tr><th>Username</th><th>Requested At</th><th>Actions</th></tr>
-      </thead>
-      <tbody id="pending-body"></tbody>
-    </table>
-    <div id="pending-empty" class="empty-state" style="display:none">No pending registrations.</div>
-  </div>
+      <!-- Pending Panel -->
+      <div id="panel-pending" class="panel">
+        <div class="toolbar">
+          <h2>Pending Registrations</h2>
+        </div>
+        <div class="table-card">
+          <table>
+            <thead>
+              <tr><th>Username</th><th>Requested At</th><th>Actions</th></tr>
+            </thead>
+            <tbody id="pending-body"></tbody>
+          </table>
+        </div>
+        <div id="pending-empty" class="empty-state" style="display:none">No pending registrations.</div>
+      </div>
 
-  <!-- Server Panel -->
-  <div id="panel-server" class="panel">
-    <div class="toolbar"><h2>Server Info</h2></div>
-    <dl class="info-grid" id="server-info"></dl>
+      <!-- Server Panel -->
+      <div id="panel-server" class="panel">
+        <div class="toolbar"><h2>Server Settings</h2></div>
+        <form id="settings-form" class="settings-form">
+          <label>Registration Mode</label>
+          <select id="s-registration-mode">
+            <option value="open">Open</option>
+            <option value="approval">Approval</option>
+            <option value="closed">Closed</option>
+          </select>
+
+          <h3>OIDC Configuration</h3>
+          <label>Issuer URL</label>
+          <input type="text" id="s-oidc-issuer" placeholder="https://accounts.google.com">
+
+          <label>Client ID</label>
+          <input type="text" id="s-oidc-client-id">
+
+          <label>Client Secret</label>
+          <input type="password" id="s-oidc-client-secret">
+
+          <label>Redirect URI</label>
+          <input type="text" id="s-oidc-redirect-uri" placeholder="Auto-derived from external_url if empty" style="margin-bottom:16px;">
+
+          <button type="submit" class="btn-primary">Save Settings</button>
+          <span id="settings-saved" style="display:none; color:#198754; font-size:13px; margin-left:12px;">Saved!</span>
+        </form>
+
+        <h3 style="font-size:15px; font-weight:600; color:#1a1a2e; margin:24px 0 12px;">Server Info</h3>
+        <dl class="info-grid" id="server-info"></dl>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -432,17 +701,22 @@
     setTimeout(function() { globalError.style.display = 'none'; }, 5000);
   }
 
-  // ─── Tab navigation ───────────────────────────────────────────────────
-  var tabs = document.querySelectorAll('.tab');
-  tabs.forEach(function(tab) {
-    tab.addEventListener('click', function() {
-      tabs.forEach(function(t) { t.classList.remove('active'); });
-      tab.classList.add('active');
+  // ─── Tab navigation (sidebar + mobile tabs) ──────────────────────────
+  var navItems = document.querySelectorAll('.nav-item, .mobile-tabs .tab');
+  navItems.forEach(function(item) {
+    item.addEventListener('click', function() {
+      // Deactivate all nav items (sidebar + mobile)
+      navItems.forEach(function(t) { t.classList.remove('active'); });
+      // Activate matching items in both sidebar and mobile
+      var panelName = item.dataset.panel;
+      navItems.forEach(function(t) {
+        if (t.dataset.panel === panelName) t.classList.add('active');
+      });
       document.querySelectorAll('.panel').forEach(function(p) { p.classList.remove('active'); });
-      var panel = document.getElementById('panel-' + tab.dataset.panel);
+      var panel = document.getElementById('panel-' + panelName);
       if (panel) panel.classList.add('active');
       // Load data for panel
-      loadPanel(tab.dataset.panel);
+      loadPanel(panelName);
     });
   });
 
@@ -495,7 +769,7 @@
     var payload = JSON.parse(atob(token.split('.')[1]));
     if (payload.sub) {
       // Fetch username from admin/users (we're admin)
-      apiFetch('/admin/users').then(function(data) {
+      apiJson('GET', '/admin/users').then(function(data) {
         var me = (data.users || []).find(function(u) { return u.id === payload.sub; });
         document.getElementById('current-user').textContent = me ? me.username : payload.sub;
       }).catch(function() {
@@ -528,13 +802,20 @@
     empty.style.display = 'none';
     body.innerHTML = users.map(function(u) {
       var badgeClass = u.role === 'admin' ? 'badge-admin' : 'badge-user';
+      var statusClass = u.active !== false ? 'badge-active' : 'badge-inactive';
+      var statusText = u.active !== false ? 'Active' : 'Inactive';
+      var toggleBtn = u.active !== false
+        ? '<button class="btn-warning btn-sm" onclick="AdminPanel.toggleActive(\'' + esc(u.id) + '\',\'' + esc(u.username) + '\',false)">Deactivate</button>'
+        : '<button class="btn-primary btn-sm" onclick="AdminPanel.toggleActive(\'' + esc(u.id) + '\',\'' + esc(u.username) + '\',true)">Activate</button>';
       return '<tr>' +
         '<td>' + esc(u.username) + '</td>' +
         '<td><span class="badge ' + badgeClass + '">' + esc(u.role) + '</span></td>' +
+        '<td><span class="badge ' + statusClass + '">' + statusText + '</span></td>' +
         '<td>' + fmtTime(u.created_at) + '</td>' +
         '<td><div class="btn-group">' +
           '<button class="btn-secondary btn-sm" onclick="AdminPanel.changePassword(\'' + esc(u.id) + '\',\'' + esc(u.username) + '\')">Password</button>' +
           '<button class="btn-secondary btn-sm" onclick="AdminPanel.changeRole(\'' + esc(u.id) + '\',\'' + esc(u.username) + '\',\'' + esc(u.role) + '\')">Role</button>' +
+          toggleBtn +
           '<button class="btn-danger btn-sm" onclick="AdminPanel.deleteUser(\'' + esc(u.id) + '\',\'' + esc(u.username) + '\')">Delete</button>' +
         '</div></td>' +
       '</tr>';
@@ -676,7 +957,7 @@
       var members = data.members || [];
       var body = document.getElementById('team-members-body');
       if (!members.length) {
-        body.innerHTML = '<tr><td colspan="4" style="text-align:center; color:#8b949e;">No members</td></tr>';
+        body.innerHTML = '<tr><td colspan="4" style="text-align:center; color:#6b7280;">No members</td></tr>';
       } else {
         body.innerHTML = members.map(function(m) {
           return '<tr>' +
@@ -751,19 +1032,68 @@
   }
 
   // ═══════════════════════════════════════════════════════════════════════
-  // SERVER INFO
+  // SERVER SETTINGS
   // ═══════════════════════════════════════════════════════════════════════
+  var settingsOriginal = {};
+
   async function loadServerInfo() {
     try {
+      // Load editable settings
+      var settings = await apiJson('GET', '/admin/settings');
+      document.getElementById('s-registration-mode').value = settings.registration_mode || 'closed';
+      document.getElementById('s-oidc-issuer').value = settings.oidc_issuer || '';
+      document.getElementById('s-oidc-client-id').value = settings.oidc_client_id || '';
+      // Don't prefill secret for security - show placeholder instead
+      document.getElementById('s-oidc-client-secret').value = '';
+      document.getElementById('s-oidc-client-secret').placeholder = settings.oidc_client_secret ? '(configured - leave blank to keep)' : '(not set)';
+      document.getElementById('s-oidc-redirect-uri').value = settings.oidc_redirect_uri || '';
+
+      settingsOriginal = {
+        registration_mode: settings.registration_mode || 'closed',
+        oidc_issuer: settings.oidc_issuer || '',
+        oidc_client_id: settings.oidc_client_id || '',
+        oidc_client_secret: settings.oidc_client_secret || '',
+        oidc_redirect_uri: settings.oidc_redirect_uri || '',
+      };
+
+      // Load read-only server info
       var data = await apiJson('GET', '/admin/server-info');
       var grid = document.getElementById('server-info');
       grid.innerHTML =
-        '<dt>Registration Mode</dt><dd>' + esc(data.registration_mode) + '</dd>' +
-        '<dt>OIDC</dt><dd>' + (data.oidc_enabled ? 'Enabled (' + esc(data.oidc_issuer || '') + ')' : 'Disabled') + '</dd>' +
         '<dt>Storage Backend</dt><dd>' + esc(data.storage_backend) + '</dd>' +
         '<dt>Version</dt><dd>' + esc(data.version) + '</dd>';
     } catch(e) { showError(e.message); }
   }
+
+  document.getElementById('settings-form').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    var savedEl = document.getElementById('settings-saved');
+    savedEl.style.display = 'none';
+
+    var fields = {
+      registration_mode: document.getElementById('s-registration-mode').value,
+      oidc_issuer: document.getElementById('s-oidc-issuer').value.trim(),
+      oidc_client_id: document.getElementById('s-oidc-client-id').value.trim(),
+      oidc_redirect_uri: document.getElementById('s-oidc-redirect-uri').value.trim(),
+    };
+    // Only include secret if user typed something
+    var secretVal = document.getElementById('s-oidc-client-secret').value;
+    if (secretVal) {
+      fields.oidc_client_secret = secretVal;
+    }
+
+    try {
+      for (var key in fields) {
+        if (fields[key] !== settingsOriginal[key]) {
+          await apiJson('PUT', '/admin/settings/' + key, { value: fields[key] });
+        }
+      }
+      savedEl.style.display = 'inline';
+      setTimeout(function() { savedEl.style.display = 'none'; }, 3000);
+      // Reload to refresh original values
+      loadServerInfo();
+    } catch(e) { showError(e.message); }
+  });
 
   // ═══════════════════════════════════════════════════════════════════════
   // PUBLIC API (for onclick handlers)
@@ -791,7 +1121,7 @@
       var newRole = currentRole === 'admin' ? 'user' : 'admin';
       openModal(
         '<h3>Change Role: ' + esc(username) + '</h3>' +
-        '<p style="margin-bottom:16px; color:#8b949e;">Change role from <strong>' + esc(currentRole) + '</strong> to <strong>' + esc(newRole) + '</strong>?</p>' +
+        '<p style="margin-bottom:16px; color:#6b7280;">Change role from <strong>' + esc(currentRole) + '</strong> to <strong>' + esc(newRole) + '</strong>?</p>' +
         '<div class="modal-actions"><button class="btn-secondary" onclick="AdminPanel.closeModal()">Cancel</button><button class="btn-primary" id="m-role-ok">Confirm</button></div>'
       );
       document.getElementById('m-role-ok').addEventListener('click', async function() {
@@ -806,7 +1136,7 @@
     deleteUser: function(userId, username) {
       openModal(
         '<h3>Delete User</h3>' +
-        '<p style="margin-bottom:16px; color:#f85149;">Are you sure you want to delete <strong>' + esc(username) + '</strong>? This will also delete all their devices and data.</p>' +
+        '<p style="margin-bottom:16px; color:#dc3545;">Are you sure you want to delete <strong>' + esc(username) + '</strong>? This will also delete all their devices and data.</p>' +
         '<div class="modal-actions"><button class="btn-secondary" onclick="AdminPanel.closeModal()">Cancel</button><button class="btn-danger" id="m-del-ok">Delete</button></div>'
       );
       document.getElementById('m-del-ok').addEventListener('click', async function() {
@@ -821,7 +1151,7 @@
     deleteDevice: function(deviceId, name) {
       openModal(
         '<h3>Delete Device</h3>' +
-        '<p style="margin-bottom:16px; color:#f85149;">Delete device <strong>' + esc(name) + '</strong>?</p>' +
+        '<p style="margin-bottom:16px; color:#dc3545;">Delete device <strong>' + esc(name) + '</strong>?</p>' +
         '<div class="modal-actions"><button class="btn-secondary" onclick="AdminPanel.closeModal()">Cancel</button><button class="btn-danger" id="m-del-dev-ok">Delete</button></div>'
       );
       document.getElementById('m-del-dev-ok').addEventListener('click', async function() {
@@ -838,7 +1168,7 @@
     deleteTeam: function(teamId, name) {
       openModal(
         '<h3>Delete Team</h3>' +
-        '<p style="margin-bottom:16px; color:#f85149;">Delete team <strong>' + esc(name) + '</strong>?</p>' +
+        '<p style="margin-bottom:16px; color:#dc3545;">Delete team <strong>' + esc(name) + '</strong>?</p>' +
         '<div class="modal-actions"><button class="btn-secondary" onclick="AdminPanel.closeModal()">Cancel</button><button class="btn-danger" id="m-del-team-ok">Delete</button></div>'
       );
       document.getElementById('m-del-team-ok').addEventListener('click', async function() {
@@ -853,7 +1183,7 @@
     removeTeamMember: function(teamId, userId, username) {
       openModal(
         '<h3>Remove Member</h3>' +
-        '<p style="margin-bottom:16px; color:#f85149;">Remove <strong>' + esc(username) + '</strong> from team?</p>' +
+        '<p style="margin-bottom:16px; color:#dc3545;">Remove <strong>' + esc(username) + '</strong> from team?</p>' +
         '<div class="modal-actions"><button class="btn-secondary" onclick="AdminPanel.closeModal()">Cancel</button><button class="btn-danger" id="m-rm-member-ok">Remove</button></div>'
       );
       document.getElementById('m-rm-member-ok').addEventListener('click', async function() {
@@ -878,6 +1208,26 @@
         loadPending();
       } catch(e) { showError(e.message); }
     },
+
+    toggleActive: function(userId, username, activate) {
+      var action = activate ? 'activate' : 'deactivate';
+      var btnClass = activate ? 'btn-primary' : 'btn-danger';
+      openModal(
+        '<h3>' + (activate ? 'Activate' : 'Deactivate') + ' User</h3>' +
+        '<p style="margin-bottom:16px; color:' + (activate ? '#6b7280' : '#dc3545') + ';">' +
+          'Are you sure you want to ' + action + ' <strong>' + esc(username) + '</strong>?' +
+          (activate ? '' : ' They will not be able to log in.') +
+        '</p>' +
+        '<div class="modal-actions"><button class="btn-secondary" onclick="AdminPanel.closeModal()">Cancel</button><button class="' + btnClass + '" id="m-toggle-ok">' + (activate ? 'Activate' : 'Deactivate') + '</button></div>'
+      );
+      document.getElementById('m-toggle-ok').addEventListener('click', async function() {
+        try {
+          await apiJson('PATCH', '/admin/users/' + userId + '/active', { active: activate });
+          closeModal();
+          loadUsers();
+        } catch(e) { showError(e.message); }
+      });
+    },
   };
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -889,6 +1239,9 @@
       var info = await apiJson('GET', '/admin/server-info');
       if (info.registration_mode === 'approval') {
         document.getElementById('pending-tab').style.display = '';
+        // Also show mobile pending tab
+        var mobilePending = document.querySelector('.mobile-tabs .tab[data-panel="pending"]');
+        if (mobilePending) mobilePending.style.display = '';
       }
     } catch(_) {}
 

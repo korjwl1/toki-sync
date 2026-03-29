@@ -18,7 +18,7 @@ pub async fn admin_list_users(
     let rows = state.db.list_users().await.map_err(AppError::internal)?;
 
     let users: Vec<_> = rows.into_iter().map(|u| {
-        serde_json::json!({ "id": u.id, "username": u.username, "role": u.role, "created_at": u.created_at })
+        serde_json::json!({ "id": u.id, "username": u.username, "role": u.role, "created_at": u.created_at, "active": u.active })
     }).collect();
 
     Ok(Json(serde_json::json!({ "users": users })))
@@ -258,11 +258,137 @@ pub async fn admin_server_info(
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_admin(&headers, &state.jwt, &*state.db).await?;
 
+    let ds = &state.dynamic_settings;
+    let reg_mode = ds.registration_mode().await;
+    let oidc_issuer = ds.oidc_issuer().await;
+    let oidc_client_id = ds.oidc_client_id().await;
+    let oidc_redirect_uri = ds.oidc_redirect_uri().await;
+
     Ok(Json(serde_json::json!({
-        "registration_mode": state.registration_mode,
-        "oidc_enabled": !state.oidc_issuer.is_empty(),
-        "oidc_issuer": if state.oidc_issuer.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(state.oidc_issuer.clone()) },
+        "registration_mode": reg_mode,
+        "oidc_enabled": !oidc_issuer.is_empty(),
+        "oidc_issuer": if oidc_issuer.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(oidc_issuer.clone()) },
+        "oidc_client_id": if oidc_client_id.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(oidc_client_id) },
+        "oidc_redirect_uri": if oidc_redirect_uri.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(oidc_redirect_uri) },
         "storage_backend": state.storage_backend,
         "version": env!("CARGO_PKG_VERSION"),
     })))
+}
+
+// --- /admin/settings -------------------------------------------------------
+
+pub async fn admin_list_settings(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_admin(&headers, &state.jwt, &*state.db).await?;
+
+    let ds = &state.dynamic_settings;
+    Ok(Json(serde_json::json!({
+        "registration_mode": ds.registration_mode().await,
+        "oidc_issuer": ds.oidc_issuer().await,
+        "oidc_client_id": ds.oidc_client_id().await,
+        "oidc_client_secret": ds.oidc_client_secret().await,
+        "oidc_redirect_uri": ds.oidc_redirect_uri().await,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateSettingRequest {
+    pub value: String,
+}
+
+const ALLOWED_SETTINGS: &[&str] = &[
+    "registration_mode",
+    "oidc_issuer",
+    "oidc_client_id",
+    "oidc_client_secret",
+    "oidc_redirect_uri",
+];
+
+pub async fn admin_update_setting(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+    Json(body): Json<UpdateSettingRequest>,
+) -> Result<StatusCode, AppError> {
+    require_admin(&headers, &state.jwt, &*state.db).await?;
+
+    if !ALLOWED_SETTINGS.contains(&key.as_str()) {
+        return Err(AppError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            message: format!("unknown setting: {key}"),
+        });
+    }
+
+    // Validate registration_mode values
+    if key == "registration_mode" && !["open", "approval", "closed"].contains(&body.value.as_str()) {
+        return Err(AppError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            message: "registration_mode must be 'open', 'approval', or 'closed'".into(),
+        });
+    }
+
+    state.db.set_server_setting(&key, &body.value).await.map_err(AppError::internal)?;
+
+    // Invalidate OIDC discovery cache when any OIDC setting changes
+    if key.starts_with("oidc_") {
+        let mut cache = state.oidc_discovery_cache.write().await;
+        *cache = None;
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// --- /admin/users/:id/active -----------------------------------------------
+
+#[derive(Deserialize)]
+pub struct SetActiveRequest {
+    pub active: bool,
+}
+
+pub async fn admin_set_user_active(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    Json(body): Json<SetActiveRequest>,
+) -> Result<StatusCode, AppError> {
+    let admin_id = require_admin(&headers, &state.jwt, &*state.db).await?;
+
+    // Cannot deactivate yourself
+    if !body.active && user_id == admin_id {
+        return Err(AppError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            message: "cannot deactivate your own account".into(),
+        });
+    }
+
+    let user = state.db.get_user_by_id(&user_id).await.map_err(AppError::internal)?;
+    let user = match user {
+        Some(u) => u,
+        None => return Err(AppError::not_found("user not found")),
+    };
+
+    // When deactivating the built-in admin, ensure at least one other active admin exists
+    if !body.active && user.username == "admin" {
+        let other_admins = state.db.count_active_admins_except("admin").await.map_err(AppError::internal)?;
+        if other_admins == 0 {
+            return Err(AppError {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                message: "cannot deactivate admin: no other admin accounts".into(),
+            });
+        }
+    }
+
+    let updated = state.db.set_user_active(&user_id, body.active).await.map_err(AppError::internal)?;
+    if !updated {
+        return Err(AppError::not_found("user not found"));
+    }
+
+    // If deactivating, revoke all their refresh tokens
+    if !body.active {
+        state.db.revoke_user_refresh_tokens(&user_id).await.map_err(AppError::internal)?;
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }

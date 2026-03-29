@@ -13,7 +13,7 @@ use crate::auth::{BruteForceGuard, JwtManager};
 use crate::config::Config;
 use crate::db::{DatabaseRepo, open_database};
 use crate::metrics::VictoriaMetrics;
-use crate::server::{build_router, http::AppState, tcp::run_tcp_server};
+use crate::server::{build_router, http::{AppState, DynamicSettings}, tcp::run_tcp_server};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -102,20 +102,25 @@ async fn main() -> Result<()> {
         config.auth.oidc_redirect_uri.clone()
     };
 
+    let dynamic_settings = DynamicSettings {
+        db: db.clone(),
+        config_registration_mode: config.auth.effective_registration_mode().to_string(),
+        config_oidc_issuer: config.auth.oidc_issuer.clone(),
+        config_oidc_client_id: config.auth.oidc_client_id.clone(),
+        config_oidc_client_secret: config.auth.oidc_client_secret.clone(),
+        config_oidc_redirect_uri: oidc_redirect_uri.clone(),
+    };
+
     let state = AppState {
         db, jwt, brute, vm,
-        registration_mode: config.auth.effective_registration_mode().to_string(),
         access_token_ttl_secs: config.auth.access_token_ttl_secs,
-        oidc_issuer: config.auth.oidc_issuer.clone(),
-        oidc_client_id: config.auth.oidc_client_id.clone(),
-        oidc_client_secret: config.auth.oidc_client_secret.clone(),
-        oidc_redirect_uri,
         oidc_state_store,
         oidc_discovery_cache: Arc::new(tokio::sync::RwLock::new(None)),
         oidc_http_client: reqwest::Client::new(),
         external_url: config.server.external_url.clone(),
         storage_backend: config.storage.backend.clone(),
         device_poll_tracker: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        dynamic_settings,
     };
 
     // -- TCP sync server ------------------------------------------------------

@@ -80,6 +80,15 @@ pub trait DatabaseRepo: Send + Sync {
     async fn delete_device_code(&self, device_code: &str) -> Result<()>;
     async fn cleanup_expired_device_codes(&self) -> Result<u64>;
 
+    // Server settings
+    async fn get_server_setting(&self, key: &str) -> Result<Option<String>>;
+    async fn set_server_setting(&self, key: &str, value: &str) -> Result<()>;
+    async fn list_server_settings(&self) -> Result<Vec<(String, String)>>;
+
+    // User active status
+    async fn set_user_active(&self, user_id: &str, active: bool) -> Result<bool>;
+    async fn count_active_admins_except(&self, username: &str) -> Result<i64>;
+
     // Cleanup
     async fn cleanup_expired_tokens(&self) -> Result<u64>;
 }

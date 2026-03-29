@@ -10,6 +10,7 @@ pub struct User {
     pub updated_at: i64,
     pub oidc_sub: Option<String>,
     pub oidc_issuer: Option<String>,
+    pub active: bool,
 }
 
 pub struct NewUser {
@@ -32,6 +33,7 @@ pub struct UserSummary {
     pub username: String,
     pub role: String,
     pub created_at: i64,
+    pub active: bool,
 }
 
 pub struct DeviceSummary {
