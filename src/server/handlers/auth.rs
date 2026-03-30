@@ -472,7 +472,7 @@ pub async fn device_code_request(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let device_code = uuid::Uuid::new_v4().to_string();
     let user_code = generate_user_code();
-    let expires_at = chrono::Utc::now().timestamp() + 600; // 10 minutes
+    let expires_at = chrono::Utc::now().timestamp() + 300; // 5 minutes
 
     state.db.create_device_code(&device_code, &user_code, expires_at)
         .await
@@ -488,7 +488,7 @@ pub async fn device_code_request(
         "device_code": device_code,
         "user_code": user_code,
         "verification_url": verification_url,
-        "expires_in": 600,
+        "expires_in": 300,
         "interval": 5,
     })))
 }
