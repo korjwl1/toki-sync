@@ -163,7 +163,6 @@
     outline: none;
     -webkit-appearance: none;
     appearance: none;
-    transition: background 0.15s, color 0.15s, box-shadow 0.15s;
   }
   .tab.active {
     color: #1a1a2e;
@@ -172,6 +171,56 @@
   }
   .section { display: none; }
   .section.active { display: block; }
+  .device-link {
+    text-align: center;
+    margin-top: 20px;
+    font-size: 0.82rem;
+    color: #6b7280;
+  }
+  .device-link a {
+    color: #2d4a7a;
+    text-decoration: none;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .device-link a:hover {
+    text-decoration: underline;
+  }
+  .device-code-input-section {
+    display: none;
+    text-align: center;
+    margin-bottom: 20px;
+  }
+  .device-code-input-section label {
+    display: block;
+    font-size: 0.85rem;
+    color: #6b7280;
+    margin-bottom: 8px;
+  }
+  .device-code-input-section input {
+    width: 200px;
+    padding: 10px 12px;
+    background: #fff;
+    border: 1px solid rgba(0,0,0,0.08);
+    border-radius: 8px;
+    color: #1a1a2e;
+    font-size: 1.3rem;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-align: center;
+    text-transform: uppercase;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  .device-code-input-section input:focus {
+    border-color: #2d4a7a;
+  }
+  .device-code-input-section input::placeholder {
+    font-weight: 400;
+    letter-spacing: 0.05em;
+    color: #b0b0b0;
+    text-transform: none;
+  }
 </style>
 </head>
 <body>
@@ -217,6 +266,16 @@
         <button type="submit" id="register-btn" style="background:#4a7ab5; border-color:#4a7ab5;">Create account</button>
       </form>
     </div>
+
+    <div id="device-link" class="device-link">
+      Authorize a device? <a id="device-link-btn">Enter code</a>
+    </div>
+
+    <div id="device-code-input-section" class="device-code-input-section">
+      <label for="device-code-input">Enter device code</label>
+      <input type="text" id="device-code-input" maxlength="9" placeholder="XXXX-XXXX" autocomplete="off">
+      <button type="button" id="device-code-submit" style="margin-top:12px;">Continue</button>
+    </div>
   </div>
 </div>
 <script>
@@ -240,12 +299,64 @@
     errorEl.style.display = 'none';
   }
 
+  var deviceLinkEl = document.getElementById('device-link');
+  var deviceCodeInputSection = document.getElementById('device-code-input-section');
+  var deviceCodeInput = document.getElementById('device-code-input');
+  var deviceCodeSubmit = document.getElementById('device-code-submit');
+
   // Device flow: show code and change subtitle
   if (isDeviceFlow) {
     subtitleEl.textContent = 'Authorize your device';
     document.getElementById('device-code-display').style.display = 'block';
     document.getElementById('device-code-value').textContent = deviceCode.toUpperCase();
+    deviceLinkEl.style.display = 'none';
+    deviceCodeInputSection.style.display = 'none';
   }
+
+  // "Enter code" link click: show code input
+  deviceLinkEl.querySelector('a').addEventListener('click', function() {
+    deviceLinkEl.style.display = 'none';
+    deviceCodeInputSection.style.display = 'block';
+    deviceCodeInput.focus();
+  });
+
+  // Auto-format code input: uppercase, auto-hyphen at position 4
+  deviceCodeInput.addEventListener('input', function() {
+    var raw = this.value.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+    if (raw.length > 4) {
+      raw = raw.substring(0, 4) + '-' + raw.substring(4, 8);
+    }
+    this.value = raw;
+  });
+
+  // Submit device code manually entered
+  deviceCodeSubmit.addEventListener('click', function() {
+    var code = deviceCodeInput.value.trim().toUpperCase();
+    if (!code || code.length < 9) {
+      showError('Please enter a valid code (XXXX-XXXX).');
+      return;
+    }
+    hideError();
+    // Set device flow state
+    deviceCode = code;
+    isDeviceFlow = true;
+    subtitleEl.textContent = 'Authorize your device';
+    document.getElementById('device-code-display').style.display = 'block';
+    document.getElementById('device-code-value').textContent = code;
+    deviceCodeInputSection.style.display = 'none';
+
+    // If already logged in, auto-approve
+    var existingToken = localStorage.getItem('access_token');
+    if (existingToken) {
+      doApprove(existingToken, code).catch(function(e) {
+        // Token invalid, clear and let user login
+        localStorage.removeItem('access_token');
+        localStorage.removeItem('refresh_token');
+        localStorage.removeItem('expires_in');
+        showError(e.message);
+      });
+    }
+  });
 
   // Handle OIDC callback tokens in hash
   if (window.location.hash) {
