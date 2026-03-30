@@ -41,7 +41,7 @@ impl VictoriaMetrics {
         .context("spawn_blocking panicked")?
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Used by MetricsBackend::write_batch trait impl (kept for alternative backends)
     fn format_prometheus_text(batch: &MetricBatch) -> String {
         let mut out = String::new();
         for pt in batch {
