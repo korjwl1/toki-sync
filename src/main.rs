@@ -17,9 +17,12 @@ use crate::server::{build_router, http::{AppState, DynamicSettings}, tcp::run_tc
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Load config first (needed for log config)
-    let config_path = std::env::var("TOKI_SYNC_CONFIG")
-        .unwrap_or_else(|_| "./config.toml".to_string());
+    // Load config: --config <path> CLI arg takes priority, then TOKI_SYNC_CONFIG env var
+    let config_path = std::env::args()
+        .skip_while(|a| a != "--config")
+        .nth(1)
+        .or_else(|| std::env::var("TOKI_SYNC_CONFIG").ok())
+        .unwrap_or_else(|| "./config.toml".to_string());
     let config = Config::load_or_default(std::path::Path::new(&config_path))
         .context("failed to load config")?;
 

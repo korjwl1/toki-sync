@@ -243,6 +243,29 @@ impl SqliteRepo {
             .execute(&self.pool)
             .await;
 
+        // Seed: create default admin account if no users exist
+        let user_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or(0);
+        if user_count == 0 {
+            let id = uuid::Uuid::new_v4().to_string();
+            let hash = bcrypt::hash("admin123", bcrypt::DEFAULT_COST)
+                .map_err(|e| anyhow::anyhow!("bcrypt hash failed: {e}"))?;
+            let now = chrono::Utc::now().timestamp();
+            sqlx::query(
+                "INSERT INTO users (id, username, password_hash, role, created_at, updated_at, active) VALUES (?, 'admin', ?, 'admin', ?, ?, 1)"
+            )
+            .bind(&id)
+            .bind(&hash)
+            .bind(now)
+            .bind(now)
+            .execute(&self.pool)
+            .await
+            .context("seed: create default admin")?;
+            tracing::info!("created default admin account (username: admin, password: admin123)");
+        }
+
         Ok(())
     }
 }

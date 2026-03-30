@@ -497,6 +497,10 @@ pub async fn device_code_request(
 #[derive(Deserialize)]
 pub struct DeviceTokenRequest {
     pub device_code: String,
+    /// Stable device key UUID (sent by client to register device on approval)
+    pub device_key: Option<String>,
+    /// Human-readable device name (e.g. hostname)
+    pub device_name: Option<String>,
 }
 
 pub async fn device_token_poll(
@@ -547,11 +551,40 @@ pub async fn device_token_poll(
     // Approved — return tokens and delete the device code row
     let access_token = dc.access_token.unwrap_or_default();
     let refresh_token = dc.refresh_token.unwrap_or_default();
+    let user_id = dc.approved_by.unwrap_or_default();
 
     let _ = state.db.delete_device_code(&body.device_code).await;
 
     // Clean up poll tracker entry now that the device code is consumed
     state.device_poll_tracker.lock().unwrap().remove(&body.device_code);
+
+    // Register device if device_key was provided (new flow: device creation at token exchange)
+    if let Some(ref device_key) = body.device_key {
+        if !device_key.is_empty() && !user_id.is_empty() {
+            let device_name = body.device_name.as_deref().unwrap_or("unknown");
+            // Truncate to 64 chars
+            let device_name = if device_name.len() > 64 {
+                &device_name[..device_name.char_indices().nth(64).map_or(device_name.len(), |(i, _)| i)]
+            } else {
+                device_name
+            };
+            // Find or create — idempotent in case of retry
+            let existing = state.db.find_device_by_key_and_user(device_key, &user_id).await;
+            if let Ok(None) = existing {
+                let id = uuid::Uuid::new_v4().to_string();
+                if let Err(e) = state.db.create_device(&id, &user_id, device_name, device_key).await {
+                    tracing::warn!("failed to register device during token exchange: {e}");
+                } else {
+                    tracing::info!(
+                        user_id = %user_id,
+                        device_key = %device_key,
+                        device_name = %device_name,
+                        "registered new device during token exchange"
+                    );
+                }
+            }
+        }
+    }
 
     Ok(Json(serde_json::json!({
         "access_token": access_token,

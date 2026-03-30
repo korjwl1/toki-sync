@@ -277,14 +277,35 @@ fn build_prometheus_text(
             .filter(|s| !s.is_empty())
             .map(|s| escape_prom_value(s))
             .unwrap_or_default();
+        let msg = escape_prom_value(&item.message_id);
 
+        // Per-token-type metrics with msg label to prevent VM dedup
         for (count_val, col_name) in item.event.tokens.iter().zip(safe_columns.iter()) {
             if *count_val == 0 || col_name.is_empty() {
                 continue;
             }
             write!(
                 out,
-                "toki_tokens_total{{model=\"{model}\",session=\"{session}\",provider=\"{esc_provider}\",user=\"{esc_user}\",device=\"{esc_device}\",project=\"{project}\",type=\"{col_name}\"}} {count_val} {ts}\n",
+                "toki_tokens_total{{model=\"{model}\",session=\"{session}\",provider=\"{esc_provider}\",user=\"{esc_user}\",device=\"{esc_device}\",project=\"{project}\",type=\"{col_name}\",msg=\"{msg}\"}} {count_val} {ts}\n",
+                ts = item.ts_ms,
+            )
+            .unwrap();
+        }
+
+        // Event count (msg label for dedup prevention — same as tokens)
+        write!(
+            out,
+            "toki_events_total{{model=\"{model}\",session=\"{session}\",provider=\"{esc_provider}\",user=\"{esc_user}\",device=\"{esc_device}\",project=\"{project}\",msg=\"{msg}\"}} 1 {ts}\n",
+            ts = item.ts_ms,
+        )
+        .unwrap();
+
+        // Pre-calculated usage total (provider-aware: Claude=all4, Codex=in+out)
+        if item.usage_total > 0 {
+            write!(
+                out,
+                "toki_usage_total{{model=\"{model}\",session=\"{session}\",provider=\"{esc_provider}\",user=\"{esc_user}\",device=\"{esc_device}\",project=\"{project}\",msg=\"{msg}\"}} {usage} {ts}\n",
+                usage = item.usage_total,
                 ts = item.ts_ms,
             )
             .unwrap();
@@ -368,6 +389,7 @@ mod tests {
     fn test_build_metric_points_basic() {
         let item = SyncItem {
             ts_ms: 1_700_000_000_000,
+            message_id: "msg1".into(),
             event: StoredEvent {
                 model_id:   1,
                 session_id: 2,
@@ -375,6 +397,7 @@ mod tests {
                 project_name_id: 4,
                 tokens: vec![100, 50, 0, 0],
             },
+            usage_total: 150,
         };
         let batch  = make_batch(vec![item]);
         let points = build_metric_points(&batch, "user-1", "device-1", "claude_code");
@@ -393,6 +416,7 @@ mod tests {
     fn test_build_metric_points_all_types() {
         let item = SyncItem {
             ts_ms: 1_000,
+            message_id: "msg1".into(),
             event: StoredEvent {
                 model_id:   1,
                 session_id: 2,
@@ -400,6 +424,7 @@ mod tests {
                 project_name_id: 4,
                 tokens: vec![10, 20, 5, 3],
             },
+            usage_total: 38,
         };
         let batch  = make_batch(vec![item]);
         let points = build_metric_points(&batch, "user-1", "device-1", "claude_code");
@@ -410,6 +435,7 @@ mod tests {
     fn test_build_metric_points_user_label_present() {
         let item = SyncItem {
             ts_ms: 1_000,
+            message_id: "msg1".into(),
             event: StoredEvent {
                 model_id:   1,
                 session_id: 2,
@@ -417,6 +443,7 @@ mod tests {
                 project_name_id: 4,
                 tokens: vec![1, 0, 0, 0],
             },
+            usage_total: 1,
         };
         let batch  = make_batch(vec![item]);
         let points = build_metric_points(&batch, "user-xyz", "device-1", "claude_code");
@@ -439,6 +466,7 @@ mod tests {
     fn test_build_prometheus_text_codex_labels() {
         let item = SyncItem {
             ts_ms: 1_700_000_000_000,
+            message_id: "msg1".into(),
             event: StoredEvent {
                 model_id:   1,
                 session_id: 2,
@@ -446,6 +474,7 @@ mod tests {
                 project_name_id: 4,
                 tokens: vec![200, 100, 30, 50],
             },
+            usage_total: 380,
         };
         let batch = make_batch_with_columns(
             vec![item],
@@ -453,7 +482,8 @@ mod tests {
         );
         let text = build_prometheus_text(&batch, "user-1", "device-1", "codex");
         let lines: Vec<&str> = text.trim().lines().collect();
-        assert_eq!(lines.len(), 4);
+        // 4 token lines + 1 events_total + 1 usage_total = 6
+        assert_eq!(lines.len(), 6);
         assert!(lines[0].contains("type=\"input\""));
         assert!(lines[0].contains("200"));
         assert!(lines[1].contains("type=\"output\""));
@@ -462,6 +492,8 @@ mod tests {
         assert!(lines[2].contains("30"));
         assert!(lines[3].contains("type=\"reasoning_output\""));
         assert!(lines[3].contains("50"));
+        assert!(lines[4].contains("toki_events_total"));
+        assert!(lines[5].contains("toki_usage_total"));
         // Ensure no claude-specific labels appear
         assert!(!text.contains("cache_create"));
         assert!(!text.contains("cache_read"));
@@ -471,6 +503,7 @@ mod tests {
     fn test_build_prometheus_text_basic() {
         let item = SyncItem {
             ts_ms: 1_700_000_000_000,
+            message_id: "msg1".into(),
             event: StoredEvent {
                 model_id:   1,
                 session_id: 2,
@@ -478,11 +511,13 @@ mod tests {
                 project_name_id: 4,
                 tokens: vec![100, 50, 0, 0],
             },
+            usage_total: 150,
         };
         let batch = make_batch(vec![item]);
         let text = build_prometheus_text(&batch, "user-1", "device-1", "claude_code");
         let lines: Vec<&str> = text.trim().lines().collect();
-        assert_eq!(lines.len(), 2, "input + output only (cache=0 skipped)");
+        // 2 token lines + 1 events_total + 1 usage_total = 4
+        assert_eq!(lines.len(), 4, "input + output + events_total + usage_total");
         assert!(lines[0].contains("type=\"input\""));
         assert!(lines[0].contains("100"));
         assert!(lines[1].contains("type=\"output\""));

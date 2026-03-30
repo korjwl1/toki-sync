@@ -108,7 +108,8 @@ pub async fn promql_query(
 ) -> Result<Response, AppError> {
     let claims = extract_jwt(&headers, &state.jwt)?;
     let requested_scope = params.scope.as_deref().unwrap_or("self");
-    let injected = resolve_scope(&state, &params.query, &claims.sub, requested_scope).await?;
+    let scoped = resolve_scope(&state, &params.query, &claims.sub, requested_scope).await?;
+    let injected = rewrite_toki_query(&scoped);
     let result = state.vm.query(&injected, params.time).await.map_err(AppError::bad_gateway)?;
     Ok((
         StatusCode::OK,
@@ -124,7 +125,8 @@ pub async fn promql_query_range(
 ) -> Result<Response, AppError> {
     let claims = extract_jwt(&headers, &state.jwt)?;
     let requested_scope = params.scope.as_deref().unwrap_or("self");
-    let injected = resolve_scope(&state, &params.query, &claims.sub, requested_scope).await?;
+    let scoped = resolve_scope(&state, &params.query, &claims.sub, requested_scope).await?;
+    let injected = rewrite_toki_query(&scoped);
     let step = params.step.as_deref().unwrap_or("60s");
     let result = state.vm.query_range(&injected, params.start, params.end, step)
         .await
@@ -134,6 +136,65 @@ pub async fn promql_query_range(
         [("Content-Type", "application/json")],
         result,
     ).into_response())
+}
+
+// ─── Toki PromQL → VM PromQL translation ─────────────────────────────────────
+//
+// toki-monitor and toki CLI send queries like `usage{}`, `events{}`, `cost{}`.
+// VM stores data under `toki_tokens_total`, `toki_events_total`, `toki_usage_total`.
+// This function translates toki PromQL to VM-native PromQL so both local and
+// server accept the same query syntax.
+
+fn rewrite_toki_query(query: &str) -> String {
+    use regex::Regex;
+
+    let is_cost = query.contains("cost{") || query.contains("cost[");
+    let is_events = query.contains("events{") || query.contains("events[");
+
+    let mut result = query.to_string();
+
+    if is_cost {
+        // cost{labels} → toki_cost_usd{labels}
+        let re = Regex::new(r"cost\{([^}]*)\}").unwrap();
+        result = re.replace_all(&result, "toki_cost_usd{$1}").to_string();
+        let re2 = Regex::new(r"toki_cost_usd\{\}").unwrap();
+        result = re2.replace_all(&result, "toki_cost_usd").to_string();
+        let re3 = Regex::new(r"cost\[").unwrap();
+        result = re3.replace_all(&result, "toki_cost_usd[").to_string();
+    } else if is_events {
+        // events{labels} → toki_events_total{labels}
+        let re = Regex::new(r"events\{([^}]*)\}").unwrap();
+        result = re.replace_all(&result, "toki_events_total{$1}").to_string();
+        let re2 = Regex::new(r"toki_events_total\{\}").unwrap();
+        result = re2.replace_all(&result, "toki_events_total").to_string();
+        let re3 = Regex::new(r"events\[").unwrap();
+        result = re3.replace_all(&result, "toki_events_total[").to_string();
+    } else {
+        // usage{labels} → toki_tokens_total{labels}
+        let re = Regex::new(r"usage\{([^}]*)\}").unwrap();
+        result = re.replace_all(&result, "toki_tokens_total{$1}").to_string();
+        let re2 = Regex::new(r"toki_tokens_total\{\}").unwrap();
+        result = re2.replace_all(&result, "toki_tokens_total").to_string();
+        let re3 = Regex::new(r"usage\[").unwrap();
+        result = re3.replace_all(&result, "toki_tokens_total[").to_string();
+
+        // For token queries, inject `type` into by() clauses for per-type breakdown
+        let by_re = Regex::new(r"by\s*\(([^)]*)\)").unwrap();
+        result = by_re.replace_all(&result, |caps: &regex::Captures| {
+            let inner = &caps[1];
+            if inner.contains("type") {
+                format!("by ({})", inner)
+            } else {
+                format!("by ({}, type)", inner)
+            }
+        }).to_string();
+    }
+
+    // increase() → sum_over_time() (VM stores gauge data, not counters)
+    let inc_re = Regex::new(r"increase\(").unwrap();
+    result = inc_re.replace_all(&result, "sum_over_time(").to_string();
+
+    result
 }
 
 // ─── Label injection ─────────────────────────────────────────────────────────
@@ -500,5 +561,53 @@ mod tests {
     fn test_parse_scope_invalid() {
         assert!(matches!(parse_scope("foo"), Scope::Invalid));
         assert!(matches!(parse_scope(""), Scope::Invalid));
+    }
+
+    // ─── Toki PromQL rewrite tests ──────────────────────────────────────
+
+    #[test]
+    fn test_rewrite_usage_basic() {
+        let r = rewrite_toki_query("usage{}");
+        assert_eq!(r, "toki_tokens_total");
+    }
+
+    #[test]
+    fn test_rewrite_usage_with_labels() {
+        let r = rewrite_toki_query("usage{provider=\"claude_code\"}");
+        assert!(r.contains("toki_tokens_total{provider=\"claude_code\"}"), "got: {r}");
+    }
+
+    #[test]
+    fn test_rewrite_usage_sum_by_model() {
+        let r = rewrite_toki_query("sum by (model) (increase(usage{}[1d]))");
+        assert!(r.contains("toki_tokens_total"), "got: {r}");
+        assert!(r.contains("sum_over_time("), "increase → sum_over_time, got: {r}");
+        assert!(r.contains("by (model, type)"), "type injected into by(), got: {r}");
+        assert!(!r.contains("increase("), "increase should be replaced, got: {r}");
+    }
+
+    #[test]
+    fn test_rewrite_events() {
+        let r = rewrite_toki_query("sum by (model) (increase(events{}[1d]))");
+        assert!(r.contains("toki_events_total"), "got: {r}");
+        assert!(r.contains("sum_over_time("), "got: {r}");
+        // events should NOT inject type
+        assert!(!r.contains(", type)"), "events should not inject type, got: {r}");
+    }
+
+    #[test]
+    fn test_rewrite_cost() {
+        let r = rewrite_toki_query("sum by (model) (increase(cost{}[1d]))");
+        assert!(r.contains("toki_cost_usd"), "got: {r}");
+        assert!(r.contains("sum_over_time("), "got: {r}");
+        assert!(!r.contains(", type)"), "cost should not inject type, got: {r}");
+    }
+
+    #[test]
+    fn test_rewrite_passthrough_vm_native() {
+        // Already VM-native query should pass through unchanged
+        let q = "sum_over_time(toki_tokens_total{user=\"abc\"}[1h])";
+        let r = rewrite_toki_query(q);
+        assert_eq!(r, q);
     }
 }
