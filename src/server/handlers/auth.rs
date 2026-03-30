@@ -756,32 +756,33 @@ fn device_login_html(registration_mode: &str, _oidc_enabled: bool) -> String {
   }}
   .tabs {{
     display: flex;
-    margin-bottom: 20px;
-    border-bottom: 1px solid rgba(0,0,0,0.08);
+    margin-bottom: 24px;
+    background: #f0f1f3;
+    border-radius: 8px;
+    padding: 3px;
+    gap: 2px;
   }}
   .tab {{
     flex: 1;
-    padding: 10px 8px;
+    padding: 8px 12px;
     text-align: center;
     cursor: pointer;
     color: #6b7280;
-    font-size: 14px;
+    font-size: 13px;
     font-family: inherit;
+    font-weight: 500;
     border: none;
-    border-bottom: 2px solid transparent;
-    background: none;
+    border-radius: 6px;
+    background: transparent;
     outline: none;
     -webkit-appearance: none;
     appearance: none;
-    width: auto;
-    font-weight: 400;
-    transition: color 0.15s, border-color 0.15s;
+    transition: background 0.15s, color 0.15s, box-shadow 0.15s;
   }}
-  .tab:hover {{ color: #1a1a2e; }}
   .tab.active {{
-    color: #2d4a7a;
-    border-bottom-color: #2d4a7a;
-    font-weight: 500;
+    color: #1a1a2e;
+    background: #fff;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
   }}
   .section {{ display: none; }}
   .section.active {{ display: block; }}
