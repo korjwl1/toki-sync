@@ -479,7 +479,7 @@ pub async fn device_code_request(
         .map_err(AppError::internal)?;
 
     let verification_url = if state.external_url.is_empty() {
-        "/login/device".to_string()
+        "/login".to_string()
     } else {
         format!("{}/login/device", state.external_url)
     };
