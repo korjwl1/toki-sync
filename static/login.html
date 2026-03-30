@@ -37,6 +37,27 @@
     text-align: center;
     margin-bottom: 28px;
   }
+  .device-code-display {
+    text-align: center;
+    margin-bottom: 20px;
+    padding: 12px;
+    background: rgba(45,74,122,0.06);
+    border: 1px solid rgba(45,74,122,0.15);
+    border-radius: 8px;
+    display: none;
+  }
+  .device-code-display .label {
+    font-size: 0.8rem;
+    color: #6b7280;
+    margin-bottom: 4px;
+  }
+  .device-code-display .code {
+    font-size: 1.6rem;
+    font-weight: 600;
+    color: #2d4a7a;
+    letter-spacing: 0.15em;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }
   label {
     display: block;
     font-size: 0.85rem;
@@ -106,115 +127,274 @@
     margin-bottom: 16px;
     display: none;
   }
+  .success {
+    background: rgba(25,135,84,0.1);
+    border: 1px solid rgba(25,135,84,0.2);
+    color: #198754;
+    padding: 12px;
+    border-radius: 8px;
+    font-size: 0.95rem;
+    text-align: center;
+    display: none;
+  }
+  .tabs {
+    display: none;
+    margin-bottom: 24px;
+    background: #f0f1f3;
+    border-radius: 8px;
+    padding: 3px;
+    gap: 2px;
+  }
+  .tabs.visible {
+    display: flex;
+  }
+  .tab {
+    flex: 1;
+    padding: 8px 12px;
+    text-align: center;
+    cursor: pointer;
+    color: #6b7280;
+    font-size: 13px;
+    font-family: inherit;
+    font-weight: 500;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    outline: none;
+    -webkit-appearance: none;
+    appearance: none;
+    transition: background 0.15s, color 0.15s, box-shadow 0.15s;
+  }
+  .tab.active {
+    color: #1a1a2e;
+    background: #fff;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  }
+  .section { display: none; }
+  .section.active { display: block; }
 </style>
 </head>
 <body>
 <div class="login-card">
   <h1>toki-sync</h1>
-  <p class="subtitle">Sign in to continue</p>
+  <p class="subtitle" id="subtitle">Sign in to continue</p>
+  <div id="device-code-display" class="device-code-display">
+    <div class="label">Code</div>
+    <div class="code" id="device-code-value"></div>
+  </div>
   <div id="error" class="error"></div>
-  <form id="login-form">
-    <label for="username">Username</label>
-    <input type="text" id="username" name="username" autocomplete="username" required autofocus>
-    <label for="password">Password</label>
-    <input type="password" id="password" name="password" autocomplete="current-password" required>
-    <button type="submit" id="submit-btn">Sign in</button>
-  </form>
-  <div id="oidc-section" style="display:none">
-    <div class="divider">or</div>
-    <button type="button" id="oidc-btn" class="oidc-btn">Sign in with OIDC</button>
-  </div>
-  <div id="register-link" style="display:none; text-align:center; margin-top:16px; font-size:0.85rem; color:#6b7280;">
-    Don't have an account? <a href="#" id="show-register" style="color:#2d4a7a;">Create one</a>
-  </div>
-  <div id="register-section" style="display:none; margin-top:16px;">
-    <div class="divider">create account</div>
-    <form id="register-form">
-      <label for="reg-username">Username</label>
-      <input type="text" id="reg-username" name="username" autocomplete="username" required minlength="3" maxlength="32">
-      <label for="reg-password">Password</label>
-      <input type="password" id="reg-password" name="password" autocomplete="new-password" required minlength="8">
-      <button type="submit" id="register-btn" style="background:#4a7ab5; border-color:#4a7ab5;">Create account</button>
-    </form>
+  <div id="success" class="success"></div>
+
+  <div id="forms-wrapper">
+    <div class="tabs" id="login-tabs">
+      <button class="tab active" data-tab="signin">Sign in</button>
+      <button class="tab" data-tab="register">Create account</button>
+    </div>
+
+    <div id="signin-section" class="section active">
+      <form id="login-form">
+        <label for="username">Username</label>
+        <input type="text" id="username" name="username" autocomplete="username" required autofocus>
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" autocomplete="current-password" required>
+        <button type="submit" id="submit-btn">Sign in</button>
+      </form>
+      <div id="oidc-section" style="display:none">
+        <div class="divider">or</div>
+        <button type="button" id="oidc-btn" class="oidc-btn">Sign in with OIDC</button>
+      </div>
+    </div>
+
+    <div id="register-section" class="section">
+      <div id="approval-note" style="display:none; background:rgba(45,74,122,0.08); border:1px solid rgba(45,74,122,0.2); color:#2d4a7a; padding:8px 12px; border-radius:8px; font-size:0.85rem; margin-bottom:12px;">
+        Your request will need admin approval.
+      </div>
+      <form id="register-form">
+        <label for="reg-username">Username</label>
+        <input type="text" id="reg-username" name="username" autocomplete="username" required minlength="3" maxlength="32">
+        <label for="reg-password">Password</label>
+        <input type="password" id="reg-password" name="password" autocomplete="new-password" required minlength="8">
+        <button type="submit" id="register-btn" style="background:#4a7ab5; border-color:#4a7ab5;">Create account</button>
+      </form>
+    </div>
   </div>
 </div>
 <script>
 (function() {
-  // Check for tokens in URL fragment (OIDC callback)
+  var urlParams = new URLSearchParams(window.location.search);
+  var deviceCode = urlParams.get('device');
+  var isDeviceFlow = !!deviceCode;
+
+  var errorEl = document.getElementById('error');
+  var successEl = document.getElementById('success');
+  var subtitleEl = document.getElementById('subtitle');
+  var formsWrapper = document.getElementById('forms-wrapper');
+  var registrationMode = 'closed';
+
+  function showError(msg) {
+    errorEl.textContent = msg;
+    errorEl.style.display = 'block';
+    successEl.style.display = 'none';
+  }
+  function hideError() {
+    errorEl.style.display = 'none';
+  }
+
+  // Device flow: show code and change subtitle
+  if (isDeviceFlow) {
+    subtitleEl.textContent = 'Authorize your device';
+    document.getElementById('device-code-display').style.display = 'block';
+    document.getElementById('device-code-value').textContent = deviceCode.toUpperCase();
+  }
+
+  // Handle OIDC callback tokens in hash
   if (window.location.hash) {
-    const params = new URLSearchParams(window.location.hash.substring(1));
-    const at = params.get('access_token');
-    const rt = params.get('refresh_token');
-    const ei = params.get('expires_in');
+    var hashParams = new URLSearchParams(window.location.hash.substring(1));
+    var at = hashParams.get('access_token');
+    var rt = hashParams.get('refresh_token');
+    var ei = hashParams.get('expires_in');
     if (at && rt) {
       localStorage.setItem('access_token', at);
       localStorage.setItem('refresh_token', rt);
       if (ei) localStorage.setItem('expires_in', ei);
-      window.location.href = '/admin';
-      return;
+      window.location.hash = '';
+
+      // Check for pending device code from before OIDC redirect
+      var pendingDevice = sessionStorage.getItem('pending_device_code');
+      if (pendingDevice) {
+        sessionStorage.removeItem('pending_device_code');
+        doApprove(at, pendingDevice).catch(function(e) { showError(e.message); });
+        return;
+      }
+
+      if (!isDeviceFlow) {
+        window.location.href = '/admin';
+        return;
+      }
     }
   }
 
-  // If already logged in, redirect
-  if (localStorage.getItem('access_token')) {
+  // If already logged in and not device flow, redirect
+  if (!isDeviceFlow && localStorage.getItem('access_token')) {
     window.location.href = '/admin';
     return;
+  }
+
+  // If device flow and already logged in, try auto-approve
+  if (isDeviceFlow && localStorage.getItem('access_token')) {
+    (async function() {
+      try {
+        await doApprove(localStorage.getItem('access_token'), deviceCode);
+      } catch (e) {
+        // Token invalid, clear and show login form
+        localStorage.removeItem('access_token');
+        localStorage.removeItem('refresh_token');
+        localStorage.removeItem('expires_in');
+      }
+    })();
   }
 
   // Check auth method and show OIDC button if available
   (async function() {
     try {
-      const resp = await fetch('/auth-method', {
+      var resp = await fetch('/auth-method', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: '' }),
       });
       if (resp.ok) {
-        const data = await resp.json();
+        var data = await resp.json();
         if (data.method === 'oidc' && data.auth_url) {
           document.getElementById('oidc-section').style.display = 'block';
           document.getElementById('oidc-btn').addEventListener('click', function() {
+            if (isDeviceFlow) {
+              sessionStorage.setItem('pending_device_code', deviceCode);
+            }
             window.location.href = data.auth_url;
-          });
-        }
-      }
-    } catch (_) { /* ignore, password form remains available */ }
-  })();
-
-  // Check registration mode
-  var registrationMode = 'closed';
-  (async function() {
-    try {
-      const resp = await fetch('/auth/info');
-      if (resp.ok) {
-        const data = await resp.json();
-        registrationMode = data.registration_mode || 'closed';
-        if (registrationMode === 'open' || registrationMode === 'approval') {
-          document.getElementById('register-link').style.display = 'block';
-          if (registrationMode === 'approval') {
-            // Add approval note above register form
-            var note = document.createElement('div');
-            note.style.cssText = 'background:rgba(45,74,122,0.08); border:1px solid rgba(45,74,122,0.2); color:#2d4a7a; padding:8px 12px; border-radius:8px; font-size:0.85rem; margin-bottom:12px;';
-            note.textContent = 'Your request will need admin approval.';
-            var regForm = document.getElementById('register-form');
-            regForm.parentNode.insertBefore(note, regForm);
-          }
-          document.getElementById('show-register').addEventListener('click', function(e) {
-            e.preventDefault();
-            document.getElementById('register-link').style.display = 'none';
-            document.getElementById('register-section').style.display = 'block';
           });
         }
       }
     } catch (_) {}
   })();
 
+  // Check registration mode and show tabs
+  (async function() {
+    try {
+      var resp = await fetch('/auth/info');
+      if (resp.ok) {
+        var data = await resp.json();
+        registrationMode = data.registration_mode || 'closed';
+        if (registrationMode === 'open' || registrationMode === 'approval') {
+          document.getElementById('login-tabs').classList.add('visible');
+          if (registrationMode === 'approval') {
+            document.getElementById('approval-note').style.display = 'block';
+          }
+        }
+      }
+    } catch (_) {}
+  })();
+
+  // Tab switching
+  document.querySelectorAll('.tab').forEach(function(tab) {
+    tab.addEventListener('click', function() {
+      document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
+      tab.classList.add('active');
+      var tabName = tab.getAttribute('data-tab');
+      document.querySelectorAll('#forms-wrapper > .section').forEach(function(s) { s.classList.remove('active'); });
+      var target = document.getElementById(tabName + '-section');
+      if (target) target.classList.add('active');
+    });
+  });
+
+  // Login form
+  var form = document.getElementById('login-form');
+  var submitBtn = document.getElementById('submit-btn');
+
+  form.addEventListener('submit', async function(e) {
+    e.preventDefault();
+    hideError();
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Signing in...';
+
+    var username = document.getElementById('username').value.trim();
+    var password = document.getElementById('password').value;
+
+    try {
+      var resp = await fetch('/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: username, password: password }),
+      });
+
+      if (!resp.ok) {
+        var data = await resp.json().catch(function() { return {}; });
+        throw new Error(data.error || 'Login failed (' + resp.status + ')');
+      }
+
+      var tokens = await resp.json();
+      localStorage.setItem('access_token', tokens.access_token);
+      localStorage.setItem('refresh_token', tokens.refresh_token);
+      if (tokens.expires_in) localStorage.setItem('expires_in', String(tokens.expires_in));
+
+      if (isDeviceFlow) {
+        await doApprove(tokens.access_token, deviceCode);
+      } else {
+        window.location.href = '/admin';
+      }
+    } catch (err) {
+      showError(err.message);
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Sign in';
+    }
+  });
+
   // Register form
   var regForm = document.getElementById('register-form');
+  var regBtn = document.getElementById('register-btn');
+
   regForm.addEventListener('submit', async function(e) {
     e.preventDefault();
-    errorEl.style.display = 'none';
-    var regBtn = document.getElementById('register-btn');
+    hideError();
     regBtn.disabled = true;
     regBtn.textContent = 'Creating account...';
 
@@ -231,17 +411,22 @@
         var data = await resp.json().catch(function() { return {}; });
         throw new Error(data.error || 'Registration failed (' + resp.status + ')');
       }
+
       // Approval mode: show pending message
-      if (resp.status === 202) {
-        errorEl.style.display = 'none';
-        var msg = document.createElement('div');
-        msg.style.cssText = 'background:rgba(25,135,84,0.1); border:1px solid rgba(25,135,84,0.2); color:#198754; padding:12px; border-radius:8px; font-size:0.95rem; text-align:center; margin-top:12px;';
-        msg.textContent = 'Registration pending admin approval. Please wait for an admin to approve your account.';
-        document.getElementById('register-section').appendChild(msg);
+      if (resp.status === 202 || registrationMode === 'approval') {
+        hideError();
+        if (isDeviceFlow) {
+          successEl.textContent = 'Account pending approval. Come back and try again after admin approves.';
+        } else {
+          successEl.textContent = 'Registration pending admin approval. Please wait for an admin to approve your account.';
+        }
+        successEl.style.display = 'block';
+        formsWrapper.style.display = 'none';
         regBtn.disabled = true;
         regBtn.textContent = 'Pending approval';
         return;
       }
+
       // Auto-login after registration (open mode)
       var loginResp = await fetch('/login', {
         method: 'POST',
@@ -255,52 +440,39 @@
       localStorage.setItem('access_token', tokens.access_token);
       localStorage.setItem('refresh_token', tokens.refresh_token);
       if (tokens.expires_in) localStorage.setItem('expires_in', String(tokens.expires_in));
-      window.location.href = '/admin';
+
+      if (isDeviceFlow) {
+        await doApprove(tokens.access_token, deviceCode);
+      } else {
+        window.location.href = '/admin';
+      }
     } catch (err) {
-      errorEl.textContent = err.message;
-      errorEl.style.display = 'block';
+      showError(err.message);
       regBtn.disabled = false;
       regBtn.textContent = 'Create account';
     }
   });
 
-  const form = document.getElementById('login-form');
-  const errorEl = document.getElementById('error');
-  const submitBtn = document.getElementById('submit-btn');
-
-  form.addEventListener('submit', async function(e) {
-    e.preventDefault();
-    errorEl.style.display = 'none';
-    submitBtn.disabled = true;
-    submitBtn.textContent = 'Signing in...';
-
-    const username = document.getElementById('username').value.trim();
-    const password = document.getElementById('password').value;
-
-    try {
-      const resp = await fetch('/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
-      });
-
-      if (!resp.ok) {
-        const data = await resp.json().catch(() => ({}));
-        throw new Error(data.error || 'Login failed (' + resp.status + ')');
-      }
-
-      const data = await resp.json();
-      localStorage.setItem('access_token', data.access_token);
-      localStorage.setItem('refresh_token', data.refresh_token);
-      localStorage.setItem('expires_in', String(data.expires_in));
-      window.location.href = '/admin';
-    } catch (err) {
-      errorEl.textContent = err.message;
-      errorEl.style.display = 'block';
-      submitBtn.disabled = false;
-      submitBtn.textContent = 'Sign in';
+  async function doApprove(token, code) {
+    hideError();
+    var resp = await fetch('/device/approve', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + token,
+      },
+      body: JSON.stringify({ user_code: code }),
+    });
+    if (!resp.ok) {
+      var data = await resp.json().catch(function() { return {}; });
+      throw new Error(data.error || 'Approval failed (' + resp.status + ')');
     }
-  });
+    successEl.textContent = 'Device authorized! You can close this tab.';
+    successEl.style.display = 'block';
+    errorEl.style.display = 'none';
+    formsWrapper.style.display = 'none';
+    setTimeout(function() { window.close(); }, 1500);
+  }
 })();
 </script>
 </body>

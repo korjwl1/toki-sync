@@ -130,7 +130,6 @@ pub fn build_router(state: AppState) -> Router {
         .route("/device/code", post(auth::device_code_request))
         .route("/device/token", post(auth::device_token_poll))
         .route("/device/approve", post(auth::device_approve))
-        .route("/login/device", get(auth::device_login_page))
         // OIDC (Phase 3)
         .route("/auth/oidc/authorize", get(auth::oidc_authorize))
         .route("/auth/callback", get(auth::oidc_callback))
