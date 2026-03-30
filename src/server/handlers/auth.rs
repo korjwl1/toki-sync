@@ -761,24 +761,27 @@ fn device_login_html(registration_mode: &str, _oidc_enabled: bool) -> String {
   }}
   .tab {{
     flex: 1;
-    padding: 8px;
+    padding: 10px 8px;
     text-align: center;
     cursor: pointer;
     color: #6b7280;
-    font-size: 0.85rem;
+    font-size: 14px;
+    font-family: inherit;
+    border: none;
     border-bottom: 2px solid transparent;
     background: none;
-    border-left: none;
-    border-right: none;
-    border-top: none;
+    outline: none;
+    -webkit-appearance: none;
+    appearance: none;
     width: auto;
-    font-weight: normal;
+    font-weight: 400;
+    transition: color 0.15s, border-color 0.15s;
   }}
-  .tab:hover {{ color: #1a1a2e; background: none; }}
+  .tab:hover {{ color: #1a1a2e; }}
   .tab.active {{
     color: #2d4a7a;
     border-bottom-color: #2d4a7a;
-    background: none;
+    font-weight: 500;
   }}
   .section {{ display: none; }}
   .section.active {{ display: block; }}
@@ -830,7 +833,7 @@ fn device_login_html(registration_mode: &str, _oidc_enabled: bool) -> String {
         <input type="text" id="username" name="username" autocomplete="username" required>
         <label for="password">Password</label>
         <input type="password" id="password" name="password" autocomplete="current-password" required>
-        <button type="submit" id="login-btn">Sign in & Approve</button>
+        <button type="submit" id="login-btn">Sign in</button>
       </form>
       <div id="oidc-section" style="display:none">
         <div class="divider">or</div>
@@ -989,7 +992,7 @@ fn device_login_html(registration_mode: &str, _oidc_enabled: bool) -> String {
       }} catch (err) {{
         showError(err.message);
         loginBtn.disabled = false;
-        loginBtn.textContent = 'Sign in & Approve';
+        loginBtn.textContent = 'Sign in';
       }}
     }});
   }}
@@ -1045,7 +1048,7 @@ fn device_login_html(registration_mode: &str, _oidc_enabled: bool) -> String {
       }} catch (err) {{
         showError(err.message);
         btn.disabled = false;
-        btn.textContent = REGISTRATION_MODE === 'approval' ? 'Create account' : 'Create account & Approve';
+        btn.textContent = REGISTRATION_MODE === 'approval' ? 'Create account' : 'Create account';
       }}
     }});
   }}
@@ -1122,7 +1125,7 @@ fn device_login_html(registration_mode: &str, _oidc_enabled: bool) -> String {
         <input type="text" id="reg-username" name="username" autocomplete="username" required minlength="3" maxlength="32">
         <label for="reg-password">Password</label>
         <input type="password" id="reg-password" name="password" autocomplete="new-password" required minlength="8">
-        <button type="submit" id="register-btn">Create account & Approve</button>
+        <button type="submit" id="register-btn">Create account</button>
       </form>
     </div>"#
         } else { "" },
