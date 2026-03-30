@@ -914,9 +914,17 @@ fn device_login_html(registration_mode: &str, _oidc_enabled: bool) -> String {
     // Check if already logged in (JWT in localStorage)
     var existingToken = localStorage.getItem('access_token');
     if (existingToken) {{
-      // Try to approve directly
-      await doApprove(existingToken);
-      return;
+      // Try to approve directly — if token is expired/invalid, clear it and show login
+      try {{
+        await doApprove(existingToken);
+        return;
+      }} catch (e) {{
+        // Token invalid — clear stale credentials and fall through to login
+        localStorage.removeItem('access_token');
+        localStorage.removeItem('refresh_token');
+        localStorage.removeItem('expires_in');
+        hideError();
+      }}
     }}
 
     // Show login step
@@ -1044,23 +1052,19 @@ fn device_login_html(registration_mode: &str, _oidc_enabled: bool) -> String {
 
   async function doApprove(token) {{
     hideError();
-    try {{
-      var resp = await fetch('/device/approve', {{
-        method: 'POST',
-        headers: {{
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ' + token,
-        }},
-        body: JSON.stringify({{ user_code: pendingUserCode }}),
-      }});
-      if (!resp.ok) {{
-        var data = await resp.json().catch(function() {{ return {{}}; }});
-        throw new Error(data.error || 'Approval failed (' + resp.status + ')');
-      }}
-      showSuccess();
-    }} catch (err) {{
-      showError(err.message);
+    var resp = await fetch('/device/approve', {{
+      method: 'POST',
+      headers: {{
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + token,
+      }},
+      body: JSON.stringify({{ user_code: pendingUserCode }}),
+    }});
+    if (!resp.ok) {{
+      var data = await resp.json().catch(function() {{ return {{}}; }});
+      throw new Error(data.error || 'Approval failed (' + resp.status + ')');
     }}
+    showSuccess();
   }}
 
   // Check for OIDC callback tokens in hash (after redirect back)
@@ -1079,7 +1083,7 @@ fn device_login_html(registration_mode: &str, _oidc_enabled: bool) -> String {
       if (pending) {{
         pendingUserCode = pending;
         sessionStorage.removeItem('pending_device_code');
-        doApprove(at);
+        doApprove(at).catch(function(e) {{ showError(e.message); }});
       }}
     }}
   }}
