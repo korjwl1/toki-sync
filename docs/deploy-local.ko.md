@@ -58,6 +58,6 @@ docker compose up -d
 ## 4단계: 연결
 
 ```bash
-toki settings sync enable --server localhost:9090 --insecure --username admin
+toki settings sync enable --server localhost --no-tls
 toki settings sync status
 ```

@@ -261,7 +261,7 @@ sequenceDiagram
     C->>S: POST /login { username, password }
     S->>DB: Verify bcrypt hash
     S->>DB: Store refresh_token (hashed)
-    S-->>C: { access_token (1h), refresh_token (30d) }
+    S-->>C: { access_token (1h), refresh_token (90d) }
 
     Note over C: access_token expires
 
@@ -371,6 +371,15 @@ devices
   user_id     TEXT NOT NULL  -> users.id
   device_key  TEXT UNIQUE NOT NULL
   device_name TEXT NOT NULL
+  token_columns TEXT          -- provider-specific token column schema (JSON)
+  created_at  INTEGER NOT NULL
+
+device_codes
+  device_code TEXT PRIMARY KEY
+  user_code   TEXT UNIQUE NOT NULL
+  device_name TEXT NOT NULL
+  user_id     TEXT            -- set when user verifies
+  expires_at  INTEGER NOT NULL
   created_at  INTEGER NOT NULL
 
 cursors
@@ -531,15 +540,48 @@ Sleep/wake detection for reconnecting dead TCP connections:
 
 The current implementation detects wake via PING/PONG timeout. A 60-second delay after wake is acceptable for a dashboard/monitoring use case. OS-native wake notifications are a planned future improvement.
 
+### Device Code Authentication
+
+The CLI uses the device code flow for authentication instead of passing credentials on the command line:
+
+1. CLI calls `POST /auth/device/code` with the device name
+2. Server returns a `user_code` and `verification_uri`
+3. CLI opens the browser to the verification page and displays the user code
+4. User logs in via the browser and enters the code
+5. CLI polls `POST /auth/device/token` until the user completes authorization
+6. Server returns JWT tokens upon successful verification
+
+This eliminates the need for `--username` and `--password` flags, improving security by never exposing credentials in shell history or process listings.
+
+For headless environments (no browser), the CLI prints the verification URL and user code for the user to enter manually on another device.
+
 ### Always-On Sync Thread with SyncToggle
 
-The sync thread is spawned at daemon startup if sync is configured. There is no hot-add capability (enabling sync requires daemon restart). This avoids:
+The sync thread is spawned at daemon startup if sync is configured. Settings hot-reload allows enabling/disabling sync without daemon restart. This avoids:
 
 - Runtime thread management complexity
 - Race conditions between "sync just enabled" and "sync thread not yet ready"
 - Configuration reload edge cases
 
 When sync is disabled, the `flush_notify` field is `None`, and no sync-related code executes. Zero overhead.
+
+### Registration Modes
+
+The server supports three registration modes via `registration_mode`:
+
+| Mode | Behavior |
+|------|----------|
+| `"open"` | Anyone can register via `POST /register` |
+| `"approval"` | Registration creates a pending account; admin must approve via `/admin/pending/:id/approve` |
+| `"closed"` | Only admins can create users via `/admin/users` |
+
+### Additional Server Configuration
+
+| Setting | Description |
+|---------|-------------|
+| `trust_proxy` | When `true`, the server reads client IP from `X-Forwarded-For` / `X-Real-IP` headers for brute force tracking. Only enable behind a trusted reverse proxy |
+| `max_query_scope` | Limits the maximum time range for PromQL queries (e.g., `"365d"`). Prevents expensive queries spanning too much data |
+| `max_concurrent_writes` | Limits parallel VictoriaMetrics batch writes (default: 10) |
 
 ## Scaling Guide
 

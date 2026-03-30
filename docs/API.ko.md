@@ -77,7 +77,7 @@ Authorization: Bearer <access_token>
 
 ### `POST /register`
 
-새 사용자 계정을 셀프 등록합니다. 설정에서 `allow_registration = true`일 때만 사용 가능합니다.
+새 사용자 계정을 셀프 등록합니다. 설정에서 `registration_mode = "open"` 또는 `registration_mode = "approval"`일 때만 사용 가능합니다.
 
 **요청 본문**
 
@@ -106,7 +106,7 @@ Authorization: Bearer <access_token>
 
 | 상태 | 메시지 | 설명 |
 |------|--------|------|
-| `403` | `registration is disabled` | `allow_registration`이 `false` |
+| `403` | `registration is disabled` | `registration_mode`이 `"closed"` |
 | `409` | `username already exists` | 중복된 사용자명 |
 | `422` | `username must be 3-32 characters` | 잘못된 사용자명 길이 |
 | `422` | `password must be 8-128 characters` | 잘못된 비밀번호 길이 |
@@ -175,6 +175,117 @@ Authorization: Bearer <access_token>
   "method": "oidc",
   "auth_url": "/auth/oidc/authorize?redirect_uri=..."
 }
+```
+
+---
+
+### `GET /auth/info`
+
+서버 인증 설정을 반환합니다 (registration mode, OIDC 가용 여부).
+
+**응답** `200 OK`
+
+```json
+{
+  "registration_mode": "open",
+  "oidc_enabled": true,
+  "server_version": "0.2.0"
+}
+```
+
+---
+
+## Device Code Flow 엔드포인트
+
+Device code flow는 CLI 도구가 명령줄에 인증 정보를 전달하지 않고 브라우저를 통해 인증할 수 있게 합니다.
+
+### `POST /auth/device/code`
+
+CLI 인증을 위한 device code를 요청합니다.
+
+**요청 본문**
+
+```json
+{
+  "device_name": "macbook-pro"
+}
+```
+
+**응답** `200 OK`
+
+```json
+{
+  "device_code": "GMMhmHCXhWEzkobqIHGG_EnNYYNjPzoysSr99Uy_zNM",
+  "user_code": "WDJB-MJHT",
+  "verification_uri": "https://sync.example.com/device",
+  "expires_in": 900,
+  "interval": 5
+}
+```
+
+---
+
+### `GET /device`
+
+사용자가 `user_code`를 입력하고 인증하는 브라우저 페이지입니다.
+
+---
+
+### `POST /auth/device/token`
+
+Device code 완료를 위해 폴링합니다. CLI는 지정된 `interval`마다 이 엔드포인트를 폴링합니다.
+
+**요청 본문**
+
+```json
+{
+  "device_code": "GMMhmHCXhWEzkobqIHGG_EnNYYNjPzoysSr99Uy_zNM"
+}
+```
+
+**응답** `200 OK` (인증 완료)
+
+```json
+{
+  "access_token": "eyJhbGciOi...",
+  "refresh_token": "eyJhbGciOi...",
+  "token_type": "Bearer",
+  "expires_in": 3600
+}
+```
+
+**응답** `428 Precondition Required` (인증 대기 중)
+
+```json
+{ "error": "authorization_pending" }
+```
+
+**에러**
+
+| 상태 | 메시지 | 설명 |
+|------|--------|------|
+| `428` | `authorization_pending` | 사용자가 아직 인증하지 않음, 계속 폴링 |
+| `400` | `expired_token` | Device code가 만료됨 |
+| `400` | `access_denied` | 사용자가 인증을 거부함 |
+
+---
+
+### `POST /auth/device/verify`
+
+사용자가 브라우저에서 코드를 제출할 때 호출되는 서버 측 엔드포인트. 인증된 세션이 필요합니다 (사용자가 로그인되어 있어야 함).
+
+**요청 본문**
+
+```json
+{
+  "user_code": "WDJB-MJHT"
+}
+```
+
+**응답** `200 OK`
+
+```json
+{ "verified": true }
 ```
 
 ---
@@ -369,6 +480,59 @@ PromQL 쿼리를 VictoriaMetrics에 프록시하며, 사용자별 label injectio
 ## 관리자 엔드포인트 (JWT 필수, admin 역할)
 
 모든 관리자 엔드포인트는 `admin` 역할을 가진 사용자의 JWT가 필요합니다.
+
+### 설정
+
+| 메서드 | 경로 | 설명 |
+|--------|------|------|
+| `GET` | `/admin/settings` | 현재 서버 설정 조회 (registration_mode 등) |
+| `PATCH` | `/admin/settings` | 서버 설정 변경 |
+
+#### `PATCH /admin/settings`
+
+**요청 본문**
+
+```json
+{
+  "registration_mode": "approval"
+}
+```
+
+---
+
+### 대기 중인 사용자
+
+| 메서드 | 경로 | 설명 |
+|--------|------|------|
+| `GET` | `/admin/pending` | 승인 대기 중인 사용자 목록 (`registration_mode = "approval"` 시) |
+| `POST` | `/admin/pending/:user_id/approve` | 대기 중인 사용자 승인 |
+| `DELETE` | `/admin/pending/:user_id` | 대기 중인 사용자 거부 |
+
+---
+
+### 서버 정보
+
+| 메서드 | 경로 | 설명 |
+|--------|------|------|
+| `GET` | `/admin/server-info` | 서버 버전, 가동 시간, 연결된 디바이스 수, 데이터베이스 통계 |
+
+---
+
+### 역할 관리
+
+| 메서드 | 경로 | 설명 |
+|--------|------|------|
+| `PATCH` | `/admin/users/:user_id/role` | 사용자 역할 변경 (`"admin"` 또는 `"user"`) |
+
+---
+
+### 활성 디바이스
+
+| 메서드 | 경로 | 설명 |
+|--------|------|------|
+| `GET` | `/admin/active` | 현재 연결된 디바이스 목록과 실시간 동기화 상태 |
+
+---
 
 ### 사용자
 

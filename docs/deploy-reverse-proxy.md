@@ -136,6 +136,6 @@ tcp:
 On any machine with [toki](https://github.com/korjwl1/toki) installed:
 
 ```bash
-toki settings sync enable --server yourserver.example.com:9090 --username admin
+toki settings sync enable --server yourserver.example.com
 toki settings sync status
 ```

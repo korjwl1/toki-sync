@@ -106,8 +106,8 @@ Open the dashboard in your browser: `https://myserver.duckdns.org/dashboard`
 On any machine with [toki](https://github.com/korjwl1/toki) installed:
 
 ```bash
-toki settings sync enable --server myserver.duckdns.org:9090 --username admin
-# Enter the TOKI_ADMIN_PASSWORD when prompted
+toki settings sync enable --server myserver.duckdns.org
+# Opens browser for authentication (device code flow)
 
 toki settings sync status
 # Should show: connected

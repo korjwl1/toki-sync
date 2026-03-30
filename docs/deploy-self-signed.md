@@ -68,6 +68,6 @@ services:
 Clients must use the `--insecure` flag to accept the self-signed certificate:
 
 ```bash
-toki settings sync enable --server 192.168.1.100:9090 --insecure --username admin
+toki settings sync enable --server 192.168.1.100 --insecure
 toki settings sync status
 ```

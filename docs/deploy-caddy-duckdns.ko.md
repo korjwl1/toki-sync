@@ -106,8 +106,8 @@ curl https://myserver.duckdns.org/health
 [toki](https://github.com/korjwl1/toki)가 설치된 아무 기기에서:
 
 ```bash
-toki settings sync enable --server myserver.duckdns.org:9090 --username admin
-# 프롬프트에서 TOKI_ADMIN_PASSWORD 입력
+toki settings sync enable --server myserver.duckdns.org
+# 브라우저를 열어 인증합니다 (device code flow)
 
 toki settings sync status
 # 표시: connected

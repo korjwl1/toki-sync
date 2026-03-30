@@ -23,7 +23,7 @@
 
 - 자체 서명 TLS (시나리오 C)의 경우 `--insecure` 플래그 사용:
   ```bash
-  toki settings sync enable --server <ip>:9090 --insecure --username admin
+  toki settings sync enable --server <ip> --insecure
   ```
 - 도메인 기반 TLS (시나리오 A)의 경우 DNS가 전파되었는지 확인: `dig myserver.duckdns.org`
 - `.env`의 `TOKI_EXTERNAL_URL`이 실제 도메인/IP와 일치하는지 확인

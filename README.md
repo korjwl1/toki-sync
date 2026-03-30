@@ -42,8 +42,8 @@ Deploy and connect:
 ```bash
 docker compose --profile caddy up -d
 
-# On any machine with toki installed
-toki settings sync enable --server myserver.duckdns.org:9090 --username admin
+# On any machine with toki installed (opens browser for authentication)
+toki settings sync enable --server myserver.duckdns.org
 ```
 
 Done. Token usage now syncs automatically.
@@ -95,7 +95,7 @@ toki daemon  toki daemon  toki daemon
 ## Features
 
 - **Multi-device sync** — TCP binary protocol with zstd compression, ACK flow control, delta-sync on reconnect
-- **JWT authentication** — password-based and OIDC (Google, GitHub, etc.) login flows
+- **Device code authentication** — browser-based device code flow, OIDC (Google, GitHub, etc.), and password login
 - **PromQL proxy** — per-user label injection for data isolation; compatible with toki CLI `--remote` and Toki Monitor
 - **Web dashboard** — chart panels, time range picker, device list, team views
 - **Teams / organizations** — aggregate queries across team members

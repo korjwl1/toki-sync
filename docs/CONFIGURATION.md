@@ -9,21 +9,26 @@ Server configuration lives in `config/toki-sync.toml`. Environment variables are
 # bind = "0.0.0.0"
 tcp_port = 9090
 http_port = 9091
+# trust_proxy = false
+# max_concurrent_writes = 10
 
 [auth]
 jwt_secret = "${JWT_SECRET}"
 # access_token_ttl_secs = 3600
-# refresh_token_ttl_secs = 2592000
+# refresh_token_ttl_secs = 7776000
 # brute_force_max_attempts = 5
 # brute_force_window_secs = 300
 # brute_force_lockout_secs = 900
-# allow_registration = false
+# registration_mode = "closed"
 
 [storage]
 db_path = "/data/toki_sync.db"
 
 [backend]
 vm_url = "http://victoriametrics:8428"
+
+[features]
+# max_query_scope = "365d"
 
 [log]
 level = "info"
@@ -41,6 +46,7 @@ json = true
 | `tcp_port` | integer | `9090` | TCP sync protocol port (toki daemon connections) |
 | `external_url` | string | *(empty)* | Public URL used for JWT `iss` claim and OIDC redirect URI derivation. Example: `https://sync.example.com` |
 | `max_concurrent_writes` | integer | `10` | Maximum parallel VictoriaMetrics batch writes. Limits thundering-herd pressure when many devices sync simultaneously |
+| `trust_proxy` | boolean | `false` | Trust `X-Forwarded-For` and `X-Real-IP` headers from a reverse proxy for client IP resolution (brute force tracking). Only enable when behind a trusted reverse proxy |
 
 ---
 
@@ -50,11 +56,11 @@ json = true
 |-----|------|---------|-------------|
 | `jwt_secret` | string | — | **Required.** HS256 signing key for JWT tokens. Use `${JWT_SECRET}` to read from environment. Generate with `openssl rand -base64 32` |
 | `access_token_ttl_secs` | integer | `3600` | Access token lifetime in seconds (default: 1 hour) |
-| `refresh_token_ttl_secs` | integer | `2592000` | Refresh token lifetime in seconds (default: 30 days) |
+| `refresh_token_ttl_secs` | integer | `7776000` | Refresh token lifetime in seconds (default: 90 days) |
 | `brute_force_max_attempts` | integer | `5` | Maximum failed login attempts before lockout |
 | `brute_force_window_secs` | integer | `300` | Time window for tracking failed attempts (default: 5 minutes) |
 | `brute_force_lockout_secs` | integer | `900` | Lockout duration after max attempts exceeded (default: 15 minutes) |
-| `allow_registration` | boolean | `false` | Allow self-registration via `POST /register`. When `false`, only admins can create users |
+| `registration_mode` | string | `"closed"` | Controls self-registration: `"open"` (anyone can register), `"approval"` (registration requires admin approval), `"closed"` (only admins can create users) |
 | `oidc_issuer` | string | *(empty)* | OIDC provider URL (e.g., `https://accounts.google.com`). Empty = OIDC disabled |
 | `oidc_client_id` | string | *(empty)* | OIDC client ID from your identity provider |
 | `oidc_client_secret` | string | *(empty)* | OIDC client secret |
@@ -123,6 +129,14 @@ In Docker Compose, VictoriaMetrics runs as a service named `victoriametrics`, so
 |-----|------|---------|-------------|
 | `level` | string | `info` | Log level: `trace`, `debug`, `info`, `warn`, `error` |
 | `json` | boolean | `false` | Output logs in JSON format. Recommended for production (structured logging) |
+
+---
+
+## `[features]`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `max_query_scope` | string | *(empty)* | Maximum time range for PromQL queries (e.g., `"365d"`, `"90d"`). Empty = unlimited. Prevents expensive queries spanning too much data |
 
 ---
 

@@ -23,7 +23,7 @@
 
 - For self-signed TLS (Scenario C), use `--insecure` flag:
   ```bash
-  toki settings sync enable --server <ip>:9090 --insecure --username admin
+  toki settings sync enable --server <ip> --insecure
   ```
 - For domain-based TLS (Scenario A), ensure DNS is propagated: `dig myserver.duckdns.org`
 - Check that `TOKI_EXTERNAL_URL` in `.env` matches the actual domain/IP

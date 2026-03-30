@@ -68,6 +68,6 @@ services:
 클라이언트는 자체 서명 인증서를 수락하기 위해 `--insecure` 플래그를 사용해야 합니다:
 
 ```bash
-toki settings sync enable --server 192.168.1.100:9090 --insecure --username admin
+toki settings sync enable --server 192.168.1.100 --insecure
 toki settings sync status
 ```

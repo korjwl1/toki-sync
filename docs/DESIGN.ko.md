@@ -261,7 +261,7 @@ sequenceDiagram
     C->>S: POST /login { username, password }
     S->>DB: bcrypt 해시 검증
     S->>DB: refresh_token 저장 (해시됨)
-    S-->>C: { access_token (1시간), refresh_token (30일) }
+    S-->>C: { access_token (1시간), refresh_token (90일) }
 
     Note over C: access_token 만료
 

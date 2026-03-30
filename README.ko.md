@@ -42,8 +42,8 @@ DUCKDNS_TOKEN=your-duckdns-token
 ```bash
 docker compose --profile caddy up -d
 
-# toki가 설치된 아무 기기에서
-toki settings sync enable --server myserver.duckdns.org:9090 --username admin
+# toki가 설치된 아무 기기에서 (브라우저를 열어 인증)
+toki settings sync enable --server myserver.duckdns.org
 ```
 
 완료. 토큰 사용량이 자동으로 동기화됩니다.
@@ -95,7 +95,7 @@ toki daemon   toki daemon   toki daemon
 ## 기능
 
 - **멀티 디바이스 동기화** — TCP 바이너리 프로토콜, zstd 압축, ACK 흐름 제어, 재연결 시 delta-sync
-- **JWT 인증** — 비밀번호 기반 및 OIDC (Google, GitHub 등) 로그인 플로우
+- **Device code 인증** — 브라우저 기반 device code flow, OIDC (Google, GitHub 등), 비밀번호 로그인
 - **PromQL 프록시** — 사용자별 label injection으로 데이터 격리. toki CLI `--remote` 및 Toki Monitor와 호환
 - **웹 대시보드** — 차트 패널, 시간 범위 선택, 디바이스 목록, 팀 뷰
 - **팀 / 조직** — 팀 멤버 간 집계 쿼리
