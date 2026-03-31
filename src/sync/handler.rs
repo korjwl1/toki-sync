@@ -7,8 +7,9 @@ use tokio::sync::Semaphore;
 
 use crate::auth::JwtManager;
 use crate::db::DatabaseRepo;
+use crate::events::{EventStore, ServerEvent};
+#[allow(unused_imports)]
 use crate::metrics::backend::MetricPoint;
-use crate::metrics::VictoriaMetrics;
 use super::protocol::*;
 
 const MAX_DECOMPRESSED_SIZE: usize = 64 * 1024 * 1024; // 64 MiB
@@ -18,7 +19,7 @@ pub async fn handle_connection(
     stream: TcpStream,
     db: Arc<dyn DatabaseRepo>,
     jwt: Arc<JwtManager>,
-    vm: Arc<VictoriaMetrics>,
+    events: Arc<dyn EventStore>,
     batch_semaphore: Arc<Semaphore>,
 ) -> Result<()> {
     let (r, w) = tokio::io::split(stream);
@@ -71,10 +72,10 @@ pub async fn handle_connection(
     };
     let device_id = find_or_create_device(&*db, &user_id, &device_name, &auth.device_key).await?;
 
-    // Schema version guard — delete only this device's series, not all devices for this provider
+    // Schema version guard — delete this device's events and reset cursor
     if auth.schema_version != SCHEMA_VERSION {
-        if let Err(e) = vm.delete_device_series(&device_id).await {
-            tracing::warn!("failed to delete VM series for device {device_id}: {e}");
+        if let Err(e) = events.delete_device_events(&device_id).await {
+            tracing::warn!("failed to delete events for device {device_id}: {e}");
         }
         // Reset server cursor so client re-syncs all data
         if let Err(e) = db.reset_cursor(&device_id, &provider).await {
@@ -145,7 +146,7 @@ pub async fn handle_connection(
                 let batch: SyncBatchPayload = bincode::deserialize(&raw)?;
                 // Ensure cursor exists for this batch's provider (may differ from auth provider)
                 db.ensure_cursor(&device_id, &batch.provider).await?;
-                match handle_sync_batch(&batch, &user_id, &device_id, &batch.provider, &*db, &vm, &batch_semaphore).await {
+                match handle_sync_batch(&batch, &user_id, &device_id, &batch.provider, &*db, &*events, &batch_semaphore).await {
                     Ok(last_ts) => {
                         let ack = SyncAckPayload { last_ts_ms: last_ts };
                         write_frame(&mut writer, MsgType::SyncAck, &bincode::serialize(&ack)?).await?;
@@ -200,7 +201,7 @@ async fn handle_sync_batch(
     device_id: &str,
     provider: &str,
     db: &dyn DatabaseRepo,
-    vm: &VictoriaMetrics,
+    events: &dyn EventStore,
     batch_semaphore: &Semaphore,
 ) -> Result<i64> {
     if batch.items.is_empty() {
@@ -208,20 +209,58 @@ async fn handle_sync_batch(
         return Ok(current);
     }
 
-    // Build Prometheus text directly (avoids intermediate MetricPoint allocations)
-    let prom_text = build_prometheus_text(batch, user_id, device_id, provider);
+    let empty = String::new();
 
-    // Acquire permit — waits if max concurrent writes already in progress
+    // Convert SyncItems to ServerEvents (resolve dict IDs to strings)
+    let server_events: Vec<ServerEvent> = batch.items.iter().map(|item| {
+        let model = batch.dict.get(&item.event.model_id).cloned().unwrap_or_default();
+        let project = batch.dict.get(&item.event.project_name_id)
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .unwrap_or_default();
+        let bare_msg_id = item.message_id.split(':').next().unwrap_or(&item.message_id);
+
+        // Map token columns by name (supports different providers)
+        let mut se = ServerEvent {
+            device_id: device_id.to_string(),
+            user_id: user_id.to_string(),
+            msg_id: bare_msg_id.to_string(),
+            ts_ms: item.ts_ms,
+            provider: provider.to_string(),
+            model,
+            project,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        };
+
+        for (i, col) in batch.token_columns.iter().enumerate() {
+            if i >= item.event.tokens.len() { break; }
+            match col.as_str() {
+                "input" => se.input_tokens = item.event.tokens[i],
+                "output" => se.output_tokens = item.event.tokens[i],
+                "cache_create" => se.cache_creation_input_tokens = item.event.tokens[i],
+                "cache_read" => se.cache_read_input_tokens = item.event.tokens[i],
+                // cached_input ⊂ input, reasoning_output ⊂ output — subsets, not additional
+                "cached_input" | "reasoning_output" => {}
+                _ => {}
+            }
+        }
+
+        se
+    }).collect();
+
+    // Acquire permit
     let _permit = batch_semaphore.acquire().await
         .map_err(|_| anyhow::anyhow!("batch semaphore closed"))?;
 
-    // Write to VM first — cursor MUST NOT advance on failure
-    vm.write_prometheus_text(prom_text).await?;
+    // Write to EventStore — dedup by (device_id, msg_id) is handled internally
+    events.upsert_events(&server_events).await?;
 
-    // Drop permit before cursor update (doesn't need the permit)
     drop(_permit);
 
-    // VM write succeeded → advance cursor to max ts in this batch
+    // Advance cursor to max ts in this batch
     let max_ts = batch.items.iter().map(|i| i.ts_ms).max().unwrap_or(0);
     db.advance_cursor(device_id, provider, max_ts).await?;
 
@@ -230,6 +269,7 @@ async fn handle_sync_batch(
 
 // ─── Prometheus value escaping ────────────────────────────────────────────────
 
+#[allow(dead_code)]
 fn escape_prom_value(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -243,15 +283,15 @@ fn escape_prom_value(s: &str) -> String {
     out
 }
 
-// ─── Direct Prometheus text builder (avoids MetricPoint allocations) ──────────
+// ─── Direct Prometheus text builder ──────────────────────────────────────────
 
+#[allow(dead_code)]
 fn build_prometheus_text(
     batch: &SyncBatchPayload,
     user_id: &str,
     device_id: &str,
     provider: &str,
 ) -> String {
-    use std::collections::HashMap;
     use std::fmt::Write;
 
     let empty = String::new();
@@ -263,72 +303,51 @@ fn build_prometheus_text(
         name.chars().filter(|c| c.is_alphanumeric() || *c == '_').collect::<String>()
     }).collect();
 
-    // Pre-aggregate: group by (hour_bucket_ms, model, project) → sum tokens + count events.
-    // This keeps VM series count low (~model×type instead of ~events×type).
-    // Same (hour, model, project, type) overwrites on re-sync → idempotent.
-    #[derive(Default)]
-    struct Agg {
-        tokens: Vec<u64>,   // per-type sums, same order as safe_columns
-        events: u64,
-        usage_total: u64,
-    }
-    // Key: (hour_ms, model_id, project_name_id)
-    let mut aggs: HashMap<(i64, u32, u32), Agg> = HashMap::new();
+    // Write each event with its original timestamp (ms).
+    // No pre-aggregation — VM stores multiple data points per series.
+    // Series count stays low: model × type × project (~20 series).
+    // Data point count = event count (VM handles millions per series).
+    // sum_over_time[step] at any granularity gives exact results.
+    let mut out = String::with_capacity(batch.items.len() * 200);
 
     for item in &batch.items {
         if item.event.tokens.len() != safe_columns.len() { continue; }
-        let hour_ms = item.ts_ms - (item.ts_ms % 3_600_000);
-        let key = (hour_ms, item.event.model_id, item.event.project_name_id);
-        let agg = aggs.entry(key).or_insert_with(|| Agg {
-            tokens: vec![0u64; safe_columns.len()],
-            events: 0,
-            usage_total: 0,
-        });
-        for (i, &val) in item.event.tokens.iter().enumerate() {
-            agg.tokens[i] += val;
-        }
-        agg.events += 1;
-        agg.usage_total += item.usage_total;
-    }
 
-    let mut out = String::with_capacity(aggs.len() * 300);
-
-    for ((hour_ms, model_id, project_id), agg) in &aggs {
-        let model = escape_prom_value(batch.dict.get(model_id).unwrap_or(&empty));
+        let model = escape_prom_value(batch.dict.get(&item.event.model_id).unwrap_or(&empty));
         let project = batch.dict
-            .get(project_id)
+            .get(&item.event.project_name_id)
             .filter(|s| !s.is_empty())
             .map(|s| escape_prom_value(s))
             .unwrap_or_default();
 
-        // Per-type token metrics (no msg label — pre-aggregated, low cardinality)
+        // Per-type tokens at original event timestamp
         for (i, col_name) in safe_columns.iter().enumerate() {
-            let val = agg.tokens[i];
+            let val = item.event.tokens[i];
             if val == 0 || col_name.is_empty() { continue; }
             write!(
                 out,
                 "toki_tokens_total{{model=\"{model}\",provider=\"{esc_provider}\",user=\"{esc_user}\",device=\"{esc_device}\",project=\"{project}\",type=\"{col_name}\"}} {val} {ts}\n",
-                ts = hour_ms,
+                ts = item.ts_ms,
             ).unwrap();
         }
 
-        // Event count
-        if agg.events > 0 {
+        // Event count (1 per NEW event only — corrections don't increment because
+        // they're updating a previously counted event, not adding a new one)
+        if !item.is_correction {
             write!(
                 out,
-                "toki_events_total{{model=\"{model}\",provider=\"{esc_provider}\",user=\"{esc_user}\",device=\"{esc_device}\",project=\"{project}\"}} {ev} {ts}\n",
-                ev = agg.events,
-                ts = hour_ms,
+                "toki_events_total{{model=\"{model}\",provider=\"{esc_provider}\",user=\"{esc_user}\",device=\"{esc_device}\",project=\"{project}\"}} 1 {ts}\n",
+                ts = item.ts_ms,
             ).unwrap();
         }
 
         // Usage total
-        if agg.usage_total > 0 {
+        if item.usage_total > 0 {
             write!(
                 out,
                 "toki_usage_total{{model=\"{model}\",provider=\"{esc_provider}\",user=\"{esc_user}\",device=\"{esc_device}\",project=\"{project}\"}} {usage} {ts}\n",
-                usage = agg.usage_total,
-                ts = hour_ms,
+                usage = item.usage_total,
+                ts = item.ts_ms,
             ).unwrap();
         }
     }
@@ -418,7 +437,7 @@ mod tests {
                 project_name_id: 4,
                 tokens: vec![100, 50, 0, 0],
             },
-            usage_total: 150,
+            usage_total: 150, is_correction: false,
         };
         let batch  = make_batch(vec![item]);
         let points = build_metric_points(&batch, "user-1", "device-1", "claude_code");
@@ -446,6 +465,7 @@ mod tests {
                 tokens: vec![10, 20, 5, 3],
             },
             usage_total: 38,
+            is_correction: false,
         };
         let batch  = make_batch(vec![item]);
         let points = build_metric_points(&batch, "user-1", "device-1", "claude_code");
@@ -465,6 +485,7 @@ mod tests {
                 tokens: vec![1, 0, 0, 0],
             },
             usage_total: 1,
+            is_correction: false,
         };
         let batch  = make_batch(vec![item]);
         let points = build_metric_points(&batch, "user-xyz", "device-1", "claude_code");
@@ -496,6 +517,7 @@ mod tests {
                 tokens: vec![200, 100, 30, 50],
             },
             usage_total: 380,
+            is_correction: false,
         };
         let batch = make_batch_with_columns(
             vec![item],
@@ -532,7 +554,7 @@ mod tests {
                 project_name_id: 4,
                 tokens: vec![100, 50, 0, 0],
             },
-            usage_total: 150,
+            usage_total: 150, is_correction: false,
         };
         let batch = make_batch(vec![item]);
         let text = build_prometheus_text(&batch, "user-1", "device-1", "claude_code");

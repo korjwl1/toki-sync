@@ -1,6 +1,7 @@
 mod auth;
 mod config;
 mod db;
+mod events;
 mod metrics;
 mod pricing;
 mod server;
@@ -11,7 +12,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::auth::{BruteForceGuard, JwtManager};
-use crate::config::Config;
+use crate::config::{Config, default_vm_url};
 use crate::db::{DatabaseRepo, open_database};
 use crate::metrics::VictoriaMetrics;
 use crate::server::{build_router, http::{AppState, DynamicSettings}, tcp::run_tcp_server};
@@ -94,7 +95,32 @@ async fn main() -> Result<()> {
         config.auth.brute_force_window_secs,
         config.auth.brute_force_lockout_secs,
     ));
-    let vm = Arc::new(VictoriaMetrics::new(&config.backend.vm_url));
+    // Initialize event store based on config
+    let event_store: Arc<dyn crate::events::EventStore> = match config.events.backend.as_str() {
+        "clickhouse" => {
+            if config.events.clickhouse_url.is_empty() {
+                anyhow::bail!("events.backend=clickhouse but events.clickhouse_url is empty");
+            }
+            Arc::new(crate::events::clickhouse::ClickHouseEventStore::new(&config.events.clickhouse_url))
+        }
+        _ => {
+            let path = std::path::Path::new(&config.events.fjall_path);
+            Arc::new(crate::events::fjall_store::FjallEventStore::open(path)
+                .context("failed to open Fjall event store")?)
+        }
+    };
+    tracing::info!("Event store: {} ({})", config.events.backend,
+        if config.events.backend == "fjall" { &config.events.fjall_path } else { &config.events.clickhouse_url });
+
+    // VM is optional: only for PromQL proxy endpoints (Grafana compatibility)
+    let vm: Option<Arc<VictoriaMetrics>> = if !config.backend.vm_url.is_empty()
+        && config.backend.vm_url != default_vm_url()
+    {
+        Some(Arc::new(VictoriaMetrics::new(&config.backend.vm_url)))
+    } else {
+        None
+    };
+
     let oidc_state_store = Arc::new(crate::auth::oidc::OidcStateStore::new(600)); // 10 min TTL
 
     if !config.auth.oidc_issuer.is_empty() {
@@ -130,7 +156,7 @@ async fn main() -> Result<()> {
     tracing::info!("Pricing table loaded ({} models)", if pricing.is_empty() { 0 } else { 1 }); // TODO: expose count
 
     let state = AppState {
-        db, jwt, brute, vm,
+        db, jwt, brute, vm, events: event_store.clone(),
         access_token_ttl_secs: config.auth.access_token_ttl_secs,
         oidc_state_store,
         oidc_discovery_cache: Arc::new(tokio::sync::RwLock::new(None)),
@@ -140,8 +166,32 @@ async fn main() -> Result<()> {
         device_poll_tracker: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         dynamic_settings,
         trust_proxy: config.server.trust_proxy,
-        pricing: Arc::new(pricing),
+        pricing: Arc::new(tokio::sync::RwLock::new(pricing)),
     };
+
+    // -- Periodic pricing refresh (every 6 hours) ------------------------------
+    {
+        let pricing = state.pricing.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(6 * 3600));
+            interval.tick().await; // skip first immediate tick
+            loop {
+                interval.tick().await;
+                let cache_path = crate::pricing::default_cache_path();
+                let new_pricing = tokio::task::spawn_blocking(move || {
+                    crate::pricing::fetch_pricing(&cache_path)
+                }).await;
+                match new_pricing {
+                    Ok(p) if !p.is_empty() => {
+                        *pricing.write().await = p;
+                        tracing::info!("Pricing table refreshed");
+                    }
+                    Ok(_) => tracing::warn!("Pricing refresh returned empty table, keeping old"),
+                    Err(e) => tracing::warn!("Pricing refresh failed: {e}"),
+                }
+            }
+        });
+    }
 
     // -- TCP sync server ------------------------------------------------------
     let tcp_addr: SocketAddr = format!("{}:{}", config.server.bind, config.server.tcp_port)
@@ -151,11 +201,11 @@ async fn main() -> Result<()> {
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let tcp_db  = state.db.clone();
     let tcp_jwt = state.jwt.clone();
-    let tcp_vm  = state.vm.clone();
+    let tcp_events = event_store.clone();
     let max_concurrent_writes = config.server.max_concurrent_writes;
 
     tokio::spawn(async move {
-        if let Err(e) = run_tcp_server(tcp_db, tcp_jwt, tcp_vm, tcp_addr, max_concurrent_writes, shutdown_rx).await {
+        if let Err(e) = run_tcp_server(tcp_db, tcp_jwt, tcp_events, tcp_addr, max_concurrent_writes, shutdown_rx).await {
             tracing::error!("TCP server error: {e}");
         }
     });

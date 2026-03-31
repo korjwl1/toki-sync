@@ -7,7 +7,7 @@ use tokio::sync::{watch, Semaphore};
 
 use crate::auth::JwtManager;
 use crate::db::DatabaseRepo;
-use crate::metrics::VictoriaMetrics;
+use crate::events::EventStore;
 use crate::sync::handler::handle_connection;
 
 const MAX_TCP_CONNECTIONS: usize = 500;
@@ -19,7 +19,7 @@ const MAX_TCP_CONNECTIONS: usize = 500;
 pub async fn run_tcp_server(
     db:  Arc<dyn DatabaseRepo>,
     jwt: Arc<JwtManager>,
-    vm:  Arc<VictoriaMetrics>,
+    events: Arc<dyn EventStore>,
     addr: SocketAddr,
     max_concurrent_writes: usize,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -50,12 +50,12 @@ pub async fn run_tcp_server(
                 };
                 let db  = db.clone();
                 let jwt = jwt.clone();
-                let vm  = vm.clone();
+                let ev  = events.clone();
                 let batch_sem = batch_semaphore.clone();
 
                 let handle = tokio::spawn(async move {
                     tracing::debug!("TCP connection from {peer_addr}");
-                    if let Err(e) = handle_connection(stream, db, jwt, vm, batch_sem).await {
+                    if let Err(e) = handle_connection(stream, db, jwt, ev, batch_sem).await {
                         tracing::warn!("TCP connection error from {peer_addr}: {e}");
                     }
                     drop(permit); // released when connection closes

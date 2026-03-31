@@ -67,7 +67,8 @@ pub struct AppState {
     pub db: Arc<dyn DatabaseRepo>,
     pub jwt: Arc<JwtManager>,
     pub brute: Arc<BruteForceGuard>,
-    pub vm: Arc<VictoriaMetrics>,
+    pub vm: Option<Arc<VictoriaMetrics>>,
+    pub events: Arc<dyn crate::events::EventStore>,
     pub access_token_ttl_secs: u64,
     pub oidc_state_store: Arc<OidcStateStore>,
     /// Cached OIDC discovery result with TTL.
@@ -86,7 +87,7 @@ pub struct AppState {
     /// Set to true when deployed behind a reverse proxy (e.g. Caddy, nginx).
     pub trust_proxy: bool,
     /// Pricing table for cost{} query computation.
-    pub pricing: Arc<crate::pricing::PricingTable>,
+    pub pricing: Arc<tokio::sync::RwLock<crate::pricing::PricingTable>>,
 }
 
 pub async fn get_oidc_discovery(state: &AppState) -> Result<OidcDiscovery, AppError> {

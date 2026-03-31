@@ -65,7 +65,7 @@ pub async fn me_delete_device(
     }
 
     // Ownership confirmed -- safe to delete VM data
-    if let Err(e) = state.vm.delete_device_series(&device_id).await {
+    if let Err(e) = state.events.delete_device_events(&device_id).await {
         tracing::warn!("failed to delete VM series for device {device_id}: {e}");
     }
 

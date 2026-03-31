@@ -1,0 +1,320 @@
+use std::path::Path;
+
+use anyhow::{Context, Result};
+use fjall::{Database as FjallDatabase, Keyspace, KeyspaceCreateOptions};
+
+use super::{EventStore, ServerEvent, UserFilter};
+
+/// Fjall-backed event store with msg_id dedup.
+///
+/// Replicates the local daemon's dedup pattern (toki/src/db.rs):
+/// - `events` keyspace: sorted by [ts_ms(8 BE)][device_id\0msg_id]
+/// - `idx_msg` keyspace: [device_id\0msg_id] → events_key (dedup lookup)
+///
+/// On upsert: if (device_id, msg_id) already exists, delete old event, insert new.
+/// Atomic via OwnedWriteBatch.
+pub struct FjallEventStore {
+    db: FjallDatabase,
+    events: Keyspace,
+    idx_msg: Keyspace,
+}
+
+impl FjallEventStore {
+    pub fn open(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+
+        let db = FjallDatabase::builder(path)
+            .open()
+            .context("open fjall event store")?;
+
+        let opts = || KeyspaceCreateOptions::default();
+        let events = db.keyspace("events", opts).context("open events keyspace")?;
+        let idx_msg = db.keyspace("idx_msg", opts).context("open idx_msg keyspace")?;
+
+        Ok(FjallEventStore { db, events, idx_msg })
+    }
+
+    /// Build the events keyspace key: [ts_ms(8 bytes BE)][device_id\0msg_id]
+    fn event_key(ts_ms: i64, device_id: &str, msg_id: &str) -> Vec<u8> {
+        let mut key = Vec::with_capacity(8 + device_id.len() + 1 + msg_id.len());
+        key.extend_from_slice(&ts_ms.to_be_bytes());
+        key.extend_from_slice(device_id.as_bytes());
+        key.push(0);
+        key.extend_from_slice(msg_id.as_bytes());
+        key
+    }
+
+    /// Build the idx_msg key: [device_id\0msg_id]
+    fn idx_key(device_id: &str, msg_id: &str) -> Vec<u8> {
+        let mut key = Vec::with_capacity(device_id.len() + 1 + msg_id.len());
+        key.extend_from_slice(device_id.as_bytes());
+        key.push(0);
+        key.extend_from_slice(msg_id.as_bytes());
+        key
+    }
+
+    /// Upsert a single event within a batch.
+    fn upsert_one(&self, batch: &mut fjall::OwnedWriteBatch, event: &ServerEvent) {
+        let idx_key = Self::idx_key(&event.device_id, &event.msg_id);
+        let new_event_key = Self::event_key(event.ts_ms, &event.device_id, &event.msg_id);
+        let value = bincode::serialize(event).expect("ServerEvent serialize");
+
+        // Check if previous event exists for this (device_id, msg_id)
+        if let Ok(Some(prev_key)) = self.idx_msg.get(&idx_key) {
+            // Delete old event from events keyspace
+            batch.remove(&self.events, prev_key.to_vec());
+        }
+
+        // Insert new event + update idx_msg
+        batch.insert(&self.events, new_event_key.clone(), value);
+        batch.insert(&self.idx_msg, idx_key, new_event_key);
+    }
+
+    /// Iterate events in time range [since_ms, until_ms), applying user filter.
+    fn scan_events(
+        &self,
+        since_ms: i64,
+        until_ms: i64,
+        filter: &UserFilter,
+    ) -> Vec<ServerEvent> {
+        let start_key = since_ms.to_be_bytes().to_vec();
+        let mut results = Vec::new();
+
+        for guard in self.events.range(start_key..) {
+            let kv = match guard.into_inner() {
+                Ok(kv) => kv,
+                Err(_) => continue,
+            };
+            let key = &kv.0;
+            if key.len() < 8 { continue; }
+
+            let ts = i64::from_be_bytes(match key[..8].try_into() {
+                Ok(b) => b,
+                Err(_) => continue,
+            });
+            if ts >= until_ms { break; }
+
+            let event: ServerEvent = match bincode::deserialize(&kv.1) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            // Apply user filter
+            match filter {
+                UserFilter::Single(uid) => {
+                    if event.user_id != *uid { continue; }
+                }
+                UserFilter::Multiple(uids) => {
+                    if !uids.contains(&event.user_id) { continue; }
+                }
+                UserFilter::All => {}
+            }
+
+            results.push(event);
+        }
+
+        results
+    }
+}
+
+// Fjall types are thread-safe.
+unsafe impl Send for FjallEventStore {}
+unsafe impl Sync for FjallEventStore {}
+
+#[async_trait::async_trait]
+impl EventStore for FjallEventStore {
+    async fn upsert_events(&self, events: &[ServerEvent]) -> Result<()> {
+        if events.is_empty() { return Ok(()); }
+
+        let store_ptr = self as *const FjallEventStore as usize;
+        let events = events.to_vec();
+
+        tokio::task::spawn_blocking(move || {
+            // SAFETY: FjallEventStore lives in Arc, outlives this closure.
+            let store = unsafe { &*(store_ptr as *const FjallEventStore) };
+            let mut batch = store.db.batch();
+            for event in &events {
+                store.upsert_one(&mut batch, event);
+            }
+            batch.commit().context("fjall batch commit")?;
+            Ok(())
+        })
+        .await
+        .context("spawn_blocking panicked")?
+    }
+
+    async fn query_events(
+        &self,
+        since_ms: i64,
+        until_ms: i64,
+        filter: UserFilter,
+    ) -> Result<Vec<ServerEvent>> {
+        let store_ptr = self as *const FjallEventStore as usize;
+
+        tokio::task::spawn_blocking(move || {
+            let store = unsafe { &*(store_ptr as *const FjallEventStore) };
+            Ok(store.scan_events(since_ms, until_ms, &filter))
+        })
+        .await
+        .context("spawn_blocking panicked")?
+    }
+
+    async fn delete_device_events(&self, device_id: &str) -> Result<()> {
+        let store_ptr = self as *const FjallEventStore as usize;
+        let device_id = device_id.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let store = unsafe { &*(store_ptr as *const FjallEventStore) };
+            let mut batch = store.db.batch();
+
+            // Scan idx_msg for entries with this device_id prefix
+            let prefix = {
+                let mut p = device_id.as_bytes().to_vec();
+                p.push(0);
+                p
+            };
+
+            let mut idx_keys_to_delete = Vec::new();
+            for guard in store.idx_msg.prefix(&prefix) {
+                let kv = match guard.into_inner() {
+                    Ok(kv) => kv,
+                    Err(_) => continue,
+                };
+                batch.remove(&store.events, kv.1.to_vec());
+                idx_keys_to_delete.push(kv.0.to_vec());
+            }
+
+            for key in idx_keys_to_delete {
+                batch.remove(&store.idx_msg, key);
+            }
+
+            batch.commit().context("fjall delete_device commit")?;
+            Ok(())
+        })
+        .await
+        .context("spawn_blocking panicked")?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn make_event(device: &str, msg: &str, ts: i64, model: &str, input: u64) -> ServerEvent {
+        ServerEvent {
+            device_id: device.to_string(),
+            user_id: "user1".to_string(),
+            msg_id: msg.to_string(),
+            ts_ms: ts,
+            provider: "claude_code".to_string(),
+            model: model.to_string(),
+            project: "test".to_string(),
+            input_tokens: input,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_upsert_dedup() {
+        let dir = TempDir::new().unwrap();
+        let store = FjallEventStore::open(dir.path()).unwrap();
+
+        let e1 = make_event("d1", "msg_abc", 1000, "opus", 8);
+        store.upsert_events(&[e1]).await.unwrap();
+
+        let events = store.query_events(0, i64::MAX, UserFilter::All).await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].input_tokens, 8);
+
+        // Upsert same msg_id — should replace
+        let e2 = make_event("d1", "msg_abc", 2000, "opus", 246);
+        store.upsert_events(&[e2]).await.unwrap();
+
+        let events = store.query_events(0, i64::MAX, UserFilter::All).await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].input_tokens, 246);
+        assert_eq!(events[0].ts_ms, 2000);
+    }
+
+    #[tokio::test]
+    async fn test_different_msg_ids() {
+        let dir = TempDir::new().unwrap();
+        let store = FjallEventStore::open(dir.path()).unwrap();
+
+        let e1 = make_event("d1", "msg_a", 1000, "opus", 100);
+        let e2 = make_event("d1", "msg_b", 2000, "opus", 200);
+        store.upsert_events(&[e1, e2]).await.unwrap();
+
+        let events = store.query_events(0, i64::MAX, UserFilter::All).await.unwrap();
+        assert_eq!(events.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_time_range_filter() {
+        let dir = TempDir::new().unwrap();
+        let store = FjallEventStore::open(dir.path()).unwrap();
+
+        store.upsert_events(&[
+            make_event("d1", "a", 1000, "opus", 100),
+            make_event("d1", "b", 2000, "opus", 200),
+            make_event("d1", "c", 3000, "opus", 300),
+        ]).await.unwrap();
+
+        let events = store.query_events(1500, 2500, UserFilter::All).await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].input_tokens, 200);
+    }
+
+    #[tokio::test]
+    async fn test_user_filter() {
+        let dir = TempDir::new().unwrap();
+        let store = FjallEventStore::open(dir.path()).unwrap();
+
+        let mut e1 = make_event("d1", "a", 1000, "opus", 100);
+        e1.user_id = "alice".to_string();
+        let mut e2 = make_event("d2", "b", 2000, "opus", 200);
+        e2.user_id = "bob".to_string();
+        store.upsert_events(&[e1, e2]).await.unwrap();
+
+        let events = store.query_events(0, i64::MAX, UserFilter::Single("alice".into())).await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].input_tokens, 100);
+    }
+
+    #[tokio::test]
+    async fn test_delete_device() {
+        let dir = TempDir::new().unwrap();
+        let store = FjallEventStore::open(dir.path()).unwrap();
+
+        store.upsert_events(&[
+            make_event("d1", "a", 1000, "opus", 100),
+            make_event("d2", "b", 2000, "opus", 200),
+        ]).await.unwrap();
+
+        store.delete_device_events("d1").await.unwrap();
+
+        let events = store.query_events(0, i64::MAX, UserFilter::All).await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].device_id, "d2");
+    }
+
+    #[tokio::test]
+    async fn test_cross_device_dedup_isolation() {
+        let dir = TempDir::new().unwrap();
+        let store = FjallEventStore::open(dir.path()).unwrap();
+
+        // Same msg_id, different devices — should NOT dedup each other
+        store.upsert_events(&[
+            make_event("d1", "msg_same", 1000, "opus", 100),
+            make_event("d2", "msg_same", 2000, "opus", 200),
+        ]).await.unwrap();
+
+        let events = store.query_events(0, i64::MAX, UserFilter::All).await.unwrap();
+        assert_eq!(events.len(), 2);
+    }
+}

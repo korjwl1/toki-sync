@@ -6,6 +6,7 @@ use axum::{
 use serde::Deserialize;
 
 use super::super::http::{AppError, AppState, extract_jwt};
+use crate::events::{UserFilter, ServerEvent};
 use crate::metrics::backend::MetricsBackend;
 
 // ─── PromQL proxy ────────────────────────────────────────────────────────────
@@ -49,6 +50,46 @@ enum Scope {
     Team(String),
     All,
     Invalid,
+}
+
+/// Resolve scope into a UserFilter for EventStore queries.
+async fn resolve_user_filter(
+    state: &AppState,
+    user_id: &str,
+    requested_scope: &str,
+) -> Result<UserFilter, AppError> {
+    let max_scope = state.dynamic_settings.max_query_scope().await;
+    let is_admin = state.db.user_is_admin(user_id).await.map_err(AppError::internal)?;
+
+    if is_admin {
+        return Ok(UserFilter::All);
+    }
+
+    match parse_scope(requested_scope) {
+        Scope::Self_ => Ok(UserFilter::Single(user_id.to_string())),
+        Scope::Team(team_id) => {
+            if max_scope == "self" {
+                return Err(AppError::forbidden("team scope not enabled"));
+            }
+            let role = state.db.get_team_member_role(&team_id, user_id).await.map_err(AppError::internal)?;
+            if role.is_none() {
+                return Err(AppError::forbidden("not a member of this team"));
+            }
+            let members = state.db.list_team_members(&team_id).await.map_err(AppError::internal)?;
+            let user_ids: Vec<String> = members.iter().map(|m| m.user_id.clone()).collect();
+            Ok(UserFilter::Multiple(user_ids))
+        }
+        Scope::All => {
+            if max_scope != "all" {
+                return Err(AppError::forbidden("global scope not enabled"));
+            }
+            Ok(UserFilter::All)
+        }
+        Scope::Invalid => Err(AppError {
+            status: StatusCode::BAD_REQUEST,
+            message: "invalid scope".into(),
+        }),
+    }
 }
 
 fn parse_scope(s: &str) -> Scope {
@@ -126,14 +167,19 @@ pub async fn promql_query(
     let requested_scope = params.scope.as_deref().unwrap_or("self");
     let scoped = resolve_scope(&state, &params.query, &claims.sub, requested_scope).await?;
 
+    let vm = state.vm.as_ref().ok_or_else(|| AppError {
+        status: StatusCode::NOT_IMPLEMENTED,
+        message: "PromQL proxy requires VictoriaMetrics backend (not configured)".into(),
+    })?;
+
     let rewritten = rewrite_toki_query(&scoped);
+    let pricing = state.pricing.read().await;
     let result = if rewritten.needs_cost_compute {
-        // cost{} → fetch per-type tokens from VM, apply pricing server-side
-        let vm_result = state.vm.query(&rewritten.vm_query, params.time).await.map_err(AppError::bad_gateway)?;
-        let computed = compute_cost_from_vm_response(&vm_result, &state.pricing, &rewritten.original_query)?;
+        let vm_result = vm.query(&rewritten.vm_query, params.time).await.map_err(AppError::bad_gateway)?;
+        let computed = compute_cost_from_vm_response(&vm_result, &pricing, &rewritten.original_query)?;
         bytes::Bytes::from(computed)
     } else {
-        state.vm.query(&rewritten.vm_query, params.time).await.map_err(AppError::bad_gateway)?
+        vm.query(&rewritten.vm_query, params.time).await.map_err(AppError::bad_gateway)?
     };
 
     Ok((
@@ -152,15 +198,21 @@ pub async fn promql_query_range(
     let requested_scope = params.scope.as_deref().unwrap_or("self");
     let scoped = resolve_scope(&state, &params.query, &claims.sub, requested_scope).await?;
 
+    let vm = state.vm.as_ref().ok_or_else(|| AppError {
+        status: StatusCode::NOT_IMPLEMENTED,
+        message: "PromQL proxy requires VictoriaMetrics backend (not configured)".into(),
+    })?;
+
     let rewritten = rewrite_toki_query(&scoped);
+    let pricing = state.pricing.read().await;
     let step = params.step.as_deref().unwrap_or("60s");
     let result = if rewritten.needs_cost_compute {
-        let vm_result = state.vm.query_range(&rewritten.vm_query, params.start, params.end, step)
+        let vm_result = vm.query_range(&rewritten.vm_query, params.start, params.end, step)
             .await.map_err(AppError::bad_gateway)?;
-        let computed = compute_cost_from_vm_response(&vm_result, &state.pricing, &rewritten.original_query)?;
+        let computed = compute_cost_from_vm_response(&vm_result, &pricing, &rewritten.original_query)?;
         bytes::Bytes::from(computed)
     } else {
-        state.vm.query_range(&rewritten.vm_query, params.start, params.end, step)
+        vm.query_range(&rewritten.vm_query, params.start, params.end, step)
             .await.map_err(AppError::bad_gateway)?
     };
 
@@ -205,32 +257,25 @@ pub async fn toki_query(
         .map(|s| parse_duration_secs(s))
         .unwrap_or(3600);
 
-    // Query VM at hourly granularity with sum_over_time[3599s] to avoid
-    // double-counting at boundaries. VM window is [T-d, T] (both inclusive),
-    // so [T-3599, T] and [T+1, T+3600] don't overlap.
-    let vm_bytes = if is_range {
-        let hourly_query = replace_range_vector(&rewritten.vm_query, 3599);
-        state.vm.query_range(&hourly_query, start_ts, end_ts, "3600")
-            .await.map_err(AppError::bad_gateway)?
-    } else {
-        // Instant: single value covering start→end
-        let range_secs = (end_ts - start_ts).max(1);
-        let vm_query = if rewritten.vm_query.contains('(') {
-            replace_range_vector(&rewritten.vm_query, range_secs)
-        } else {
-            let range_str = format!("{}s", range_secs);
-            format!("sum by (model) (sum_over_time({}[{}]))", rewritten.vm_query, range_str)
-        };
-        state.vm.query(&vm_query, Some(end_ts))
-            .await.map_err(AppError::bad_gateway)?
-    };
+    // ── Query from EventStore (deduped by msg_id) ──
+    //
+    // EventStore handles dedup: same (device_id, msg_id) → last value only.
+    // We query all events in [since, until) for the user, then aggregate
+    // with the same bucketing logic as the local daemon.
+    let since_ms = start_ts * 1000;
+    let until_ms = end_ts * 1000;
 
-    // Convert VM Prometheus JSON → toki JSON format
-    let step_secs: i64 = params.step.as_deref()
-        .map(|s| parse_duration_secs(s))
-        .unwrap_or(3600);
-    let toki_json = vm_response_to_toki_json(
-        &vm_bytes, &state.pricing, rewritten.needs_cost_compute, rewritten.is_events, step_secs,
+    // Build user filter from scope
+    let user_filter = resolve_user_filter(&state, &claims.sub, requested_scope).await?;
+
+    let all_events = state.events.query_events(since_ms, until_ms, user_filter)
+        .await.map_err(AppError::bad_gateway)?;
+
+    let pricing = state.pricing.read().await;
+    let effective_step = if is_range { step_secs } else { (end_ts - start_ts).max(1) };
+    let toki_json = aggregate_events_to_toki_json(
+        &all_events, effective_step, since_ms, until_ms,
+        rewritten.needs_cost_compute, rewritten.is_events, &rewritten.group_by, &pricing,
     )?;
 
     Ok((
@@ -240,14 +285,237 @@ pub async fn toki_query(
     ).into_response())
 }
 
-/// Convert Prometheus JSON response to toki-format JSON.
-/// Output matches `toki query --output-format json` exactly.
+/// Aggregate raw VM data using the exact same logic as the local daemon.
+///
+/// This is the correct approach: instead of relying on VM's sum_over_time
+/// (which has different window semantics), we fetch raw data points and
+/// bucket them identically to the local daemon's query engine.
+///
+/// Aggregate ServerEvents into toki JSON format.
+/// Uses the exact same bucketing logic as the local daemon (query.rs).
+///
+/// EventStore has already deduped by msg_id, so each event appears once.
+fn aggregate_events_to_toki_json(
+    events: &[ServerEvent],
+    step_secs: i64,
+    since_ms: i64,
+    until_ms: i64,
+    is_cost: bool,
+    is_events: bool,
+    group_by: &str,
+    pricing: &crate::pricing::PricingTable,
+) -> Result<Vec<u8>, AppError> {
+    use std::collections::BTreeMap;
+
+    let step_ms = step_secs * 1000;
+
+    #[derive(Default)]
+    struct ModelBucket {
+        input: u64, output: u64, cache_create: u64, cache_read: u64,
+        events: u64, cost_usd: Option<f64>,
+    }
+
+    let mut buckets: BTreeMap<(i64, String), ModelBucket> = BTreeMap::new();
+
+    for event in events {
+        // 1. Scan range check (EventStore already filters, but double-check)
+        if event.ts_ms < since_ms || event.ts_ms >= until_ms { continue; }
+
+        // 2. Bucket assignment
+        let bucket_ms = (event.ts_ms / step_ms) * step_ms;
+
+        // 3. Bucket filter (local daemon's overlap check)
+        if bucket_ms + step_ms <= since_ms || bucket_ms >= until_ms { continue; }
+
+        let bucket_sec = bucket_ms / 1000;
+        let group_key = match group_by {
+            "project" => &event.project,
+            "model" | _ => &event.model,
+        };
+
+        let entry = buckets.entry((bucket_sec, group_key.clone())).or_default();
+
+        // 4. Accumulate
+        if is_events {
+            entry.events += 1;
+        } else {
+            entry.input += event.input_tokens;
+            entry.output += event.output_tokens;
+            entry.cache_create += event.cache_creation_input_tokens;
+            entry.cache_read += event.cache_read_input_tokens;
+            entry.events += 1;  // always count events alongside tokens
+        }
+    }
+
+    // Compute cost if needed
+    if is_cost {
+        for ((_, model), bucket) in &mut buckets {
+            bucket.cost_usd = pricing.cost(model, bucket.input, bucket.output,
+                bucket.cache_create, bucket.cache_read);
+        }
+    }
+
+    // Build toki JSON
+    let mut periods: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
+    for ((bucket_sec, model), bucket) in &buckets {
+        let ts = chrono::DateTime::from_timestamp(*bucket_sec, 0)
+            .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S").to_string())
+            .unwrap_or_default();
+        let total = bucket.input + bucket.output + bucket.cache_create + bucket.cache_read;
+        let mut entry = serde_json::json!({
+            "model": model,
+            "input_tokens": bucket.input,
+            "output_tokens": bucket.output,
+            "cache_creation_input_tokens": bucket.cache_create,
+            "cache_read_input_tokens": bucket.cache_read,
+            "total_tokens": total,
+            "events": bucket.events,
+        });
+        if let Some(cost) = bucket.cost_usd.or_else(|| pricing.cost(model, bucket.input, bucket.output, bucket.cache_create, bucket.cache_read)) {
+            entry["cost_usd"] = serde_json::json!(cost);
+        }
+        let period_key = format!("{}|{}", ts, model);
+        periods.entry(period_key).or_default().push(entry);
+    }
+
+    let data: Vec<serde_json::Value> = periods.into_iter().map(|(period, models)| {
+        serde_json::json!({
+            "period": period,
+            "usage_per_models": models,
+        })
+    }).collect();
+
+    let output = serde_json::json!({
+        "providers": { "claude_code": data }
+    });
+
+    serde_json::to_vec(&output)
+        .map_err(|e| AppError::internal(anyhow::anyhow!("json serialize: {e}")))
+}
+
+/// Legacy: aggregate raw VM export data. Kept for reference but no longer used by toki_query.
+#[allow(dead_code)]
+fn aggregate_raw_to_toki_json(
+    raw_series: &[crate::metrics::vm::ExportedSeries],
+    step_secs: i64,
+    since_ms: i64,
+    until_ms: i64,
+    is_cost: bool,
+    is_events: bool,
+    group_by: &str,
+    pricing: &crate::pricing::PricingTable,
+) -> Result<Vec<u8>, AppError> {
+    use std::collections::BTreeMap;
+
+    let step_ms = step_secs * 1000;
+
+    #[derive(Default)]
+    struct ModelBucket {
+        input: u64, output: u64, cache_create: u64, cache_read: u64,
+        events: u64, cost_usd: Option<f64>,
+    }
+
+    // key: (bucket_sec, group_key) → ModelBucket
+    let mut buckets: BTreeMap<(i64, String), ModelBucket> = BTreeMap::new();
+
+    for series in raw_series {
+        // Use the query's group_by dimension as the group key
+        let group_key = series.labels.get(group_by)
+            .cloned()
+            .unwrap_or_else(|| "(total)".to_string());
+        let token_type = series.labels.get("type").map(|s| s.as_str());
+        let metric_name = series.labels.get("__name__").map(|s| s.as_str()).unwrap_or("");
+        let is_events_series = metric_name == "toki_events_total";
+
+        for (ts_ms, value) in series.timestamps.iter().zip(series.values.iter()) {
+            // 1. Scan range: [since_ms, until_ms) — match local's for_each_event
+            if *ts_ms < since_ms || *ts_ms >= until_ms { continue; }
+
+            // 2. Bucket assignment: floor(ts_ms / step_ms) * step_ms
+            let bucket_ms = (*ts_ms / step_ms) * step_ms;
+
+            // 3. Bucket filter: match local's overlap check
+            if bucket_ms + step_ms <= since_ms || bucket_ms >= until_ms { continue; }
+
+            let bucket_sec = bucket_ms / 1000;
+            let entry = buckets.entry((bucket_sec, group_key.clone())).or_default();
+
+            // 4. Accumulate
+            if is_events_series || is_events {
+                entry.events += value.round() as u64;
+            } else {
+                let uval = value.round() as u64;
+                match token_type {
+                    Some("input") => entry.input += uval,
+                    Some("output") => entry.output += uval,
+                    Some("cache_create") => entry.cache_create += uval,
+                    Some("cache_read") => entry.cache_read += uval,
+                    Some("cached_input") | Some("reasoning_output") => { /* subsets, not additional */ }
+                    _ => entry.input += uval,
+                }
+            }
+        }
+    }
+
+    // Compute cost if needed
+    if is_cost {
+        for ((_, model), bucket) in &mut buckets {
+            bucket.cost_usd = pricing.cost(model, bucket.input, bucket.output,
+                bucket.cache_create, bucket.cache_read);
+        }
+    }
+
+    // Build toki JSON: group by (period|model), identical to local's grouped_to_json
+    let mut periods: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
+    for ((bucket_sec, model), bucket) in &buckets {
+        let ts = chrono::DateTime::from_timestamp(*bucket_sec, 0)
+            .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S").to_string())
+            .unwrap_or_default();
+        let total = bucket.input + bucket.output + bucket.cache_create + bucket.cache_read;
+        let mut entry = serde_json::json!({
+            "model": model,
+            "input_tokens": bucket.input,
+            "output_tokens": bucket.output,
+            "cache_creation_input_tokens": bucket.cache_create,
+            "cache_read_input_tokens": bucket.cache_read,
+            "total_tokens": total,
+            "events": bucket.events,
+        });
+        if let Some(cost) = bucket.cost_usd.or_else(|| pricing.cost(model, bucket.input, bucket.output, bucket.cache_create, bucket.cache_read)) {
+            entry["cost_usd"] = serde_json::json!(cost);
+        }
+        let period_key = format!("{}|{}", ts, model);
+        periods.entry(period_key).or_default().push(entry);
+    }
+
+    let data: Vec<serde_json::Value> = periods.into_iter().map(|(period, models)| {
+        serde_json::json!({
+            "period": period,
+            "usage_per_models": models,
+        })
+    }).collect();
+
+    let output = serde_json::json!({
+        "providers": {
+            "claude_code": data,
+        }
+    });
+
+    serde_json::to_vec(&output)
+        .map_err(|e| AppError::internal(anyhow::anyhow!("json serialize: {e}")))
+}
+
+/// Legacy: Convert Prometheus JSON response to toki-format JSON.
+/// Kept for promql_query/promql_query_range endpoints (Grafana compatibility).
+#[allow(dead_code)]
 fn vm_response_to_toki_json(
     vm_bytes: &[u8],
     pricing: &crate::pricing::PricingTable,
     is_cost: bool,
     is_events: bool,
     step_secs: i64,
+    start_ts: i64,
+    end_ts: i64,
 ) -> Result<Vec<u8>, AppError> {
     let vm: serde_json::Value = serde_json::from_slice(vm_bytes)
         .map_err(|e| AppError::internal(anyhow::anyhow!("invalid VM response: {e}")))?;
@@ -291,10 +559,13 @@ fn vm_response_to_toki_json(
             r["values"].as_array().map(|vals| {
                 vals.iter().filter_map(|pair| {
                     let raw_ts = pair[0].as_f64()? as i64;
-                    // Raw hourly data point timestamp = hour start.
-                    // Floor to requested step, matching local daemon's
-                    // floor(event_ts / step) * step bucketing.
-                    let floored = (raw_ts / step_secs) * step_secs;
+                    // Map VM backward-looking eval time → local forward-looking bucket.
+                    // VM eval at T covers [T-step, T]; local bucket B covers [B, B+step).
+                    // So bucket = T - step.
+                    let bucket = raw_ts - step_secs;
+                    // Apply local daemon's range filter: bucket + step > start AND bucket < end
+                    if bucket + step_secs <= start_ts || bucket >= end_ts { return None; }
+                    let floored = bucket;
                     let ts = chrono::DateTime::from_timestamp(floored, 0)
                         .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S").to_string())?;
                     let val: f64 = pair[1].as_str()?.parse().ok()?;
@@ -456,6 +727,7 @@ fn parse_duration_secs(s: &str) -> i64 {
 /// Extract the bare metric selector from a PromQL expression.
 /// "sum by (model, type) (sum_over_time(toki_tokens_total[3600s]))" → "toki_tokens_total"
 /// This lets us query raw data points and aggregate server-side.
+#[allow(dead_code)]
 fn extract_metric_selector(query: &str) -> String {
     // Find metric name: toki_*
     if let Some(start) = query.find("toki_") {
@@ -474,6 +746,7 @@ fn extract_metric_selector(query: &str) -> String {
     query.to_string()
 }
 
+#[allow(dead_code)]
 fn replace_range_vector(query: &str, range_secs: i64) -> String {
     let replacement = format!("{}s", range_secs);
     let mut result = String::with_capacity(query.len());
@@ -516,6 +789,8 @@ struct RewriteResult {
     original_query: String,
     needs_cost_compute: bool,
     is_events: bool,
+    /// The primary group-by dimension from the original query (e.g., "model", "project").
+    group_by: String,
 }
 
 fn rewrite_toki_query(query: &str) -> RewriteResult {
@@ -532,6 +807,7 @@ fn rewrite_toki_query(query: &str) -> RewriteResult {
             original_query: query.to_string(),
             needs_cost_compute: false,
             is_events: false,
+            group_by: "model".to_string(),
         };
     }
 
@@ -590,11 +866,28 @@ fn rewrite_toki_query(query: &str) -> RewriteResult {
     let inc_re = Regex::new(r"increase\(").unwrap();
     result = inc_re.replace_all(&result, "sum_over_time(").to_string();
 
+    // Extract primary group-by dimension from original query: by (model), by (project), etc.
+    let group_by = {
+        let by_re = Regex::new(r"by\s*\(([^)]*)\)").unwrap();
+        by_re.captures(query)
+            .and_then(|c| c.get(1))
+            .map(|m| {
+                // Take first non-type dimension
+                m.as_str().split(',')
+                    .map(|s| s.trim())
+                    .find(|s| *s != "type")
+                    .unwrap_or("model")
+                    .to_string()
+            })
+            .unwrap_or_else(|| "model".to_string())
+    };
+
     RewriteResult {
         vm_query: result,
         original_query: query.to_string(),
         needs_cost_compute: is_cost,
         is_events,
+        group_by,
     }
 }
 
@@ -1231,7 +1524,7 @@ mod toki_json_tests {
         let pricing = crate::pricing::PricingTable::new(std::collections::HashMap::new());
         let result = vm_response_to_toki_json(
             &serde_json::to_vec(&vm).unwrap(),
-            &pricing, false, false, 86400
+            &pricing, false, false, 86400, 0, i64::MAX,
         ).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&result).unwrap();
         let items = parsed["providers"]["claude_code"].as_array().unwrap();

@@ -51,6 +51,9 @@ bytes = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 
+# Embedded event store
+fjall = "3"
+
 # Config / utils
 anyhow = "1"
 thiserror = "1"

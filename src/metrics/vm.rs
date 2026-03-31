@@ -93,6 +93,67 @@ impl VictoriaMetrics {
         .await
         .context("spawn_blocking panicked")?
     }
+
+    /// Export raw data points from VM for a metric selector in a time range.
+    /// Uses VM's /api/v1/export endpoint which returns JSONL.
+    /// Each line: {"metric":{...}, "values":[...], "timestamps":[...]}
+    pub async fn export_raw(
+        &self,
+        match_selector: &str,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<Vec<ExportedSeries>> {
+        let url = format!(
+            "{}/api/v1/export?match[]={}&start={}&end={}",
+            self.base_url,
+            urlencoding::encode(match_selector),
+            start_ms,
+            end_ms,
+        );
+
+        let client = self.client.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<Vec<ExportedSeries>> {
+            let resp = client.get(&url)
+                .call()
+                .map_err(|e| anyhow::anyhow!("VM export failed: {e}"))?;
+            let mut buf = String::new();
+            resp.into_reader().take(MAX_VM_RESPONSE).read_to_string(&mut buf)
+                .context("reading VM export response")?;
+
+            let mut result = Vec::new();
+            for line in buf.lines() {
+                if line.is_empty() { continue; }
+                let v: serde_json::Value = serde_json::from_str(line)
+                    .with_context(|| "parsing VM export line")?;
+                let labels: std::collections::HashMap<String, String> = v["metric"]
+                    .as_object()
+                    .map(|m| m.iter()
+                        .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                        .collect())
+                    .unwrap_or_default();
+                let timestamps: Vec<i64> = v["timestamps"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|v| v.as_i64()).collect())
+                    .unwrap_or_default();
+                let values: Vec<f64> = v["values"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|v| v.as_f64()).collect())
+                    .unwrap_or_default();
+                result.push(ExportedSeries { labels, timestamps, values });
+            }
+            Ok(result)
+        })
+        .await
+        .context("spawn_blocking panicked")?
+    }
+}
+
+/// Raw data series exported from VictoriaMetrics.
+pub struct ExportedSeries {
+    pub labels: std::collections::HashMap<String, String>,
+    pub timestamps: Vec<i64>,  // milliseconds
+    pub values: Vec<f64>,
 }
 
 impl MetricsBackend for VictoriaMetrics {

@@ -218,8 +218,12 @@ pub async fn team_query_range(
     // Inject the team user filter into the query (shared with inject_user_label)
     let injected = inject_label_filter(&params.query, &injection);
 
+    let vm = state.vm.as_ref().ok_or_else(|| AppError {
+        status: axum::http::StatusCode::NOT_IMPLEMENTED,
+        message: "PromQL proxy requires VictoriaMetrics backend (not configured)".into(),
+    })?;
     let step = params.step.as_deref().unwrap_or("60s");
-    let result = state.vm.query_range(&injected, params.start, params.end, step)
+    let result = vm.query_range(&injected, params.start, params.end, step)
         .await
         .map_err(AppError::bad_gateway)?;
 

@@ -122,7 +122,7 @@ pub struct BackendConfig {
     pub vm_url: String,
 }
 
-fn default_vm_url() -> String { "http://victoriametrics:8428".to_string() }
+pub fn default_vm_url() -> String { "http://victoriametrics:8428".to_string() }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct StorageConfig {
@@ -198,6 +198,31 @@ impl Default for FeaturesConfig {
     }
 }
 
+/// Event storage backend config.
+/// "fjall" (default, standalone) or "clickhouse" (external).
+#[derive(Debug, Deserialize, Clone)]
+pub struct EventsConfig {
+    #[serde(default = "default_events_backend")]
+    pub backend: String,
+    #[serde(default = "default_events_fjall_path")]
+    pub fjall_path: String,
+    #[serde(default)]
+    pub clickhouse_url: String,
+}
+
+fn default_events_backend() -> String { "fjall".to_string() }
+fn default_events_fjall_path() -> String { "./data/events.fjall".to_string() }
+
+impl Default for EventsConfig {
+    fn default() -> Self {
+        EventsConfig {
+            backend: default_events_backend(),
+            fjall_path: default_events_fjall_path(),
+            clickhouse_url: String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     #[serde(default)]
@@ -207,6 +232,8 @@ pub struct Config {
     pub backend: BackendConfig,
     #[serde(default)]
     pub storage: StorageConfig,
+    #[serde(default)]
+    pub events: EventsConfig,
     #[serde(default)]
     pub log: LogConfig,
     #[serde(default)]
@@ -247,6 +274,7 @@ impl Config {
                 },
                 backend: BackendConfig::default(),
                 storage: StorageConfig::default(),
+                events: EventsConfig::default(),
                 log: LogConfig::default(),
                 features: FeaturesConfig::default(),
             })

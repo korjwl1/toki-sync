@@ -94,7 +94,7 @@ pub async fn admin_delete_user(
     let device_ids = state.db.get_user_device_ids(&user_id).await.map_err(AppError::internal)?;
 
     for did in &device_ids {
-        if let Err(e) = state.vm.delete_device_series(did).await {
+        if let Err(e) = state.events.delete_device_events(did).await {
             tracing::warn!("failed to delete VM series for device {did}: {e}");
         }
     }
@@ -195,7 +195,7 @@ pub async fn admin_delete_device(
     require_admin(&headers, &state.jwt, &*state.db).await?;
 
     // Delete the device's time-series data from VictoriaMetrics before removing from DB
-    if let Err(e) = state.vm.delete_device_series(&device_id).await {
+    if let Err(e) = state.events.delete_device_events(&device_id).await {
         tracing::warn!("failed to delete VM series for device {device_id}: {e}");
     }
 
