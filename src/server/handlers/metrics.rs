@@ -28,6 +28,8 @@ pub struct QueryRangeParams {
 
 /// Toki query params — same interface as local daemon REPORT protocol.
 /// Query is toki PromQL (usage{}, events{}, cost{}), start/end are epoch seconds or date strings.
+/// With step: range query returning time-bucketed results (for charts).
+/// Without step: instant query returning single aggregated result (for stat panels).
 #[derive(Deserialize)]
 pub struct TokiQueryParams {
     pub query: String,
@@ -35,6 +37,8 @@ pub struct TokiQueryParams {
     pub start: Option<String>,
     #[serde(default)]
     pub end: Option<String>,
+    #[serde(default)]
+    pub step: Option<String>,
     pub scope: Option<String>,
 }
 
@@ -167,13 +171,15 @@ pub async fn promql_query_range(
     ).into_response())
 }
 
-/// Toki query endpoint: accepts toki PromQL (usage{}, events{}, cost{}) with start/end.
-/// Behaves identically to the local daemon's REPORT protocol — same query, same result.
+/// Toki query endpoint: returns toki-format JSON identical to `toki query --output-format json`.
 ///
-/// 1. Parse start/end into epoch seconds
-/// 2. Build a VM instant query at time=end with sum_over_time[{range}s]
-/// 3. For cost{}: fetch per-type tokens, apply pricing
-/// 4. Return toki-format JSON (same as local daemon response)
+/// With step param: range query → time-bucketed results (chart panels)
+/// Without step: instant query → single aggregated result (stat panels)
+///
+/// Response format matches local CLI exactly:
+/// ```json
+/// {"providers": {"claude_code": [{"period": "...", "usage_per_models": [{...}]}]}}
+/// ```
 pub async fn toki_query(
     headers: HeaderMap,
     State(state): State<AppState>,
@@ -183,7 +189,6 @@ pub async fn toki_query(
     let requested_scope = params.scope.as_deref().unwrap_or("self");
     let scoped = resolve_scope(&state, &params.query, &claims.sub, requested_scope).await?;
 
-    // Parse start/end — accept epoch seconds or YYYYMMDD/YYYYMMDDhhmmss
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
     let start_ts = params.start.as_deref()
@@ -192,42 +197,181 @@ pub async fn toki_query(
     let end_ts = params.end.as_deref()
         .map(|s| parse_toki_time(s, true))
         .unwrap_or(now);
-    let range_secs = (end_ts - start_ts).max(1);
 
     let rewritten = rewrite_toki_query(&scoped);
+    let is_range = params.step.is_some();
 
-    // For bare metric queries (e.g. "cost{}", "usage{}"), wrap in sum by (model)
-    // with sum_over_time[range] to match local daemon's summary behavior.
-    // For queries that already have aggregation (sum/increase/etc.), just replace
-    // the range vector with the actual time range.
-    let range_str = format!("{}s", range_secs);
-    let vm_query = if rewritten.vm_query.contains('(') {
-        // Has aggregation — just replace range vectors
-        replace_range_vector(&rewritten.vm_query, range_secs)
-    } else if rewritten.needs_cost_compute {
-        // Bare cost{} → need per-type breakdown for pricing
-        format!("sum by (model, type) (sum_over_time({}[{}]))", rewritten.vm_query, range_str)
+    // Build VM query
+    let vm_bytes = if is_range {
+        // Range query: use query_range with step
+        let step = params.step.as_deref().unwrap_or("3600");
+        state.vm.query_range(&rewritten.vm_query, start_ts, end_ts, step)
+            .await.map_err(AppError::bad_gateway)?
     } else {
-        // Bare usage{}/events{} → sum by model
-        format!("sum by (model) (sum_over_time({}[{}]))", rewritten.vm_query, range_str)
-    };
-
-    // Execute as instant query at time=end
-    let result = if rewritten.needs_cost_compute {
-        let vm_result = state.vm.query(&vm_query, Some(end_ts))
-            .await.map_err(AppError::bad_gateway)?;
-        let computed = compute_cost_from_vm_response(&vm_result, &state.pricing, &rewritten.original_query)?;
-        bytes::Bytes::from(computed)
-    } else {
+        // Instant: single value covering start→end
+        let range_secs = (end_ts - start_ts).max(1);
+        let vm_query = if rewritten.vm_query.contains('(') {
+            replace_range_vector(&rewritten.vm_query, range_secs)
+        } else {
+            let range_str = format!("{}s", range_secs);
+            format!("sum by (model) (sum_over_time({}[{}]))", rewritten.vm_query, range_str)
+        };
         state.vm.query(&vm_query, Some(end_ts))
             .await.map_err(AppError::bad_gateway)?
     };
 
+    // Convert VM Prometheus JSON → toki JSON format
+    let toki_json = vm_response_to_toki_json(
+        &vm_bytes, &state.pricing, rewritten.needs_cost_compute,
+    )?;
+
     Ok((
         StatusCode::OK,
         [("Content-Type", "application/json")],
-        result,
+        toki_json,
     ).into_response())
+}
+
+/// Convert Prometheus JSON response to toki-format JSON.
+/// Output matches `toki query --output-format json` exactly.
+fn vm_response_to_toki_json(
+    vm_bytes: &[u8],
+    pricing: &crate::pricing::PricingTable,
+    is_cost: bool,
+) -> Result<Vec<u8>, AppError> {
+    let vm: serde_json::Value = serde_json::from_slice(vm_bytes)
+        .map_err(|e| AppError::internal(anyhow::anyhow!("invalid VM response: {e}")))?;
+
+    if vm["status"].as_str() != Some("success") {
+        return Ok(vm_bytes.to_vec());
+    }
+
+    let result_type = vm["data"]["resultType"].as_str().unwrap_or("vector");
+    let results = vm["data"]["result"].as_array()
+        .ok_or_else(|| AppError::internal(anyhow::anyhow!("no result array")))?;
+
+    // Collect per-(timestamp, model) token data
+    use std::collections::BTreeMap;
+
+    struct ModelBucket {
+        input: u64, output: u64, cache_create: u64, cache_read: u64,
+        events: u64, cost_usd: Option<f64>,
+    }
+    impl Default for ModelBucket {
+        fn default() -> Self {
+            ModelBucket { input: 0, output: 0, cache_create: 0, cache_read: 0, events: 0, cost_usd: None }
+        }
+    }
+
+    // key: (timestamp_str, model) → ModelBucket
+    let mut buckets: BTreeMap<(String, String), ModelBucket> = BTreeMap::new();
+
+    for r in results {
+        let metric = r["metric"].as_object().unwrap_or(&serde_json::Map::new()).clone();
+        let model = metric.get("model").and_then(|v| v.as_str()).unwrap_or("(total)").to_string();
+        let token_type = metric.get("type").and_then(|v| v.as_str());
+        let toki_metric = metric.get("__toki_metric__").and_then(|v| v.as_str());
+
+        let points: Vec<(String, f64)> = if result_type == "matrix" {
+            r["values"].as_array().map(|vals| {
+                vals.iter().filter_map(|pair| {
+                    let ts = pair[0].as_f64().map(|t| {
+                        chrono::DateTime::from_timestamp(t as i64, 0)
+                            .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S").to_string())
+                            .unwrap_or_default()
+                    })?;
+                    let val: f64 = pair[1].as_str()?.parse().ok()?;
+                    Some((ts, val))
+                }).collect()
+            }).unwrap_or_default()
+        } else {
+            // vector: single value
+            let ts = r["value"][0].as_f64().map(|t| {
+                chrono::DateTime::from_timestamp(t as i64, 0)
+                    .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S").to_string())
+                    .unwrap_or_default()
+            }).unwrap_or_default();
+            let val: f64 = r["value"][1].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            vec![(ts, val)]
+        };
+
+        for (ts, val) in points {
+            let bucket = buckets.entry((ts, model.clone())).or_default();
+            if toki_metric == Some("cost") || is_cost {
+                // Cost query: compute from per-type tokens
+                if let Some(tt) = token_type {
+                    let uval = val.round() as u64;
+                    match tt {
+                        "input" => bucket.input += uval,
+                        "output" => bucket.output += uval,
+                        "cache_create" => bucket.cache_create += uval,
+                        "cache_read" => bucket.cache_read += uval,
+                        _ => {}
+                    }
+                } else {
+                    // Already computed cost value
+                    *bucket.cost_usd.get_or_insert(0.0) += val;
+                }
+            } else {
+                let uval = val.round() as u64;
+                match token_type {
+                    Some("input") => bucket.input += uval,
+                    Some("output") => bucket.output += uval,
+                    Some("cache_create") => bucket.cache_create += uval,
+                    Some("cache_read") => bucket.cache_read += uval,
+                    _ => {
+                        // No type = aggregated total (toki_usage_total or toki_events_total)
+                        bucket.input += uval; // put in input as total
+                    }
+                }
+            }
+        }
+    }
+
+    // For cost queries: compute cost from tokens if not already computed
+    if is_cost {
+        for ((_, model), bucket) in &mut buckets {
+            if bucket.cost_usd.is_none() {
+                bucket.cost_usd = pricing.cost(model, bucket.input, bucket.output,
+                    bucket.cache_create, bucket.cache_read);
+            }
+        }
+    }
+
+    // Build toki JSON: group by period
+    let mut periods: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
+    for ((ts, model), bucket) in &buckets {
+        let total = bucket.input + bucket.output + bucket.cache_create + bucket.cache_read;
+        let mut entry = serde_json::json!({
+            "model": model,
+            "input_tokens": bucket.input,
+            "output_tokens": bucket.output,
+            "cache_creation_input_tokens": bucket.cache_create,
+            "cache_read_input_tokens": bucket.cache_read,
+            "total_tokens": total,
+            "events": bucket.events,
+        });
+        if let Some(cost) = bucket.cost_usd.or_else(|| pricing.cost(model, bucket.input, bucket.output, bucket.cache_create, bucket.cache_read)) {
+            entry["cost_usd"] = serde_json::json!(cost);
+        }
+        periods.entry(ts.clone()).or_default().push(entry);
+    }
+
+    let data: Vec<serde_json::Value> = periods.into_iter().map(|(period, models)| {
+        serde_json::json!({
+            "period": period,
+            "usage_per_models": models,
+        })
+    }).collect();
+
+    let output = serde_json::json!({
+        "providers": {
+            "claude_code": data,
+        }
+    });
+
+    serde_json::to_vec(&output)
+        .map_err(|e| AppError::internal(anyhow::anyhow!("json serialize: {e}")))
 }
 
 /// Parse toki time string: epoch seconds, YYYYMMDD, or YYYYMMDDhhmmss
