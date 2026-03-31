@@ -205,12 +205,11 @@ pub async fn toki_query(
         .map(|s| parse_duration_secs(s))
         .unwrap_or(3600);
 
-    // Query VM at hourly granularity with sum_over_time[3600s] wrapper.
-    // Each eval point covers exactly one hour bucket (no stale data repetition).
-    // Server re-buckets hourly results to requested step using floor(ts/step)*step.
+    // Query VM at hourly granularity with sum_over_time[3599s] to avoid
+    // double-counting at boundaries. VM window is [T-d, T] (both inclusive),
+    // so [T-3599, T] and [T+1, T+3600] don't overlap.
     let vm_bytes = if is_range {
-        // Replace user's range vector with [3600s] for hourly granularity
-        let hourly_query = replace_range_vector(&rewritten.vm_query, 3600);
+        let hourly_query = replace_range_vector(&rewritten.vm_query, 3599);
         state.vm.query_range(&hourly_query, start_ts, end_ts, "3600")
             .await.map_err(AppError::bad_gateway)?
     } else {
