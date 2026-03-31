@@ -205,21 +205,24 @@ pub async fn toki_query(
     let step_secs: i64 = params.step.as_deref()
         .and_then(|s| s.trim_end_matches('s').parse().ok())
         .unwrap_or(3600);
+    // Align start and shift by +step so first eval point's lookback
+    // starts at the aligned boundary.
+    // E.g. start=3/23, step=86400 → aligned=3/23, first_eval=3/24T00:00
+    // → sum_over_time[86400s] at 3/24 covers (3/23, 3/24] = 3/23 data ✓
     let aligned_start = if step_secs >= 86400 {
-        // Floor to UTC midnight
-        (start_ts / 86400) * 86400
+        ((start_ts / 86400) * 86400) + step_secs
     } else {
-        // Floor to step boundary
-        (start_ts / step_secs) * step_secs
+        ((start_ts / step_secs) * step_secs) + step_secs
     };
 
     // Build VM query.
-    // Always query VM at 1-hour granularity (matches pre-aggregated hour buckets).
-    // Replace the range vector [Xs] with [3600s] so each eval point covers exactly
-    // one hour bucket. Server-side re-bucketing aggregates hours into the requested step.
+    // Replace range vector [Xd/h/m/s] with [step]s so VM's sum_over_time window
+    // matches exactly one step interval. Combined with aligned_start, this gives
+    // the same bucket boundaries as the local daemon.
     let vm_bytes = if is_range {
-        let hourly_query = replace_range_vector(&rewritten.vm_query, 3600);
-        state.vm.query_range(&hourly_query, aligned_start, end_ts, "3600")
+        let step_str = format!("{}s", step_secs);
+        let vm_query = replace_range_vector(&rewritten.vm_query, step_secs);
+        state.vm.query_range(&vm_query, aligned_start, end_ts, &step_str)
             .await.map_err(AppError::bad_gateway)?
     } else {
         // Instant: single value covering start→end
@@ -299,13 +302,11 @@ fn vm_response_to_toki_json(
         let points: Vec<(String, f64)> = if result_type == "matrix" {
             r["values"].as_array().map(|vals| {
                 vals.iter().filter_map(|pair| {
-                    let raw_ts = pair[0].as_f64()? as i64;
-                    // Floor to requested step boundary (UTC midnight for daily)
-                    let floored = if step_secs >= 86400 {
-                        (raw_ts / 86400) * 86400
-                    } else {
-                        (raw_ts / step_secs) * step_secs
-                    };
+                    let eval_ts = pair[0].as_f64()? as i64;
+                    // aligned_start = floor(start) + step → first eval = start + step.
+                    // sum_over_time[step] at eval T covers (T-step, T].
+                    // Period label = T - step (start of the window).
+                    let floored = eval_ts - step_secs;
                     let ts = chrono::DateTime::from_timestamp(floored, 0)
                         .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S").to_string())?;
                     let val: f64 = pair[1].as_str()?.parse().ok()?;
@@ -432,6 +433,27 @@ fn parse_toki_time(s: &str, is_end: bool) -> i64 {
 }
 
 /// Replace range vector durations [Xd/h/m/s/w/y] with [Ns] where N=range_secs.
+/// Extract the bare metric selector from a PromQL expression.
+/// "sum by (model, type) (sum_over_time(toki_tokens_total[3600s]))" → "toki_tokens_total"
+/// This lets us query raw data points and aggregate server-side.
+fn extract_metric_selector(query: &str) -> String {
+    // Find metric name: toki_*
+    if let Some(start) = query.find("toki_") {
+        let end = query[start..].find(|c: char| !c.is_alphanumeric() && c != '_')
+            .map(|i| start + i).unwrap_or(query.len());
+        let metric = &query[start..end];
+        // Append any label filter {..} that follows
+        let rest = &query[end..];
+        if rest.starts_with('{') {
+            if let Some(close) = rest.find('}') {
+                return format!("{}{}", metric, &rest[..=close]);
+            }
+        }
+        return metric.to_string();
+    }
+    query.to_string()
+}
+
 fn replace_range_vector(query: &str, range_secs: i64) -> String {
     let replacement = format!("{}s", range_secs);
     let mut result = String::with_capacity(query.len());
@@ -1159,5 +1181,51 @@ mod tests {
         let cost: f64 = cost_str.parse().unwrap();
         // 1000 * 0.00001 + 500 * 0.00003 = 0.01 + 0.015 = 0.025
         assert!((cost - 0.025).abs() < 1e-10, "got: {cost}");
+    }
+}
+
+#[cfg(test)]
+mod toki_json_tests {
+    use super::*;
+
+    #[test]
+    fn test_vm_response_daily_bucket() {
+        let vm = serde_json::json!({
+            "status": "success",
+            "data": {
+                "resultType": "matrix",
+                "result": [
+                    {
+                        "metric": {"model": "opus", "type": "input"},
+                        "values": [
+                            [1774227600, "100"],  // 03-23T01:00
+                            [1774231200, "200"],  // 03-23T02:00
+                            [1774310400, "300"],  // 03-24T00:00
+                        ]
+                    }
+                ]
+            }
+        });
+        let pricing = crate::pricing::PricingTable::new(std::collections::HashMap::new());
+        let result = vm_response_to_toki_json(
+            &serde_json::to_vec(&vm).unwrap(),
+            &pricing, false, false, 86400
+        ).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        let items = parsed["providers"]["claude_code"].as_array().unwrap();
+        
+        // Should have 2 periods: 03-23 (100+200) and 03-24 (300)
+        let mut found = std::collections::HashMap::new();
+        for item in items {
+            let period = item["period"].as_str().unwrap();
+            let day = &period[..10];
+            for m in item["usage_per_models"].as_array().unwrap() {
+                let input = m["input_tokens"].as_u64().unwrap();
+                *found.entry(day.to_string()).or_insert(0u64) += input;
+            }
+        }
+        eprintln!("found: {:?}", found);
+        assert_eq!(found.get("2026-03-23"), Some(&300u64), "03-23 should have 100+200");
+        assert_eq!(found.get("2026-03-24"), Some(&300u64), "03-24 should have 300");
     }
 }

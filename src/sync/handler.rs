@@ -251,6 +251,7 @@ fn build_prometheus_text(
     device_id: &str,
     provider: &str,
 ) -> String {
+    use std::collections::HashMap;
     use std::fmt::Write;
 
     let empty = String::new();
@@ -258,62 +259,77 @@ fn build_prometheus_text(
     let esc_user = escape_prom_value(user_id);
     let esc_device = escape_prom_value(device_id);
 
-    // Validate and sanitize token_columns: only allow [a-zA-Z0-9_]
     let safe_columns: Vec<String> = batch.token_columns.iter().map(|name| {
         name.chars().filter(|c| c.is_alphanumeric() || *c == '_').collect::<String>()
     }).collect();
 
-    let mut out = String::with_capacity(batch.items.len() * 200);
+    // Pre-aggregate: group by (hour_bucket_ms, model, project) → sum tokens + count events.
+    // This keeps VM series count low (~model×type instead of ~events×type).
+    // Same (hour, model, project, type) overwrites on re-sync → idempotent.
+    #[derive(Default)]
+    struct Agg {
+        tokens: Vec<u64>,   // per-type sums, same order as safe_columns
+        events: u64,
+        usage_total: u64,
+    }
+    // Key: (hour_ms, model_id, project_name_id)
+    let mut aggs: HashMap<(i64, u32, u32), Agg> = HashMap::new();
 
     for item in &batch.items {
-        // Skip if token count doesn't match column count
-        if item.event.tokens.len() != safe_columns.len() {
-            tracing::warn!(
-                "token/column count mismatch: {} tokens vs {} columns, skipping event",
-                item.event.tokens.len(), safe_columns.len()
-            );
-            continue;
+        if item.event.tokens.len() != safe_columns.len() { continue; }
+        let hour_ms = item.ts_ms - (item.ts_ms % 3_600_000);
+        let key = (hour_ms, item.event.model_id, item.event.project_name_id);
+        let agg = aggs.entry(key).or_insert_with(|| Agg {
+            tokens: vec![0u64; safe_columns.len()],
+            events: 0,
+            usage_total: 0,
+        });
+        for (i, &val) in item.event.tokens.iter().enumerate() {
+            agg.tokens[i] += val;
         }
+        agg.events += 1;
+        agg.usage_total += item.usage_total;
+    }
 
-        let model = escape_prom_value(batch.dict.get(&item.event.model_id).unwrap_or(&empty));
-        let session = escape_prom_value(batch.dict.get(&item.event.session_id).unwrap_or(&empty));
+    let mut out = String::with_capacity(aggs.len() * 300);
+
+    for ((hour_ms, model_id, project_id), agg) in &aggs {
+        let model = escape_prom_value(batch.dict.get(model_id).unwrap_or(&empty));
         let project = batch.dict
-            .get(&item.event.project_name_id)
+            .get(project_id)
             .filter(|s| !s.is_empty())
             .map(|s| escape_prom_value(s))
             .unwrap_or_default();
-        let msg = escape_prom_value(&item.message_id);
 
-        // Per-token-type metrics with msg label to prevent VM dedup
-        for (count_val, col_name) in item.event.tokens.iter().zip(safe_columns.iter()) {
-            if *count_val == 0 || col_name.is_empty() {
-                continue;
-            }
+        // Per-type token metrics (no msg label — pre-aggregated, low cardinality)
+        for (i, col_name) in safe_columns.iter().enumerate() {
+            let val = agg.tokens[i];
+            if val == 0 || col_name.is_empty() { continue; }
             write!(
                 out,
-                "toki_tokens_total{{model=\"{model}\",session=\"{session}\",provider=\"{esc_provider}\",user=\"{esc_user}\",device=\"{esc_device}\",project=\"{project}\",type=\"{col_name}\",msg=\"{msg}\"}} {count_val} {ts}\n",
-                ts = item.ts_ms,
-            )
-            .unwrap();
+                "toki_tokens_total{{model=\"{model}\",provider=\"{esc_provider}\",user=\"{esc_user}\",device=\"{esc_device}\",project=\"{project}\",type=\"{col_name}\"}} {val} {ts}\n",
+                ts = hour_ms,
+            ).unwrap();
         }
 
-        // Event count (msg label for dedup prevention — same as tokens)
-        write!(
-            out,
-            "toki_events_total{{model=\"{model}\",session=\"{session}\",provider=\"{esc_provider}\",user=\"{esc_user}\",device=\"{esc_device}\",project=\"{project}\",msg=\"{msg}\"}} 1 {ts}\n",
-            ts = item.ts_ms,
-        )
-        .unwrap();
-
-        // Pre-calculated usage total (provider-aware: Claude=all4, Codex=in+out)
-        if item.usage_total > 0 {
+        // Event count
+        if agg.events > 0 {
             write!(
                 out,
-                "toki_usage_total{{model=\"{model}\",session=\"{session}\",provider=\"{esc_provider}\",user=\"{esc_user}\",device=\"{esc_device}\",project=\"{project}\",msg=\"{msg}\"}} {usage} {ts}\n",
-                usage = item.usage_total,
-                ts = item.ts_ms,
-            )
-            .unwrap();
+                "toki_events_total{{model=\"{model}\",provider=\"{esc_provider}\",user=\"{esc_user}\",device=\"{esc_device}\",project=\"{project}\"}} {ev} {ts}\n",
+                ev = agg.events,
+                ts = hour_ms,
+            ).unwrap();
+        }
+
+        // Usage total
+        if agg.usage_total > 0 {
+            write!(
+                out,
+                "toki_usage_total{{model=\"{model}\",provider=\"{esc_provider}\",user=\"{esc_user}\",device=\"{esc_device}\",project=\"{project}\"}} {usage} {ts}\n",
+                usage = agg.usage_total,
+                ts = hour_ms,
+            ).unwrap();
         }
     }
     out
