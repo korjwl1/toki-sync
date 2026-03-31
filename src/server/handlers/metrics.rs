@@ -335,13 +335,17 @@ fn vm_response_to_toki_json(
                 let uval = val.round() as u64;
                 bucket.events += uval;
             } else {
-                // Usage query: per-type token breakdown
+                // Usage query: per-type token breakdown.
+                // cached_input ⊂ input, reasoning_output ⊂ output (Codex).
+                // These are subsets, not additional — don't add to total.
                 let uval = val.round() as u64;
                 match token_type {
                     Some("input") => bucket.input += uval,
                     Some("output") => bucket.output += uval,
                     Some("cache_create") => bucket.cache_create += uval,
                     Some("cache_read") => bucket.cache_read += uval,
+                    Some("cached_input") => { /* subset of input — display only */ }
+                    Some("reasoning_output") => { /* subset of output — display only */ }
                     _ => bucket.input += uval,
                 }
             }
