@@ -201,11 +201,25 @@ pub async fn toki_query(
     let rewritten = rewrite_toki_query(&scoped);
     let is_range = params.step.is_some();
 
-    // Build VM query
+    // Parse step and align start to bucket boundary (UTC midnight for daily+)
+    let step_secs: i64 = params.step.as_deref()
+        .and_then(|s| s.trim_end_matches('s').parse().ok())
+        .unwrap_or(3600);
+    let aligned_start = if step_secs >= 86400 {
+        // Floor to UTC midnight
+        (start_ts / 86400) * 86400
+    } else {
+        // Floor to step boundary
+        (start_ts / step_secs) * step_secs
+    };
+
+    // Build VM query.
+    // Always query VM at 1-hour granularity (matches pre-aggregated hour buckets).
+    // Replace the range vector [Xs] with [3600s] so each eval point covers exactly
+    // one hour bucket. Server-side re-bucketing aggregates hours into the requested step.
     let vm_bytes = if is_range {
-        // Range query: use query_range with step
-        let step = params.step.as_deref().unwrap_or("3600");
-        state.vm.query_range(&rewritten.vm_query, start_ts, end_ts, step)
+        let hourly_query = replace_range_vector(&rewritten.vm_query, 3600);
+        state.vm.query_range(&hourly_query, aligned_start, end_ts, "3600")
             .await.map_err(AppError::bad_gateway)?
     } else {
         // Instant: single value covering start→end
@@ -242,7 +256,7 @@ fn vm_response_to_toki_json(
     pricing: &crate::pricing::PricingTable,
     is_cost: bool,
     is_events: bool,
-    _step_secs: i64,
+    step_secs: i64,
 ) -> Result<Vec<u8>, AppError> {
     let vm: serde_json::Value = serde_json::from_slice(vm_bytes)
         .map_err(|e| AppError::internal(anyhow::anyhow!("invalid VM response: {e}")))?;
@@ -285,11 +299,15 @@ fn vm_response_to_toki_json(
         let points: Vec<(String, f64)> = if result_type == "matrix" {
             r["values"].as_array().map(|vals| {
                 vals.iter().filter_map(|pair| {
-                    let ts = pair[0].as_f64().map(|t| {
-                        chrono::DateTime::from_timestamp(t as i64, 0)
-                            .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S").to_string())
-                            .unwrap_or_default()
-                    })?;
+                    let raw_ts = pair[0].as_f64()? as i64;
+                    // Floor to requested step boundary (UTC midnight for daily)
+                    let floored = if step_secs >= 86400 {
+                        (raw_ts / 86400) * 86400
+                    } else {
+                        (raw_ts / step_secs) * step_secs
+                    };
+                    let ts = chrono::DateTime::from_timestamp(floored, 0)
+                        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S").to_string())?;
                     let val: f64 = pair[1].as_str()?.parse().ok()?;
                     Some((ts, val))
                 }).collect()
