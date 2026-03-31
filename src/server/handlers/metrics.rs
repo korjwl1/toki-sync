@@ -209,11 +209,11 @@ pub async fn toki_query(
     // starts at the aligned boundary.
     // E.g. start=3/23, step=86400 → aligned=3/23, first_eval=3/24T00:00
     // → sum_over_time[86400s] at 3/24 covers (3/23, 3/24] = 3/23 data ✓
-    let aligned_start = if step_secs >= 86400 {
-        ((start_ts / 86400) * 86400) + step_secs
-    } else {
-        ((start_ts / step_secs) * step_secs) + step_secs
-    };
+    // Pass start directly to VM — no alignment.
+    // Local daemon uses floor(event_ts/step)*step for bucketing,
+    // VM uses start-aligned eval points. Both approaches handle
+    // non-aligned starts correctly.
+    let aligned_start = start_ts;
 
     // Build VM query.
     // Replace range vector [Xd/h/m/s] with [step]s so VM's sum_over_time window
@@ -303,10 +303,18 @@ fn vm_response_to_toki_json(
             r["values"].as_array().map(|vals| {
                 vals.iter().filter_map(|pair| {
                     let eval_ts = pair[0].as_f64()? as i64;
-                    // aligned_start = floor(start) + step → first eval = start + step.
-                    // sum_over_time[step] at eval T covers (T-step, T].
-                    // Period label = T - step (start of the window).
-                    let floored = eval_ts - step_secs;
+                    // VM eval point is step-aligned. Use floor(eval/step)*step as bucket,
+                    // matching local daemon's floor(ts/step)*step bucketing.
+                    // Note: VM sum_over_time[step] at eval T covers (T-step, T],
+                    // but we label the bucket as the start of that window.
+                    let floored = if step_secs >= 86400 {
+                        // Daily: use eval-step to get the date (eval=03-24 → data=03-23)
+                        let ws = eval_ts - step_secs;
+                        (ws / 86400) * 86400
+                    } else {
+                        // Sub-daily: eval point IS the step boundary
+                        (eval_ts / step_secs) * step_secs
+                    };
                     let ts = chrono::DateTime::from_timestamp(floored, 0)
                         .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S").to_string())?;
                     let val: f64 = pair[1].as_str()?.parse().ok()?;
@@ -495,7 +503,7 @@ fn replace_range_vector(query: &str, range_secs: i64) -> String {
             }
             let is_duration = !content.is_empty()
                 && content.chars().last().map_or(false, |c| "smhdwy".contains(c))
-                && content[..content.len()-1].chars().all(|c| c.is_ascii_digit());
+                && content.chars().all(|c| c.is_ascii_digit() || "smhdwy".contains(c));
             if is_duration {
                 result.push_str(&format!("[{}]", replacement));
             } else {
