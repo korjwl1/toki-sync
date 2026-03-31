@@ -222,7 +222,7 @@ pub async fn toki_query(
 
     // Convert VM Prometheus JSON → toki JSON format
     let toki_json = vm_response_to_toki_json(
-        &vm_bytes, &state.pricing, rewritten.needs_cost_compute,
+        &vm_bytes, &state.pricing, rewritten.needs_cost_compute, rewritten.is_events,
     )?;
 
     Ok((
@@ -238,6 +238,7 @@ fn vm_response_to_toki_json(
     vm_bytes: &[u8],
     pricing: &crate::pricing::PricingTable,
     is_cost: bool,
+    is_events: bool,
 ) -> Result<Vec<u8>, AppError> {
     let vm: serde_json::Value = serde_json::from_slice(vm_bytes)
         .map_err(|e| AppError::internal(anyhow::anyhow!("invalid VM response: {e}")))?;
@@ -312,17 +313,19 @@ fn vm_response_to_toki_json(
                     // Already computed cost value
                     *bucket.cost_usd.get_or_insert(0.0) += val;
                 }
+            } else if is_events {
+                // Events query: value is event count
+                let uval = val.round() as u64;
+                bucket.events += uval;
             } else {
+                // Usage query: per-type token breakdown
                 let uval = val.round() as u64;
                 match token_type {
                     Some("input") => bucket.input += uval,
                     Some("output") => bucket.output += uval,
                     Some("cache_create") => bucket.cache_create += uval,
                     Some("cache_read") => bucket.cache_read += uval,
-                    _ => {
-                        // No type = aggregated total (toki_usage_total or toki_events_total)
-                        bucket.input += uval; // put in input as total
-                    }
+                    _ => bucket.input += uval,
                 }
             }
         }
@@ -354,7 +357,8 @@ fn vm_response_to_toki_json(
         if let Some(cost) = bucket.cost_usd.or_else(|| pricing.cost(model, bucket.input, bucket.output, bucket.cache_create, bucket.cache_read)) {
             entry["cost_usd"] = serde_json::json!(cost);
         }
-        periods.entry(ts.clone()).or_default().push(entry);
+        let period_key = format!("{}|{}", ts, model);
+        periods.entry(period_key).or_default().push(entry);
     }
 
     let data: Vec<serde_json::Value> = periods.into_iter().map(|(period, models)| {
@@ -442,6 +446,7 @@ struct RewriteResult {
     vm_query: String,
     original_query: String,
     needs_cost_compute: bool,
+    is_events: bool,
 }
 
 fn rewrite_toki_query(query: &str) -> RewriteResult {
@@ -457,6 +462,7 @@ fn rewrite_toki_query(query: &str) -> RewriteResult {
             vm_query: query.to_string(),
             original_query: query.to_string(),
             needs_cost_compute: false,
+            is_events: false,
         };
     }
 
@@ -491,13 +497,24 @@ fn rewrite_toki_query(query: &str) -> RewriteResult {
         let re3 = Regex::new(r"events\[").unwrap();
         result = re3.replace_all(&result, "toki_events_total[").to_string();
     } else {
-        // usage{} → toki_usage_total (pre-summed, no type dimension)
+        // usage{} → toki_tokens_total with type injection for per-type breakdown
         let re = Regex::new(r"usage\{([^}]*)\}").unwrap();
-        result = re.replace_all(&result, "toki_usage_total{$1}").to_string();
-        let re2 = Regex::new(r"toki_usage_total\{\}").unwrap();
-        result = re2.replace_all(&result, "toki_usage_total").to_string();
+        result = re.replace_all(&result, "toki_tokens_total{$1}").to_string();
+        let re2 = Regex::new(r"toki_tokens_total\{\}").unwrap();
+        result = re2.replace_all(&result, "toki_tokens_total").to_string();
         let re3 = Regex::new(r"usage\[").unwrap();
-        result = re3.replace_all(&result, "toki_usage_total[").to_string();
+        result = re3.replace_all(&result, "toki_tokens_total[").to_string();
+
+        // Inject type into by() for per-type breakdown
+        let by_re = Regex::new(r"by\s*\(([^)]*)\)").unwrap();
+        result = by_re.replace_all(&result, |caps: &regex::Captures| {
+            let inner = &caps[1];
+            if inner.contains("type") {
+                format!("by ({})", inner)
+            } else {
+                format!("by ({}, type)", inner)
+            }
+        }).to_string();
     }
 
     // increase() → sum_over_time() (VM stores gauge data, not counters)
@@ -508,6 +525,7 @@ fn rewrite_toki_query(query: &str) -> RewriteResult {
         vm_query: result,
         original_query: query.to_string(),
         needs_cost_compute: is_cost,
+        is_events,
     }
 }
 
@@ -1033,24 +1051,25 @@ mod tests {
     #[test]
     fn test_rewrite_usage_basic() {
         let r = rewrite_toki_query("usage{}");
-        assert_eq!(r.vm_query, "toki_usage_total");
+        assert_eq!(r.vm_query, "toki_tokens_total");
         assert!(!r.needs_cost_compute);
+        assert!(!r.is_events);
     }
 
     #[test]
     fn test_rewrite_usage_with_labels() {
         let r = rewrite_toki_query("usage{provider=\"claude_code\"}");
-        assert!(r.vm_query.contains("toki_usage_total{provider=\"claude_code\"}"), "got: {}", r.vm_query);
+        assert!(r.vm_query.contains("toki_tokens_total{provider=\"claude_code\"}"), "got: {}", r.vm_query);
     }
 
     #[test]
     fn test_rewrite_usage_sum_by_model() {
         let r = rewrite_toki_query("sum by (model) (increase(usage{}[1d]))");
-        assert!(r.vm_query.contains("toki_usage_total"), "got: {}", r.vm_query);
+        assert!(r.vm_query.contains("toki_tokens_total"), "got: {}", r.vm_query);
         assert!(r.vm_query.contains("sum_over_time("), "got: {}", r.vm_query);
         assert!(!r.vm_query.contains("increase("), "got: {}", r.vm_query);
-        // usage uses toki_usage_total — no type injection needed
-        assert!(!r.vm_query.contains(", type)"), "got: {}", r.vm_query);
+        // usage now uses toki_tokens_total with type injection for per-type breakdown
+        assert!(r.vm_query.contains(", type)"), "type injected, got: {}", r.vm_query);
     }
 
     #[test]
