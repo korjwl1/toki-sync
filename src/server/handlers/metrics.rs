@@ -201,28 +201,17 @@ pub async fn toki_query(
     let rewritten = rewrite_toki_query(&scoped);
     let is_range = params.step.is_some();
 
-    // Parse step and align start to bucket boundary (UTC midnight for daily+)
     let step_secs: i64 = params.step.as_deref()
         .map(|s| parse_duration_secs(s))
         .unwrap_or(3600);
-    // Align start and shift by +step so first eval point's lookback
-    // starts at the aligned boundary.
-    // E.g. start=3/23, step=86400 → aligned=3/23, first_eval=3/24T00:00
-    // → sum_over_time[86400s] at 3/24 covers (3/23, 3/24] = 3/23 data ✓
-    // Pass start directly to VM — no alignment.
-    // Local daemon uses floor(event_ts/step)*step for bucketing,
-    // VM uses start-aligned eval points. Both approaches handle
-    // non-aligned starts correctly.
-    let aligned_start = start_ts;
 
-    // Build VM query.
-    // Replace range vector [Xd/h/m/s] with [step]s so VM's sum_over_time window
-    // matches exactly one step interval. Combined with aligned_start, this gives
-    // the same bucket boundaries as the local daemon.
+    // Query VM at hourly granularity with sum_over_time[3600s] wrapper.
+    // Each eval point covers exactly one hour bucket (no stale data repetition).
+    // Server re-buckets hourly results to requested step using floor(ts/step)*step.
     let vm_bytes = if is_range {
-        let step_str = format!("{}s", step_secs);
-        let vm_query = replace_range_vector(&rewritten.vm_query, step_secs);
-        state.vm.query_range(&vm_query, aligned_start, end_ts, &step_str)
+        // Replace user's range vector with [3600s] for hourly granularity
+        let hourly_query = replace_range_vector(&rewritten.vm_query, 3600);
+        state.vm.query_range(&hourly_query, start_ts, end_ts, "3600")
             .await.map_err(AppError::bad_gateway)?
     } else {
         // Instant: single value covering start→end
@@ -302,19 +291,11 @@ fn vm_response_to_toki_json(
         let points: Vec<(String, f64)> = if result_type == "matrix" {
             r["values"].as_array().map(|vals| {
                 vals.iter().filter_map(|pair| {
-                    let eval_ts = pair[0].as_f64()? as i64;
-                    // VM eval point is step-aligned. Use floor(eval/step)*step as bucket,
-                    // matching local daemon's floor(ts/step)*step bucketing.
-                    // Note: VM sum_over_time[step] at eval T covers (T-step, T],
-                    // but we label the bucket as the start of that window.
-                    let floored = if step_secs >= 86400 {
-                        // Daily: use eval-step to get the date (eval=03-24 → data=03-23)
-                        let ws = eval_ts - step_secs;
-                        (ws / 86400) * 86400
-                    } else {
-                        // Sub-daily: eval point IS the step boundary
-                        (eval_ts / step_secs) * step_secs
-                    };
+                    let raw_ts = pair[0].as_f64()? as i64;
+                    // Raw hourly data point timestamp = hour start.
+                    // Floor to requested step, matching local daemon's
+                    // floor(event_ts / step) * step bucketing.
+                    let floored = (raw_ts / step_secs) * step_secs;
                     let ts = chrono::DateTime::from_timestamp(floored, 0)
                         .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S").to_string())?;
                     let val: f64 = pair[1].as_str()?.parse().ok()?;
