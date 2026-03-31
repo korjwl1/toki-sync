@@ -85,6 +85,8 @@ pub struct AppState {
     /// Whether to trust X-Forwarded-For header for client IP extraction.
     /// Set to true when deployed behind a reverse proxy (e.g. Caddy, nginx).
     pub trust_proxy: bool,
+    /// Pricing table for cost{} query computation.
+    pub pricing: Arc<crate::pricing::PricingTable>,
 }
 
 pub async fn get_oidc_discovery(state: &AppState) -> Result<OidcDiscovery, AppError> {
@@ -236,6 +238,7 @@ pub async fn require_admin(headers: &HeaderMap, jwt: &JwtManager, db: &dyn Datab
 
 // ─── Error type ─────────────────────────────────────────────────────────────
 
+#[derive(Debug)]
 pub struct AppError {
     pub status: StatusCode,
     pub message: String,

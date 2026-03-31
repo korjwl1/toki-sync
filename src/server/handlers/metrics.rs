@@ -109,8 +109,17 @@ pub async fn promql_query(
     let claims = extract_jwt(&headers, &state.jwt)?;
     let requested_scope = params.scope.as_deref().unwrap_or("self");
     let scoped = resolve_scope(&state, &params.query, &claims.sub, requested_scope).await?;
-    let injected = rewrite_toki_query(&scoped);
-    let result = state.vm.query(&injected, params.time).await.map_err(AppError::bad_gateway)?;
+
+    let rewritten = rewrite_toki_query(&scoped);
+    let result = if rewritten.needs_cost_compute {
+        // cost{} → fetch per-type tokens from VM, apply pricing server-side
+        let vm_result = state.vm.query(&rewritten.vm_query, params.time).await.map_err(AppError::bad_gateway)?;
+        let computed = compute_cost_from_vm_response(&vm_result, &state.pricing, &rewritten.original_query)?;
+        bytes::Bytes::from(computed)
+    } else {
+        state.vm.query(&rewritten.vm_query, params.time).await.map_err(AppError::bad_gateway)?
+    };
+
     Ok((
         StatusCode::OK,
         [("Content-Type", "application/json")],
@@ -126,11 +135,19 @@ pub async fn promql_query_range(
     let claims = extract_jwt(&headers, &state.jwt)?;
     let requested_scope = params.scope.as_deref().unwrap_or("self");
     let scoped = resolve_scope(&state, &params.query, &claims.sub, requested_scope).await?;
-    let injected = rewrite_toki_query(&scoped);
+
+    let rewritten = rewrite_toki_query(&scoped);
     let step = params.step.as_deref().unwrap_or("60s");
-    let result = state.vm.query_range(&injected, params.start, params.end, step)
-        .await
-        .map_err(AppError::bad_gateway)?;
+    let result = if rewritten.needs_cost_compute {
+        let vm_result = state.vm.query_range(&rewritten.vm_query, params.start, params.end, step)
+            .await.map_err(AppError::bad_gateway)?;
+        let computed = compute_cost_from_vm_response(&vm_result, &state.pricing, &rewritten.original_query)?;
+        bytes::Bytes::from(computed)
+    } else {
+        state.vm.query_range(&rewritten.vm_query, params.start, params.end, step)
+            .await.map_err(AppError::bad_gateway)?
+    };
+
     Ok((
         StatusCode::OK,
         [("Content-Type", "application/json")],
@@ -140,45 +157,50 @@ pub async fn promql_query_range(
 
 // ─── Toki PromQL → VM PromQL translation ─────────────────────────────────────
 //
-// toki-monitor and toki CLI send queries like `usage{}`, `events{}`, `cost{}`.
-// VM stores data under `toki_tokens_total`, `toki_events_total`, `toki_usage_total`.
-// This function translates toki PromQL to VM-native PromQL so both local and
-// server accept the same query syntax.
+// Virtual metrics: usage{}, events{}, cost{}
+// These don't exist in VM — translated here.
+//
+// usage{}  → toki_usage_total (pre-summed tokens, no type dimension)
+// events{} → toki_events_total (1 per API call)
+// cost{}   → server-side compute: fetch toki_tokens_total per-type, multiply by pricing
+//
+// Standard PromQL (toki_tokens_total, toki_events_total, etc.) passes through as-is.
 
-fn rewrite_toki_query(query: &str) -> String {
+struct RewriteResult {
+    vm_query: String,
+    original_query: String,
+    needs_cost_compute: bool,
+}
+
+fn rewrite_toki_query(query: &str) -> RewriteResult {
     use regex::Regex;
 
     let is_cost = query.contains("cost{") || query.contains("cost[");
     let is_events = query.contains("events{") || query.contains("events[");
+    let is_usage = query.contains("usage{") || query.contains("usage[");
+
+    // Standard PromQL pass-through (no virtual metric)
+    if !is_cost && !is_events && !is_usage {
+        return RewriteResult {
+            vm_query: query.to_string(),
+            original_query: query.to_string(),
+            needs_cost_compute: false,
+        };
+    }
 
     let mut result = query.to_string();
 
     if is_cost {
-        // cost{labels} → toki_cost_usd{labels}
+        // cost{} → fetch per-type tokens for server-side pricing computation.
+        // Rewrite to toki_tokens_total with type in by() so we get per-type breakdown.
         let re = Regex::new(r"cost\{([^}]*)\}").unwrap();
-        result = re.replace_all(&result, "toki_cost_usd{$1}").to_string();
-        let re2 = Regex::new(r"toki_cost_usd\{\}").unwrap();
-        result = re2.replace_all(&result, "toki_cost_usd").to_string();
-        let re3 = Regex::new(r"cost\[").unwrap();
-        result = re3.replace_all(&result, "toki_cost_usd[").to_string();
-    } else if is_events {
-        // events{labels} → toki_events_total{labels}
-        let re = Regex::new(r"events\{([^}]*)\}").unwrap();
-        result = re.replace_all(&result, "toki_events_total{$1}").to_string();
-        let re2 = Regex::new(r"toki_events_total\{\}").unwrap();
-        result = re2.replace_all(&result, "toki_events_total").to_string();
-        let re3 = Regex::new(r"events\[").unwrap();
-        result = re3.replace_all(&result, "toki_events_total[").to_string();
-    } else {
-        // usage{labels} → toki_tokens_total{labels}
-        let re = Regex::new(r"usage\{([^}]*)\}").unwrap();
         result = re.replace_all(&result, "toki_tokens_total{$1}").to_string();
         let re2 = Regex::new(r"toki_tokens_total\{\}").unwrap();
         result = re2.replace_all(&result, "toki_tokens_total").to_string();
-        let re3 = Regex::new(r"usage\[").unwrap();
+        let re3 = Regex::new(r"cost\[").unwrap();
         result = re3.replace_all(&result, "toki_tokens_total[").to_string();
 
-        // For token queries, inject `type` into by() clauses for per-type breakdown
+        // Inject `type` into by() for per-type breakdown (needed for pricing)
         let by_re = Regex::new(r"by\s*\(([^)]*)\)").unwrap();
         result = by_re.replace_all(&result, |caps: &regex::Captures| {
             let inner = &caps[1];
@@ -188,13 +210,182 @@ fn rewrite_toki_query(query: &str) -> String {
                 format!("by ({}, type)", inner)
             }
         }).to_string();
+    } else if is_events {
+        // events{} → toki_events_total (1:1)
+        let re = Regex::new(r"events\{([^}]*)\}").unwrap();
+        result = re.replace_all(&result, "toki_events_total{$1}").to_string();
+        let re2 = Regex::new(r"toki_events_total\{\}").unwrap();
+        result = re2.replace_all(&result, "toki_events_total").to_string();
+        let re3 = Regex::new(r"events\[").unwrap();
+        result = re3.replace_all(&result, "toki_events_total[").to_string();
+    } else {
+        // usage{} → toki_usage_total (pre-summed, no type dimension)
+        let re = Regex::new(r"usage\{([^}]*)\}").unwrap();
+        result = re.replace_all(&result, "toki_usage_total{$1}").to_string();
+        let re2 = Regex::new(r"toki_usage_total\{\}").unwrap();
+        result = re2.replace_all(&result, "toki_usage_total").to_string();
+        let re3 = Regex::new(r"usage\[").unwrap();
+        result = re3.replace_all(&result, "toki_usage_total[").to_string();
     }
 
     // increase() → sum_over_time() (VM stores gauge data, not counters)
     let inc_re = Regex::new(r"increase\(").unwrap();
     result = inc_re.replace_all(&result, "sum_over_time(").to_string();
 
-    result
+    RewriteResult {
+        vm_query: result,
+        original_query: query.to_string(),
+        needs_cost_compute: is_cost,
+    }
+}
+
+/// Compute cost from VM per-type token response.
+///
+/// VM returns series with `type` and `model` labels. We:
+/// 1. Parse the Prometheus JSON response
+/// 2. Group by all labels EXCEPT `type`
+/// 3. For each group, multiply each type's value by its pricing rate
+/// 4. Sum into a single cost value per group
+/// 5. Return a Prometheus-format JSON response with `type` label removed
+fn compute_cost_from_vm_response(
+    vm_bytes: &[u8],
+    pricing: &crate::pricing::PricingTable,
+    _original_query: &str,
+) -> Result<Vec<u8>, AppError> {
+    let vm_resp: serde_json::Value = serde_json::from_slice(vm_bytes)
+        .map_err(|e| AppError::internal(anyhow::anyhow!("invalid VM response: {e}")))?;
+
+    let status = vm_resp["status"].as_str().unwrap_or("error");
+    if status != "success" {
+        // Pass through error responses
+        return Ok(vm_bytes.to_vec());
+    }
+
+    let result_type = vm_resp["data"]["resultType"].as_str().unwrap_or("vector");
+    let results = match vm_resp["data"]["result"].as_array() {
+        Some(r) => r,
+        None => return Ok(vm_bytes.to_vec()),
+    };
+
+    // Group results by (all labels except type) → accumulate cost
+    // Key: sorted label pairs (excluding type), Value: (cost, values/value for time series)
+    use std::collections::BTreeMap;
+
+    match result_type {
+        "vector" => {
+            // Instant query: each result has { metric: {}, value: [ts, "val"] }
+            let mut cost_map: BTreeMap<String, (BTreeMap<String, String>, f64, serde_json::Value)> = BTreeMap::new();
+
+            for r in results {
+                let metric = r["metric"].as_object().unwrap_or(&serde_json::Map::new()).clone();
+                let model = metric.get("model").and_then(|v| v.as_str()).unwrap_or("");
+                let token_type = metric.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                let val: f64 = r["value"][1].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+
+                // Build group key (all labels except type and msg)
+                let mut group_labels: BTreeMap<String, String> = BTreeMap::new();
+                for (k, v) in &metric {
+                    if k != "type" && k != "msg" && k != "__name__" {
+                        group_labels.insert(k.clone(), v.as_str().unwrap_or("").to_string());
+                    }
+                }
+                let group_key = format!("{:?}", group_labels);
+
+                // Look up per-token-type price for this model
+                let token_cost = pricing.get(model).map(|p| {
+                    match token_type {
+                        "input" => val * p.input_cost_per_token,
+                        "output" => val * p.output_cost_per_token,
+                        "cache_create" => val * p.cache_creation_input_token_cost.unwrap_or(0.0),
+                        "cache_read" => val * p.cache_read_input_token_cost.unwrap_or(0.0),
+                        _ => 0.0,
+                    }
+                }).unwrap_or(0.0);
+
+                let ts = r["value"][0].clone();
+                let entry = cost_map.entry(group_key).or_insert_with(|| (group_labels.clone(), 0.0, ts));
+                entry.1 += token_cost;
+            }
+
+            // Build response
+            let result_arr: Vec<serde_json::Value> = cost_map.values().map(|(labels, cost, ts)| {
+                let metric: serde_json::Map<String, serde_json::Value> = labels.iter()
+                    .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                    .collect();
+                serde_json::json!({
+                    "metric": metric,
+                    "value": [ts, format!("{}", cost)],
+                })
+            }).collect();
+
+            let resp = serde_json::json!({
+                "status": "success",
+                "data": { "resultType": "vector", "result": result_arr }
+            });
+            serde_json::to_vec(&resp).map_err(|e| AppError::internal(anyhow::anyhow!("json serialize: {e}")))
+        }
+        "matrix" => {
+            // Range query: each result has { metric: {}, values: [[ts, "val"], ...] }
+            // Group by labels, and for each timestamp multiply token value by price
+            let mut cost_map: BTreeMap<String, (BTreeMap<String, String>, BTreeMap<String, f64>)> = BTreeMap::new();
+            // key → (labels, ts_string → accumulated_cost)
+
+            for r in results {
+                let metric = r["metric"].as_object().unwrap_or(&serde_json::Map::new()).clone();
+                let model = metric.get("model").and_then(|v| v.as_str()).unwrap_or("");
+                let token_type = metric.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+                let mut group_labels: BTreeMap<String, String> = BTreeMap::new();
+                for (k, v) in &metric {
+                    if k != "type" && k != "msg" && k != "__name__" {
+                        group_labels.insert(k.clone(), v.as_str().unwrap_or("").to_string());
+                    }
+                }
+                let group_key = format!("{:?}", group_labels);
+
+                let price_fn = pricing.get(model).map(|p| {
+                    match token_type {
+                        "input" => p.input_cost_per_token,
+                        "output" => p.output_cost_per_token,
+                        "cache_create" => p.cache_creation_input_token_cost.unwrap_or(0.0),
+                        "cache_read" => p.cache_read_input_token_cost.unwrap_or(0.0),
+                        _ => 0.0,
+                    }
+                }).unwrap_or(0.0);
+
+                let values = r["values"].as_array();
+                if let Some(vals) = values {
+                    let entry = cost_map.entry(group_key).or_insert_with(|| (group_labels.clone(), BTreeMap::new()));
+                    for point in vals {
+                        let ts_key = point[0].to_string(); // preserves exact timestamp
+                        let val: f64 = point[1].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                        *entry.1.entry(ts_key).or_insert(0.0) += val * price_fn;
+                    }
+                }
+            }
+
+            let result_arr: Vec<serde_json::Value> = cost_map.values().map(|(labels, ts_costs)| {
+                let metric: serde_json::Map<String, serde_json::Value> = labels.iter()
+                    .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                    .collect();
+                let values: Vec<serde_json::Value> = ts_costs.iter().map(|(ts, cost)| {
+                    let ts_val: serde_json::Value = serde_json::from_str(ts).unwrap_or(serde_json::Value::Null);
+                    serde_json::json!([ts_val, format!("{}", cost)])
+                }).collect();
+                serde_json::json!({
+                    "metric": metric,
+                    "values": values,
+                })
+            }).collect();
+
+            let resp = serde_json::json!({
+                "status": "success",
+                "data": { "resultType": "matrix", "result": result_arr }
+            });
+            serde_json::to_vec(&resp).map_err(|e| AppError::internal(anyhow::anyhow!("json serialize: {e}")))
+        }
+        _ => Ok(vm_bytes.to_vec()),
+    }
 }
 
 // ─── Label injection ─────────────────────────────────────────────────────────
@@ -568,46 +759,85 @@ mod tests {
     #[test]
     fn test_rewrite_usage_basic() {
         let r = rewrite_toki_query("usage{}");
-        assert_eq!(r, "toki_tokens_total");
+        assert_eq!(r.vm_query, "toki_usage_total");
+        assert!(!r.needs_cost_compute);
     }
 
     #[test]
     fn test_rewrite_usage_with_labels() {
         let r = rewrite_toki_query("usage{provider=\"claude_code\"}");
-        assert!(r.contains("toki_tokens_total{provider=\"claude_code\"}"), "got: {r}");
+        assert!(r.vm_query.contains("toki_usage_total{provider=\"claude_code\"}"), "got: {}", r.vm_query);
     }
 
     #[test]
     fn test_rewrite_usage_sum_by_model() {
         let r = rewrite_toki_query("sum by (model) (increase(usage{}[1d]))");
-        assert!(r.contains("toki_tokens_total"), "got: {r}");
-        assert!(r.contains("sum_over_time("), "increase → sum_over_time, got: {r}");
-        assert!(r.contains("by (model, type)"), "type injected into by(), got: {r}");
-        assert!(!r.contains("increase("), "increase should be replaced, got: {r}");
+        assert!(r.vm_query.contains("toki_usage_total"), "got: {}", r.vm_query);
+        assert!(r.vm_query.contains("sum_over_time("), "got: {}", r.vm_query);
+        assert!(!r.vm_query.contains("increase("), "got: {}", r.vm_query);
+        // usage uses toki_usage_total — no type injection needed
+        assert!(!r.vm_query.contains(", type)"), "got: {}", r.vm_query);
     }
 
     #[test]
     fn test_rewrite_events() {
         let r = rewrite_toki_query("sum by (model) (increase(events{}[1d]))");
-        assert!(r.contains("toki_events_total"), "got: {r}");
-        assert!(r.contains("sum_over_time("), "got: {r}");
-        // events should NOT inject type
-        assert!(!r.contains(", type)"), "events should not inject type, got: {r}");
+        assert!(r.vm_query.contains("toki_events_total"), "got: {}", r.vm_query);
+        assert!(r.vm_query.contains("sum_over_time("), "got: {}", r.vm_query);
+        assert!(!r.needs_cost_compute);
     }
 
     #[test]
     fn test_rewrite_cost() {
         let r = rewrite_toki_query("sum by (model) (increase(cost{}[1d]))");
-        assert!(r.contains("toki_cost_usd"), "got: {r}");
-        assert!(r.contains("sum_over_time("), "got: {r}");
-        assert!(!r.contains(", type)"), "cost should not inject type, got: {r}");
+        assert!(r.needs_cost_compute);
+        // cost fetches per-type token data for pricing computation
+        assert!(r.vm_query.contains("toki_tokens_total"), "got: {}", r.vm_query);
+        assert!(r.vm_query.contains("by (model, type)"), "type injected for cost, got: {}", r.vm_query);
+        assert!(r.vm_query.contains("sum_over_time("), "got: {}", r.vm_query);
     }
 
     #[test]
     fn test_rewrite_passthrough_vm_native() {
-        // Already VM-native query should pass through unchanged
         let q = "sum_over_time(toki_tokens_total{user=\"abc\"}[1h])";
         let r = rewrite_toki_query(q);
-        assert_eq!(r, q);
+        assert_eq!(r.vm_query, q);
+        assert!(!r.needs_cost_compute);
+    }
+
+    #[test]
+    fn test_compute_cost_vector() {
+        // Simulate VM response for cost query: per-type token sums
+        let vm_response = serde_json::json!({
+            "status": "success",
+            "data": {
+                "resultType": "vector",
+                "result": [
+                    { "metric": { "model": "test-model", "type": "input" }, "value": [1000, "1000"] },
+                    { "metric": { "model": "test-model", "type": "output" }, "value": [1000, "500"] },
+                ]
+            }
+        });
+        let vm_bytes = serde_json::to_vec(&vm_response).unwrap();
+
+        let mut prices = std::collections::HashMap::new();
+        prices.insert("test-model".to_string(), crate::pricing::ModelPricing {
+            input_cost_per_token: 0.00001,
+            output_cost_per_token: 0.00003,
+            cache_creation_input_token_cost: None,
+            cache_read_input_token_cost: None,
+        });
+        let pricing = crate::pricing::PricingTable::new(prices);
+
+        let result = compute_cost_from_vm_response(&vm_bytes, &pricing, "cost{}").unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&result).unwrap();
+
+        assert_eq!(parsed["status"], "success");
+        let data = &parsed["data"]["result"];
+        assert_eq!(data.as_array().unwrap().len(), 1); // grouped by model (type removed)
+        let cost_str = data[0]["value"][1].as_str().unwrap();
+        let cost: f64 = cost_str.parse().unwrap();
+        // 1000 * 0.00001 + 500 * 0.00003 = 0.01 + 0.015 = 0.025
+        assert!((cost - 0.025).abs() < 1e-10, "got: {cost}");
     }
 }

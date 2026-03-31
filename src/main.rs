@@ -2,6 +2,7 @@ mod auth;
 mod config;
 mod db;
 mod metrics;
+mod pricing;
 mod server;
 mod sync;
 
@@ -121,6 +122,13 @@ async fn main() -> Result<()> {
         config_max_query_scope: config.features.max_query_scope.clone(),
     };
 
+    // Load pricing table (LiteLLM, ETag-cached)
+    let pricing = {
+        let cache_path = crate::pricing::default_cache_path();
+        crate::pricing::fetch_pricing(&cache_path)
+    };
+    tracing::info!("Pricing table loaded ({} models)", if pricing.is_empty() { 0 } else { 1 }); // TODO: expose count
+
     let state = AppState {
         db, jwt, brute, vm,
         access_token_ttl_secs: config.auth.access_token_ttl_secs,
@@ -132,6 +140,7 @@ async fn main() -> Result<()> {
         device_poll_tracker: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         dynamic_settings,
         trust_proxy: config.server.trust_proxy,
+        pricing: Arc::new(pricing),
     };
 
     // -- TCP sync server ------------------------------------------------------
