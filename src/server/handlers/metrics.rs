@@ -203,7 +203,7 @@ pub async fn toki_query(
 
     // Parse step and align start to bucket boundary (UTC midnight for daily+)
     let step_secs: i64 = params.step.as_deref()
-        .and_then(|s| s.trim_end_matches('s').parse().ok())
+        .map(|s| parse_duration_secs(s))
         .unwrap_or(3600);
     // Align start and shift by +step so first eval point's lookback
     // starts at the aligned boundary.
@@ -239,7 +239,7 @@ pub async fn toki_query(
 
     // Convert VM Prometheus JSON → toki JSON format
     let step_secs: i64 = params.step.as_deref()
-        .and_then(|s| s.trim_end_matches('s').parse().ok())
+        .map(|s| parse_duration_secs(s))
         .unwrap_or(3600);
     let toki_json = vm_response_to_toki_json(
         &vm_bytes, &state.pricing, rewritten.needs_cost_compute, rewritten.is_events, step_secs,
@@ -433,6 +433,34 @@ fn parse_toki_time(s: &str, is_end: bool) -> i64 {
 }
 
 /// Replace range vector durations [Xd/h/m/s/w/y] with [Ns] where N=range_secs.
+/// Parse duration string: "86400", "86400s", "24h", "1d", "1h30m" → seconds.
+fn parse_duration_secs(s: &str) -> i64 {
+    // Try plain number (seconds)
+    if let Ok(n) = s.parse::<i64>() { return n; }
+    if let Ok(n) = s.trim_end_matches('s').parse::<i64>() { return n; }
+
+    let mut total = 0i64;
+    let mut num_buf = String::new();
+    for c in s.chars() {
+        if c.is_ascii_digit() {
+            num_buf.push(c);
+        } else {
+            let n: i64 = num_buf.parse().unwrap_or(0);
+            num_buf.clear();
+            match c {
+                'd' => total += n * 86400,
+                'h' => total += n * 3600,
+                'm' => total += n * 60,
+                's' => total += n,
+                'w' => total += n * 604800,
+                'y' => total += n * 31536000,
+                _ => {}
+            }
+        }
+    }
+    if total == 0 { 3600 } else { total }
+}
+
 /// Extract the bare metric selector from a PromQL expression.
 /// "sum by (model, type) (sum_over_time(toki_tokens_total[3600s]))" → "toki_tokens_total"
 /// This lets us query raw data points and aggregate server-side.
@@ -1190,6 +1218,9 @@ mod toki_json_tests {
 
     #[test]
     fn test_vm_response_daily_bucket() {
+        // Simulates VM query_range with step=86400, aligned_start=03-24T00:00.
+        // Eval points are daily boundaries. sum_over_time[86400s] at each eval
+        // covers the previous 24h.
         let vm = serde_json::json!({
             "status": "success",
             "data": {
@@ -1198,9 +1229,8 @@ mod toki_json_tests {
                     {
                         "metric": {"model": "opus", "type": "input"},
                         "values": [
-                            [1774227600, "100"],  // 03-23T01:00
-                            [1774231200, "200"],  // 03-23T02:00
-                            [1774310400, "300"],  // 03-24T00:00
+                            [1774310400, "300"],  // eval=03-24T00:00 → bucket=03-23
+                            [1774396800, "500"],  // eval=03-25T00:00 → bucket=03-24
                         ]
                     }
                 ]
@@ -1214,7 +1244,7 @@ mod toki_json_tests {
         let parsed: serde_json::Value = serde_json::from_slice(&result).unwrap();
         let items = parsed["providers"]["claude_code"].as_array().unwrap();
         
-        // Should have 2 periods: 03-23 (100+200) and 03-24 (300)
+        // eval=03-24 → bucket=03-23 (eval-step), eval=03-25 → bucket=03-24
         let mut found = std::collections::HashMap::new();
         for item in items {
             let period = item["period"].as_str().unwrap();
@@ -1225,7 +1255,7 @@ mod toki_json_tests {
             }
         }
         eprintln!("found: {:?}", found);
-        assert_eq!(found.get("2026-03-23"), Some(&300u64), "03-23 should have 100+200");
-        assert_eq!(found.get("2026-03-24"), Some(&300u64), "03-24 should have 300");
+        assert_eq!(found.get("2026-03-23"), Some(&300u64), "03-23 should have 300 (eval 03-24)");
+        assert_eq!(found.get("2026-03-24"), Some(&500u64), "03-24 should have 500 (eval 03-25)");
     }
 }
