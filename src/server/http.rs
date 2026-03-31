@@ -138,6 +138,8 @@ pub fn build_router(state: AppState) -> Router {
         // PromQL proxy (requires JWT)
         .route("/api/v1/query", get(metrics::promql_query))
         .route("/api/v1/query_range", get(metrics::promql_query_range))
+        // Toki query: same interface as local daemon REPORT protocol
+        .route("/api/v1/toki/query", get(metrics::toki_query))
         // User self-service
         .route("/me/devices", get(me::me_devices))
         .route("/me/devices/:device_id", delete(me::me_delete_device))

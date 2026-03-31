@@ -26,6 +26,18 @@ pub struct QueryRangeParams {
     pub scope: Option<String>,
 }
 
+/// Toki query params — same interface as local daemon REPORT protocol.
+/// Query is toki PromQL (usage{}, events{}, cost{}), start/end are epoch seconds or date strings.
+#[derive(Deserialize)]
+pub struct TokiQueryParams {
+    pub query: String,
+    #[serde(default)]
+    pub start: Option<String>,
+    #[serde(default)]
+    pub end: Option<String>,
+    pub scope: Option<String>,
+}
+
 // ─── Scope types ─────────────────────────────────────────────────────────────
 
 enum Scope {
@@ -153,6 +165,122 @@ pub async fn promql_query_range(
         [("Content-Type", "application/json")],
         result,
     ).into_response())
+}
+
+/// Toki query endpoint: accepts toki PromQL (usage{}, events{}, cost{}) with start/end.
+/// Behaves identically to the local daemon's REPORT protocol — same query, same result.
+///
+/// 1. Parse start/end into epoch seconds
+/// 2. Build a VM instant query at time=end with sum_over_time[{range}s]
+/// 3. For cost{}: fetch per-type tokens, apply pricing
+/// 4. Return toki-format JSON (same as local daemon response)
+pub async fn toki_query(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Query(params): Query<TokiQueryParams>,
+) -> Result<Response, AppError> {
+    let claims = extract_jwt(&headers, &state.jwt)?;
+    let requested_scope = params.scope.as_deref().unwrap_or("self");
+    let scoped = resolve_scope(&state, &params.query, &claims.sub, requested_scope).await?;
+
+    // Parse start/end — accept epoch seconds or YYYYMMDD/YYYYMMDDhhmmss
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let start_ts = params.start.as_deref()
+        .map(|s| parse_toki_time(s, false))
+        .unwrap_or(0);
+    let end_ts = params.end.as_deref()
+        .map(|s| parse_toki_time(s, true))
+        .unwrap_or(now);
+    let range_secs = (end_ts - start_ts).max(1);
+
+    let rewritten = rewrite_toki_query(&scoped);
+
+    // For bare metric queries (e.g. "cost{}", "usage{}"), wrap in sum by (model)
+    // with sum_over_time[range] to match local daemon's summary behavior.
+    // For queries that already have aggregation (sum/increase/etc.), just replace
+    // the range vector with the actual time range.
+    let range_str = format!("{}s", range_secs);
+    let vm_query = if rewritten.vm_query.contains('(') {
+        // Has aggregation — just replace range vectors
+        replace_range_vector(&rewritten.vm_query, range_secs)
+    } else if rewritten.needs_cost_compute {
+        // Bare cost{} → need per-type breakdown for pricing
+        format!("sum by (model, type) (sum_over_time({}[{}]))", rewritten.vm_query, range_str)
+    } else {
+        // Bare usage{}/events{} → sum by model
+        format!("sum by (model) (sum_over_time({}[{}]))", rewritten.vm_query, range_str)
+    };
+
+    // Execute as instant query at time=end
+    let result = if rewritten.needs_cost_compute {
+        let vm_result = state.vm.query(&vm_query, Some(end_ts))
+            .await.map_err(AppError::bad_gateway)?;
+        let computed = compute_cost_from_vm_response(&vm_result, &state.pricing, &rewritten.original_query)?;
+        bytes::Bytes::from(computed)
+    } else {
+        state.vm.query(&vm_query, Some(end_ts))
+            .await.map_err(AppError::bad_gateway)?
+    };
+
+    Ok((
+        StatusCode::OK,
+        [("Content-Type", "application/json")],
+        result,
+    ).into_response())
+}
+
+/// Parse toki time string: epoch seconds, YYYYMMDD, or YYYYMMDDhhmmss
+fn parse_toki_time(s: &str, is_end: bool) -> i64 {
+    // Try epoch seconds first
+    if let Ok(ts) = s.parse::<i64>() {
+        return ts;
+    }
+    // YYYYMMDD
+    if s.len() == 8 {
+        if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y%m%d") {
+            let time = if is_end {
+                d.and_hms_opt(23, 59, 59).unwrap()
+            } else {
+                d.and_hms_opt(0, 0, 0).unwrap()
+            };
+            return time.and_utc().timestamp();
+        }
+    }
+    // YYYYMMDDhhmmss
+    if s.len() == 14 {
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y%m%d%H%M%S") {
+            return dt.and_utc().timestamp();
+        }
+    }
+    0
+}
+
+/// Replace range vector durations [Xd/h/m/s/w/y] with [Ns] where N=range_secs.
+fn replace_range_vector(query: &str, range_secs: i64) -> String {
+    let replacement = format!("{}s", range_secs);
+    let mut result = String::with_capacity(query.len());
+    let mut chars = query.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '[' {
+            let mut content = String::new();
+            while let Some(&nc) = chars.peek() {
+                if nc == ']' { chars.next(); break; }
+                content.push(chars.next().unwrap());
+            }
+            let is_duration = !content.is_empty()
+                && content.chars().last().map_or(false, |c| "smhdwy".contains(c))
+                && content[..content.len()-1].chars().all(|c| c.is_ascii_digit());
+            if is_duration {
+                result.push_str(&format!("[{}]", replacement));
+            } else {
+                result.push_str(&format!("[{}]", content));
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
 }
 
 // ─── Toki PromQL → VM PromQL translation ─────────────────────────────────────
