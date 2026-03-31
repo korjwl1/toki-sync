@@ -179,18 +179,19 @@ async fn find_or_create_device(
     device_name: &str,
     device_key: &str,
 ) -> Result<String> {
-    // Look up existing device by stable device_key UUID, scoped to user
+    // Use client's device_key as the device ID directly.
+    // This ensures the same physical device always has the same ID,
+    // even after disable/re-enable or server DB rebuild.
     if let Some(id) = db.find_device_by_key_and_user(device_key, user_id).await? {
         db.update_device_seen(&id, device_name).await?;
         return Ok(id);
     }
 
-    // Create new device
-    let id = uuid::Uuid::new_v4().to_string();
-    db.create_device(&id, user_id, device_name, device_key).await?;
+    // New device: use device_key as ID (not a random UUID)
+    db.create_device(device_key, user_id, device_name, device_key).await?;
 
-    tracing::info!("registered new device '{device_name}' (key={device_key}) for user={user_id} id={id}");
-    Ok(id)
+    tracing::info!("registered device '{device_name}' (id={device_key}) for user={user_id}");
+    Ok(device_key.to_string())
 }
 
 async fn handle_sync_batch(

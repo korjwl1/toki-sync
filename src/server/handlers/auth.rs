@@ -571,8 +571,8 @@ pub async fn device_token_poll(
             // Find or create — idempotent in case of retry
             let existing = state.db.find_device_by_key_and_user(device_key, &user_id).await;
             if let Ok(None) = existing {
-                let id = uuid::Uuid::new_v4().to_string();
-                if let Err(e) = state.db.create_device(&id, &user_id, device_name, device_key).await {
+                // Use device_key as ID (client's stable UUID)
+                if let Err(e) = state.db.create_device(device_key, &user_id, device_name, device_key).await {
                     tracing::warn!("failed to register device during token exchange: {e}");
                 } else {
                     tracing::info!(
