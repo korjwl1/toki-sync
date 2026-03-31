@@ -273,7 +273,12 @@ fn vm_response_to_toki_json(
 
     for r in results {
         let metric = r["metric"].as_object().unwrap_or(&serde_json::Map::new()).clone();
-        let model = metric.get("model").and_then(|v| v.as_str()).unwrap_or("(total)").to_string();
+        let model = metric.get("model")
+            .or_else(|| metric.get("project"))
+            .or_else(|| metric.get("session"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("(total)")
+            .to_string();
         let token_type = metric.get("type").and_then(|v| v.as_str());
         let toki_metric = metric.get("__toki_metric__").and_then(|v| v.as_str());
 
