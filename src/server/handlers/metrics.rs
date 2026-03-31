@@ -307,11 +307,12 @@ fn compute_cost_from_vm_response(
                 entry.1 += token_cost;
             }
 
-            // Build response
+            // Build response — add __toki_metric__: "cost" so clients know this is USD, not tokens
             let result_arr: Vec<serde_json::Value> = cost_map.values().map(|(labels, cost, ts)| {
-                let metric: serde_json::Map<String, serde_json::Value> = labels.iter()
+                let mut metric: serde_json::Map<String, serde_json::Value> = labels.iter()
                     .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
                     .collect();
+                metric.insert("__toki_metric__".to_string(), serde_json::Value::String("cost".to_string()));
                 serde_json::json!({
                     "metric": metric,
                     "value": [ts, format!("{}", cost)],
@@ -365,9 +366,10 @@ fn compute_cost_from_vm_response(
             }
 
             let result_arr: Vec<serde_json::Value> = cost_map.values().map(|(labels, ts_costs)| {
-                let metric: serde_json::Map<String, serde_json::Value> = labels.iter()
+                let mut metric: serde_json::Map<String, serde_json::Value> = labels.iter()
                     .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
                     .collect();
+                metric.insert("__toki_metric__".to_string(), serde_json::Value::String("cost".to_string()));
                 let values: Vec<serde_json::Value> = ts_costs.iter().map(|(ts, cost)| {
                     let ts_val: serde_json::Value = serde_json::from_str(ts).unwrap_or(serde_json::Value::Null);
                     serde_json::json!([ts_val, format!("{}", cost)])
