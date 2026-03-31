@@ -221,8 +221,11 @@ pub async fn toki_query(
     };
 
     // Convert VM Prometheus JSON → toki JSON format
+    let step_secs: i64 = params.step.as_deref()
+        .and_then(|s| s.trim_end_matches('s').parse().ok())
+        .unwrap_or(3600);
     let toki_json = vm_response_to_toki_json(
-        &vm_bytes, &state.pricing, rewritten.needs_cost_compute, rewritten.is_events,
+        &vm_bytes, &state.pricing, rewritten.needs_cost_compute, rewritten.is_events, step_secs,
     )?;
 
     Ok((
@@ -239,6 +242,7 @@ fn vm_response_to_toki_json(
     pricing: &crate::pricing::PricingTable,
     is_cost: bool,
     is_events: bool,
+    _step_secs: i64,
 ) -> Result<Vec<u8>, AppError> {
     let vm: serde_json::Value = serde_json::from_slice(vm_bytes)
         .map_err(|e| AppError::internal(anyhow::anyhow!("invalid VM response: {e}")))?;
