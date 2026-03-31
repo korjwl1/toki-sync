@@ -541,6 +541,20 @@ impl DatabaseRepo for SqliteRepo {
         Ok(())
     }
 
+    async fn reset_cursor(&self, device_id: &str, provider: &str) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        sqlx::query(
+            "UPDATE cursors SET last_ts = 0, updated_at = ? WHERE device_id = ? AND provider = ?",
+        )
+        .bind(now)
+        .bind(device_id)
+        .bind(provider)
+        .execute(&self.pool)
+        .await
+        .context("reset_cursor")?;
+        Ok(())
+    }
+
     // ── Teams ───────────────────────────────────────────────────────────────
 
     async fn create_team(&self, id: &str, name: &str) -> Result<()> {

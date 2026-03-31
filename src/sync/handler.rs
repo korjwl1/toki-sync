@@ -76,6 +76,10 @@ pub async fn handle_connection(
         if let Err(e) = vm.delete_device_series(&device_id).await {
             tracing::warn!("failed to delete VM series for device {device_id}: {e}");
         }
+        // Reset server cursor so client re-syncs all data
+        if let Err(e) = db.reset_cursor(&device_id, &provider).await {
+            tracing::warn!("failed to reset cursor for device {device_id}: {e}");
+        }
 
         let err = AuthErrPayload {
             reason: format!(

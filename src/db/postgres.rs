@@ -500,6 +500,20 @@ impl DatabaseRepo for PostgresRepo {
         Ok(())
     }
 
+    async fn reset_cursor(&self, device_id: &str, provider: &str) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        sqlx::query(
+            "UPDATE cursors SET last_ts = 0, updated_at = $1 WHERE device_id = $2 AND provider = $3",
+        )
+        .bind(now)
+        .bind(device_id)
+        .bind(provider)
+        .execute(&self.pool)
+        .await
+        .context("reset_cursor")?;
+        Ok(())
+    }
+
     // ── Teams ───────────────────────────────────────────────────────────────
 
     async fn create_team(&self, id: &str, name: &str) -> Result<()> {

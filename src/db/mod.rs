@@ -36,6 +36,7 @@ pub trait DatabaseRepo: Send + Sync {
     async fn ensure_cursor(&self, device_id: &str, provider: &str) -> Result<()>;
     async fn get_last_ts(&self, device_id: &str, provider: &str) -> Result<i64>;
     async fn advance_cursor(&self, device_id: &str, provider: &str, ts: i64) -> Result<()>;
+    async fn reset_cursor(&self, device_id: &str, provider: &str) -> Result<()>;
 
     // Teams
     async fn create_team(&self, id: &str, name: &str) -> Result<()>;
