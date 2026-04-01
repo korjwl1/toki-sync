@@ -101,7 +101,8 @@ async fn main() -> Result<()> {
             if config.events.clickhouse_url.is_empty() {
                 anyhow::bail!("events.backend=clickhouse but events.clickhouse_url is empty");
             }
-            Arc::new(crate::events::clickhouse::ClickHouseEventStore::new(&config.events.clickhouse_url))
+            Arc::new(crate::events::clickhouse::ClickHouseEventStore::new(&config.events.clickhouse_url)
+                .context("failed to initialize ClickHouse event store")?)
         }
         _ => {
             let path = std::path::Path::new(&config.events.fjall_path);
