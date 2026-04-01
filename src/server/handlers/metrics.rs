@@ -263,9 +263,10 @@ pub async fn toki_query(
         .map(|s| parse_duration_secs(s))
         .unwrap_or(3600);
 
-    // ── Step validation ──
-    // Prevent excessive bucket counts that would exhaust server memory.
-    // max_buckets=2000 is more than enough for any dashboard chart.
+    // ── Step validation: protect against memory exhaustion. ──
+    // aggregate_events_to_toki_json accumulates into BTreeMap<(bucket, group_key)>.
+    // A 30-day range with 1-second step = 2.6M buckets × ~200 bytes = 500MB+.
+    // Cap at 2000 buckets (sufficient for any dashboard chart resolution).
     if is_range {
         let range_secs = (end_ts - start_ts).max(1);
         let max_buckets: i64 = 2000;
@@ -333,6 +334,12 @@ pub async fn toki_query(
 ///
 /// Aggregate ServerEvents into toki JSON format.
 /// Uses the exact same bucketing logic as the local daemon (query.rs).
+///
+/// Output format matches local daemon's `grouped_to_json` (sink/json.rs):
+/// - `{"providers": {"<provider>": [{"period": "<ts>|<group>", "usage_per_models": [...]}]}}`
+/// - Period key: ISO timestamp + "|" + group key (model name or project name)
+/// - Field names vary by provider (Codex uses cached_input_tokens/reasoning_output_tokens)
+/// - Server omits the "information" block that local CLI adds (optional for parsers)
 ///
 /// EventStore has already deduped by msg_id, so each event appears once.
 fn aggregate_events_to_toki_json(
@@ -568,7 +575,10 @@ fn rewrite_toki_query(query: &str) -> RewriteResult {
         let re3 = Regex::new(r"cost\[").unwrap();
         result = re3.replace_all(&result, "toki_tokens_total[").to_string();
 
-        // Inject `type` into by() for per-type breakdown (needed for pricing)
+        // Inject `type` into by() so VM/aggregation gets per-type token breakdown.
+        // Without this, usage{} queries would sum all token types together,
+        // losing the input/output/cache_create/cache_read breakdown needed
+        // for the dashboard's per-type display and cost computation.
         let by_re = Regex::new(r"by\s*\(([^)]*)\)").unwrap();
         result = by_re.replace_all(&result, |caps: &regex::Captures| {
             let inner = &caps[1];
@@ -595,7 +605,10 @@ fn rewrite_toki_query(query: &str) -> RewriteResult {
         let re3 = Regex::new(r"usage\[").unwrap();
         result = re3.replace_all(&result, "toki_tokens_total[").to_string();
 
-        // Inject type into by() for per-type breakdown
+        // Inject `type` into by() so VM/aggregation gets per-type token breakdown.
+        // Without this, usage{} queries would sum all token types together,
+        // losing the input/output/cache_create/cache_read breakdown needed
+        // for the dashboard's per-type display and cost computation.
         let by_re = Regex::new(r"by\s*\(([^)]*)\)").unwrap();
         result = by_re.replace_all(&result, |caps: &regex::Captures| {
             let inner = &caps[1];
@@ -611,7 +624,11 @@ fn rewrite_toki_query(query: &str) -> RewriteResult {
     let inc_re = Regex::new(r"increase\(").unwrap();
     result = inc_re.replace_all(&result, "sum_over_time(").to_string();
 
-    // Extract primary group-by dimension from original query: by (model), by (project), etc.
+    // Extract the user's intended group-by dimension BEFORE type injection.
+    // E.g., "sum by (model) (...)" → group_by = "model"
+    // E.g., "sum by (project) (...)" → group_by = "project"
+    // The injected "type" dimension is used internally for token breakdown
+    // but NOT for the final JSON grouping.
     let group_by = {
         let by_re = Regex::new(r"by\s*\(([^)]*)\)").unwrap();
         by_re.captures(query)

@@ -255,6 +255,11 @@ async fn handle_sync_batch(
             }
         }
 
+        // usage_total is pre-computed by the daemon per provider:
+        // - Claude: input + output + cache_creation + cache_read
+        // - Codex: input + output only (cached_input ⊂ input, reasoning_output ⊂ output)
+        // We trust the daemon's calculation rather than recomputing, because
+        // the server doesn't know provider-specific semantics at this point.
         se.usage_total = item.usage_total;
 
         se

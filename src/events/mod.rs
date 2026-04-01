@@ -41,15 +41,20 @@ pub enum UserFilter {
 /// Event storage backend.
 ///
 /// Two implementations:
-/// - `FjallEventStore`: embedded, standalone, msg_id-based dedup via idx_msg
-/// - `ClickHouseEventStore`: external, ReplacingMergeTree auto-dedup
+/// - `FjallEventStore`: embedded LSM-tree, standalone mode.
+///   Dedup via idx_msg secondary index (same pattern as local daemon).
+/// - `ClickHouseEventStore`: external columnar DB.
+///   Dedup via ReplacingMergeTree(ts_ms) ORDER BY (device_id, provider, msg_id).
 ///
-/// Backend is chosen at startup via config and cannot be switched at runtime.
+/// Backend is chosen at startup via config (`events.backend`) and cannot
+/// be switched at runtime. Data is NOT migrated between backends.
+///
+/// Key invariant: upsert_events is idempotent by (device_id, provider, msg_id).
+/// Re-sending the same event (e.g., after crash recovery) produces the same result.
 #[async_trait::async_trait]
 pub trait EventStore: Send + Sync + 'static {
-    /// Insert or update events. Deduplicates by (device_id, msg_id):
-    /// if an event with the same (device_id, msg_id) already exists,
-    /// it is replaced with the new values.
+    /// Insert or update events. Deduplicates by (device_id, provider, msg_id):
+    /// if an event with the same key already exists, it is replaced.
     async fn upsert_events(&self, events: &[ServerEvent]) -> Result<()>;
 
     /// Query events in [since_ms, until_ms) matching the user filter.

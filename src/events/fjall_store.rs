@@ -5,9 +5,11 @@ use fjall::{Database as FjallDatabase, Keyspace, KeyspaceCreateOptions};
 
 use super::{EventStore, ServerEvent, UserFilter};
 
-/// Schema version for the server-side Fjall event store.
-/// Increment when ServerEvent serialization or keyspace layout changes.
-/// Mismatched version triggers automatic data reset.
+/// Event store schema version. Auto-resets Fjall data on mismatch.
+///
+/// History:
+/// - v1: initial (device_id\0msg_id dedup key)
+/// - v2: added provider to dedup key (device_id\0provider\0msg_id)
 const EVENT_SCHEMA_VERSION: u32 = 2;
 
 /// Fjall-backed event store with msg_id dedup.
