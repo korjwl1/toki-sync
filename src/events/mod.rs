@@ -22,6 +22,10 @@ pub struct ServerEvent {
     pub output_tokens: u64,
     pub cache_creation_input_tokens: u64,
     pub cache_read_input_tokens: u64,
+    /// Pre-computed usage total. For Claude: all 4 token types.
+    /// For Codex: input + output only (cached_input ⊂ input, reasoning_output ⊂ output).
+    #[serde(default)]
+    pub usage_total: u64,
 }
 
 /// Scope filter for queries.

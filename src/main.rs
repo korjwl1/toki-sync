@@ -12,7 +12,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::auth::{BruteForceGuard, JwtManager};
-use crate::config::{Config, default_vm_url};
+use crate::config::Config;
 use crate::db::{DatabaseRepo, open_database};
 use crate::metrics::VictoriaMetrics;
 use crate::server::{build_router, http::{AppState, DynamicSettings}, tcp::run_tcp_server};
@@ -114,9 +114,7 @@ async fn main() -> Result<()> {
         if config.events.backend == "fjall" { &config.events.fjall_path } else { &config.events.clickhouse_url });
 
     // VM is optional: only for PromQL proxy endpoints (Grafana compatibility)
-    let vm: Option<Arc<VictoriaMetrics>> = if !config.backend.vm_url.is_empty()
-        && config.backend.vm_url != default_vm_url()
-    {
+    let vm: Option<Arc<VictoriaMetrics>> = if !config.backend.vm_url.is_empty() {
         Some(Arc::new(VictoriaMetrics::new(&config.backend.vm_url)))
     } else {
         None

@@ -40,7 +40,8 @@ impl ClickHouseEventStore {
                 input_tokens UInt64,
                 output_tokens UInt64,
                 cache_creation_input_tokens UInt64,
-                cache_read_input_tokens UInt64
+                cache_read_input_tokens UInt64,
+                usage_total UInt64
             ) ENGINE = ReplacingMergeTree(ts_ms)
             ORDER BY (device_id, msg_id)
         ";
@@ -58,7 +59,12 @@ impl ClickHouseEventStore {
     }
 
     fn escape(s: &str) -> String {
-        s.replace('\\', "\\\\").replace('\'', "\\'")
+        s.replace('\\', "\\\\")
+         .replace('\'', "\\'")
+         .replace('\0', "")
+         .replace('\n', "\\n")
+         .replace('\r', "\\r")
+         .replace('\t', "\\t")
     }
 }
 
@@ -70,13 +76,13 @@ impl EventStore for ClickHouseEventStore {
         // Build INSERT with VALUES — ClickHouse ReplacingMergeTree handles dedup
         let mut sql = String::from(
             "INSERT INTO toki_events (device_id, user_id, msg_id, ts_ms, provider, model, project, \
-             input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens) VALUES "
+             input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, usage_total) VALUES "
         );
 
         for (i, e) in events.iter().enumerate() {
             if i > 0 { sql.push(','); }
             sql.push_str(&format!(
-                "('{}','{}','{}',{},'{}','{}','{}',{},{},{},{})",
+                "('{}','{}','{}',{},'{}','{}','{}',{},{},{},{},{})",
                 Self::escape(&e.device_id),
                 Self::escape(&e.user_id),
                 Self::escape(&e.msg_id),
@@ -88,6 +94,7 @@ impl EventStore for ClickHouseEventStore {
                 e.output_tokens,
                 e.cache_creation_input_tokens,
                 e.cache_read_input_tokens,
+                e.usage_total,
             ));
         }
 
@@ -122,7 +129,7 @@ impl EventStore for ClickHouseEventStore {
 
         let sql = format!(
             "SELECT device_id, user_id, msg_id, ts_ms, provider, model, project, \
-             input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens \
+             input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, usage_total \
              FROM toki_events FINAL \
              WHERE ts_ms >= {since_ms} AND ts_ms < {until_ms} {user_clause} \
              ORDER BY ts_ms \

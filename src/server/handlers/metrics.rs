@@ -312,7 +312,7 @@ fn aggregate_events_to_toki_json(
     #[derive(Default)]
     struct ModelBucket {
         input: u64, output: u64, cache_create: u64, cache_read: u64,
-        events: u64, cost_usd: Option<f64>,
+        usage_total: u64, events: u64, cost_usd: Option<f64>,
     }
 
     let mut buckets: BTreeMap<(i64, String), ModelBucket> = BTreeMap::new();
@@ -343,6 +343,7 @@ fn aggregate_events_to_toki_json(
             entry.output += event.output_tokens;
             entry.cache_create += event.cache_creation_input_tokens;
             entry.cache_read += event.cache_read_input_tokens;
+            entry.usage_total += event.usage_total;  // Use pre-computed total
             entry.events += 1;  // always count events alongside tokens
         }
     }
@@ -361,14 +362,13 @@ fn aggregate_events_to_toki_json(
         let ts = chrono::DateTime::from_timestamp(*bucket_sec, 0)
             .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S").to_string())
             .unwrap_or_default();
-        let total = bucket.input + bucket.output + bucket.cache_create + bucket.cache_read;
         let mut entry = serde_json::json!({
             "model": model,
             "input_tokens": bucket.input,
             "output_tokens": bucket.output,
             "cache_creation_input_tokens": bucket.cache_create,
             "cache_read_input_tokens": bucket.cache_read,
-            "total_tokens": total,
+            "total_tokens": bucket.usage_total,
             "events": bucket.events,
         });
         if let Some(cost) = bucket.cost_usd.or_else(|| pricing.cost(model, bucket.input, bucket.output, bucket.cache_create, bucket.cache_read)) {
@@ -385,289 +385,19 @@ fn aggregate_events_to_toki_json(
         })
     }).collect();
 
+    let provider_name = events.iter()
+        .find(|e| !e.provider.is_empty())
+        .map(|e| e.provider.as_str())
+        .unwrap_or("claude_code");
+
     let output = serde_json::json!({
-        "providers": { "claude_code": data }
+        "providers": { provider_name: data }
     });
 
     serde_json::to_vec(&output)
         .map_err(|e| AppError::internal(anyhow::anyhow!("json serialize: {e}")))
 }
 
-/// Legacy: aggregate raw VM export data. Kept for reference but no longer used by toki_query.
-#[allow(dead_code)]
-fn aggregate_raw_to_toki_json(
-    raw_series: &[crate::metrics::vm::ExportedSeries],
-    step_secs: i64,
-    since_ms: i64,
-    until_ms: i64,
-    is_cost: bool,
-    is_events: bool,
-    group_by: &str,
-    pricing: &crate::pricing::PricingTable,
-) -> Result<Vec<u8>, AppError> {
-    use std::collections::BTreeMap;
-
-    let step_ms = step_secs * 1000;
-
-    #[derive(Default)]
-    struct ModelBucket {
-        input: u64, output: u64, cache_create: u64, cache_read: u64,
-        events: u64, cost_usd: Option<f64>,
-    }
-
-    // key: (bucket_sec, group_key) → ModelBucket
-    let mut buckets: BTreeMap<(i64, String), ModelBucket> = BTreeMap::new();
-
-    for series in raw_series {
-        // Use the query's group_by dimension as the group key
-        let group_key = series.labels.get(group_by)
-            .cloned()
-            .unwrap_or_else(|| "(total)".to_string());
-        let token_type = series.labels.get("type").map(|s| s.as_str());
-        let metric_name = series.labels.get("__name__").map(|s| s.as_str()).unwrap_or("");
-        let is_events_series = metric_name == "toki_events_total";
-
-        for (ts_ms, value) in series.timestamps.iter().zip(series.values.iter()) {
-            // 1. Scan range: [since_ms, until_ms) — match local's for_each_event
-            if *ts_ms < since_ms || *ts_ms >= until_ms { continue; }
-
-            // 2. Bucket assignment: floor(ts_ms / step_ms) * step_ms
-            let bucket_ms = (*ts_ms / step_ms) * step_ms;
-
-            // 3. Bucket filter: match local's overlap check
-            if bucket_ms + step_ms <= since_ms || bucket_ms >= until_ms { continue; }
-
-            let bucket_sec = bucket_ms / 1000;
-            let entry = buckets.entry((bucket_sec, group_key.clone())).or_default();
-
-            // 4. Accumulate
-            if is_events_series || is_events {
-                entry.events += value.round() as u64;
-            } else {
-                let uval = value.round() as u64;
-                match token_type {
-                    Some("input") => entry.input += uval,
-                    Some("output") => entry.output += uval,
-                    Some("cache_create") => entry.cache_create += uval,
-                    Some("cache_read") => entry.cache_read += uval,
-                    Some("cached_input") | Some("reasoning_output") => { /* subsets, not additional */ }
-                    _ => entry.input += uval,
-                }
-            }
-        }
-    }
-
-    // Compute cost if needed
-    if is_cost {
-        for ((_, model), bucket) in &mut buckets {
-            bucket.cost_usd = pricing.cost(model, bucket.input, bucket.output,
-                bucket.cache_create, bucket.cache_read);
-        }
-    }
-
-    // Build toki JSON: group by (period|model), identical to local's grouped_to_json
-    let mut periods: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
-    for ((bucket_sec, model), bucket) in &buckets {
-        let ts = chrono::DateTime::from_timestamp(*bucket_sec, 0)
-            .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S").to_string())
-            .unwrap_or_default();
-        let total = bucket.input + bucket.output + bucket.cache_create + bucket.cache_read;
-        let mut entry = serde_json::json!({
-            "model": model,
-            "input_tokens": bucket.input,
-            "output_tokens": bucket.output,
-            "cache_creation_input_tokens": bucket.cache_create,
-            "cache_read_input_tokens": bucket.cache_read,
-            "total_tokens": total,
-            "events": bucket.events,
-        });
-        if let Some(cost) = bucket.cost_usd.or_else(|| pricing.cost(model, bucket.input, bucket.output, bucket.cache_create, bucket.cache_read)) {
-            entry["cost_usd"] = serde_json::json!(cost);
-        }
-        let period_key = format!("{}|{}", ts, model);
-        periods.entry(period_key).or_default().push(entry);
-    }
-
-    let data: Vec<serde_json::Value> = periods.into_iter().map(|(period, models)| {
-        serde_json::json!({
-            "period": period,
-            "usage_per_models": models,
-        })
-    }).collect();
-
-    let output = serde_json::json!({
-        "providers": {
-            "claude_code": data,
-        }
-    });
-
-    serde_json::to_vec(&output)
-        .map_err(|e| AppError::internal(anyhow::anyhow!("json serialize: {e}")))
-}
-
-/// Legacy: Convert Prometheus JSON response to toki-format JSON.
-/// Kept for promql_query/promql_query_range endpoints (Grafana compatibility).
-#[allow(dead_code)]
-fn vm_response_to_toki_json(
-    vm_bytes: &[u8],
-    pricing: &crate::pricing::PricingTable,
-    is_cost: bool,
-    is_events: bool,
-    step_secs: i64,
-    start_ts: i64,
-    end_ts: i64,
-) -> Result<Vec<u8>, AppError> {
-    let vm: serde_json::Value = serde_json::from_slice(vm_bytes)
-        .map_err(|e| AppError::internal(anyhow::anyhow!("invalid VM response: {e}")))?;
-
-    if vm["status"].as_str() != Some("success") {
-        return Ok(vm_bytes.to_vec());
-    }
-
-    let result_type = vm["data"]["resultType"].as_str().unwrap_or("vector");
-    let results = vm["data"]["result"].as_array()
-        .ok_or_else(|| AppError::internal(anyhow::anyhow!("no result array")))?;
-
-    // Collect per-(timestamp, model) token data
-    use std::collections::BTreeMap;
-
-    struct ModelBucket {
-        input: u64, output: u64, cache_create: u64, cache_read: u64,
-        events: u64, cost_usd: Option<f64>,
-    }
-    impl Default for ModelBucket {
-        fn default() -> Self {
-            ModelBucket { input: 0, output: 0, cache_create: 0, cache_read: 0, events: 0, cost_usd: None }
-        }
-    }
-
-    // key: (timestamp_str, model) → ModelBucket
-    let mut buckets: BTreeMap<(String, String), ModelBucket> = BTreeMap::new();
-
-    for r in results {
-        let metric = r["metric"].as_object().unwrap_or(&serde_json::Map::new()).clone();
-        let model = metric.get("model")
-            .or_else(|| metric.get("project"))
-            .or_else(|| metric.get("session"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("(total)")
-            .to_string();
-        let token_type = metric.get("type").and_then(|v| v.as_str());
-        let toki_metric = metric.get("__toki_metric__").and_then(|v| v.as_str());
-
-        let points: Vec<(String, f64)> = if result_type == "matrix" {
-            r["values"].as_array().map(|vals| {
-                vals.iter().filter_map(|pair| {
-                    let raw_ts = pair[0].as_f64()? as i64;
-                    // Map VM backward-looking eval time → local forward-looking bucket.
-                    // VM eval at T covers [T-step, T]; local bucket B covers [B, B+step).
-                    // So bucket = T - step.
-                    let bucket = raw_ts - step_secs;
-                    // Apply local daemon's range filter: bucket + step > start AND bucket < end
-                    if bucket + step_secs <= start_ts || bucket >= end_ts { return None; }
-                    let floored = bucket;
-                    let ts = chrono::DateTime::from_timestamp(floored, 0)
-                        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S").to_string())?;
-                    let val: f64 = pair[1].as_str()?.parse().ok()?;
-                    Some((ts, val))
-                }).collect()
-            }).unwrap_or_default()
-        } else {
-            // vector: single value
-            let ts = r["value"][0].as_f64().map(|t| {
-                chrono::DateTime::from_timestamp(t as i64, 0)
-                    .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S").to_string())
-                    .unwrap_or_default()
-            }).unwrap_or_default();
-            let val: f64 = r["value"][1].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-            vec![(ts, val)]
-        };
-
-        for (ts, val) in points {
-            let bucket = buckets.entry((ts, model.clone())).or_default();
-            if toki_metric == Some("cost") || is_cost {
-                // Cost query: compute from per-type tokens
-                if let Some(tt) = token_type {
-                    let uval = val.round() as u64;
-                    match tt {
-                        "input" => bucket.input += uval,
-                        "output" => bucket.output += uval,
-                        "cache_create" => bucket.cache_create += uval,
-                        "cache_read" => bucket.cache_read += uval,
-                        _ => {}
-                    }
-                } else {
-                    // Already computed cost value
-                    *bucket.cost_usd.get_or_insert(0.0) += val;
-                }
-            } else if is_events {
-                // Events query: value is event count
-                let uval = val.round() as u64;
-                bucket.events += uval;
-            } else {
-                // Usage query: per-type token breakdown.
-                // cached_input ⊂ input, reasoning_output ⊂ output (Codex).
-                // These are subsets, not additional — don't add to total.
-                let uval = val.round() as u64;
-                match token_type {
-                    Some("input") => bucket.input += uval,
-                    Some("output") => bucket.output += uval,
-                    Some("cache_create") => bucket.cache_create += uval,
-                    Some("cache_read") => bucket.cache_read += uval,
-                    Some("cached_input") => { /* subset of input — display only */ }
-                    Some("reasoning_output") => { /* subset of output — display only */ }
-                    _ => bucket.input += uval,
-                }
-            }
-        }
-    }
-
-    // For cost queries: compute cost from tokens if not already computed
-    if is_cost {
-        for ((_, model), bucket) in &mut buckets {
-            if bucket.cost_usd.is_none() {
-                bucket.cost_usd = pricing.cost(model, bucket.input, bucket.output,
-                    bucket.cache_create, bucket.cache_read);
-            }
-        }
-    }
-
-    // Build toki JSON: group by period
-    let mut periods: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
-    for ((ts, model), bucket) in &buckets {
-        let total = bucket.input + bucket.output + bucket.cache_create + bucket.cache_read;
-        let mut entry = serde_json::json!({
-            "model": model,
-            "input_tokens": bucket.input,
-            "output_tokens": bucket.output,
-            "cache_creation_input_tokens": bucket.cache_create,
-            "cache_read_input_tokens": bucket.cache_read,
-            "total_tokens": total,
-            "events": bucket.events,
-        });
-        if let Some(cost) = bucket.cost_usd.or_else(|| pricing.cost(model, bucket.input, bucket.output, bucket.cache_create, bucket.cache_read)) {
-            entry["cost_usd"] = serde_json::json!(cost);
-        }
-        let period_key = format!("{}|{}", ts, model);
-        periods.entry(period_key).or_default().push(entry);
-    }
-
-    let data: Vec<serde_json::Value> = periods.into_iter().map(|(period, models)| {
-        serde_json::json!({
-            "period": period,
-            "usage_per_models": models,
-        })
-    }).collect();
-
-    let output = serde_json::json!({
-        "providers": {
-            "claude_code": data,
-        }
-    });
-
-    serde_json::to_vec(&output)
-        .map_err(|e| AppError::internal(anyhow::anyhow!("json serialize: {e}")))
-}
 
 /// Parse toki time string: epoch seconds, YYYYMMDD, or YYYYMMDDhhmmss
 fn parse_toki_time(s: &str, is_end: bool) -> i64 {
@@ -722,55 +452,6 @@ fn parse_duration_secs(s: &str) -> i64 {
         }
     }
     if total == 0 { 3600 } else { total }
-}
-
-/// Extract the bare metric selector from a PromQL expression.
-/// "sum by (model, type) (sum_over_time(toki_tokens_total[3600s]))" → "toki_tokens_total"
-/// This lets us query raw data points and aggregate server-side.
-#[allow(dead_code)]
-fn extract_metric_selector(query: &str) -> String {
-    // Find metric name: toki_*
-    if let Some(start) = query.find("toki_") {
-        let end = query[start..].find(|c: char| !c.is_alphanumeric() && c != '_')
-            .map(|i| start + i).unwrap_or(query.len());
-        let metric = &query[start..end];
-        // Append any label filter {..} that follows
-        let rest = &query[end..];
-        if rest.starts_with('{') {
-            if let Some(close) = rest.find('}') {
-                return format!("{}{}", metric, &rest[..=close]);
-            }
-        }
-        return metric.to_string();
-    }
-    query.to_string()
-}
-
-#[allow(dead_code)]
-fn replace_range_vector(query: &str, range_secs: i64) -> String {
-    let replacement = format!("{}s", range_secs);
-    let mut result = String::with_capacity(query.len());
-    let mut chars = query.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '[' {
-            let mut content = String::new();
-            while let Some(&nc) = chars.peek() {
-                if nc == ']' { chars.next(); break; }
-                content.push(chars.next().unwrap());
-            }
-            let is_duration = !content.is_empty()
-                && content.chars().last().map_or(false, |c| "smhdwy".contains(c))
-                && content.chars().all(|c| c.is_ascii_digit() || "smhdwy".contains(c));
-            if is_duration {
-                result.push_str(&format!("[{}]", replacement));
-            } else {
-                result.push_str(&format!("[{}]", content));
-            }
-        } else {
-            result.push(c);
-        }
-    }
-    result
 }
 
 // ─── Toki PromQL → VM PromQL translation ─────────────────────────────────────
@@ -1497,50 +1178,3 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-mod toki_json_tests {
-    use super::*;
-
-    #[test]
-    fn test_vm_response_daily_bucket() {
-        // Simulates VM query_range with step=86400, aligned_start=03-24T00:00.
-        // Eval points are daily boundaries. sum_over_time[86400s] at each eval
-        // covers the previous 24h.
-        let vm = serde_json::json!({
-            "status": "success",
-            "data": {
-                "resultType": "matrix",
-                "result": [
-                    {
-                        "metric": {"model": "opus", "type": "input"},
-                        "values": [
-                            [1774310400, "300"],  // eval=03-24T00:00 → bucket=03-23
-                            [1774396800, "500"],  // eval=03-25T00:00 → bucket=03-24
-                        ]
-                    }
-                ]
-            }
-        });
-        let pricing = crate::pricing::PricingTable::new(std::collections::HashMap::new());
-        let result = vm_response_to_toki_json(
-            &serde_json::to_vec(&vm).unwrap(),
-            &pricing, false, false, 86400, 0, i64::MAX,
-        ).unwrap();
-        let parsed: serde_json::Value = serde_json::from_slice(&result).unwrap();
-        let items = parsed["providers"]["claude_code"].as_array().unwrap();
-        
-        // eval=03-24 → bucket=03-23 (eval-step), eval=03-25 → bucket=03-24
-        let mut found = std::collections::HashMap::new();
-        for item in items {
-            let period = item["period"].as_str().unwrap();
-            let day = &period[..10];
-            for m in item["usage_per_models"].as_array().unwrap() {
-                let input = m["input_tokens"].as_u64().unwrap();
-                *found.entry(day.to_string()).or_insert(0u64) += input;
-            }
-        }
-        eprintln!("found: {:?}", found);
-        assert_eq!(found.get("2026-03-23"), Some(&300u64), "03-23 should have 300 (eval 03-24)");
-        assert_eq!(found.get("2026-03-24"), Some(&500u64), "03-24 should have 500 (eval 03-25)");
-    }
-}

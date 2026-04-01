@@ -8,8 +8,6 @@ use tokio::sync::Semaphore;
 use crate::auth::JwtManager;
 use crate::db::DatabaseRepo;
 use crate::events::{EventStore, ServerEvent};
-#[allow(unused_imports)]
-use crate::metrics::backend::MetricPoint;
 use super::protocol::*;
 
 const MAX_DECOMPRESSED_SIZE: usize = 64 * 1024 * 1024; // 64 MiB
@@ -209,15 +207,21 @@ async fn handle_sync_batch(
         return Ok(current);
     }
 
-    let empty = String::new();
-
     // Convert SyncItems to ServerEvents (resolve dict IDs to strings)
     let server_events: Vec<ServerEvent> = batch.items.iter().map(|item| {
-        let model = batch.dict.get(&item.event.model_id).cloned().unwrap_or_default();
+        let model = batch.dict.get(&item.event.model_id).cloned().unwrap_or_else(|| {
+            tracing::warn!("missing dict ID {} for model in device {}", item.event.model_id, device_id);
+            String::new()
+        });
         let project = batch.dict.get(&item.event.project_name_id)
             .filter(|s| !s.is_empty())
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_else(|| {
+                if item.event.project_name_id != 0 {
+                    tracing::warn!("missing dict ID {} for project in device {}", item.event.project_name_id, device_id);
+                }
+                String::new()
+            });
         let bare_msg_id = item.message_id.split(':').next().unwrap_or(&item.message_id);
 
         // Map token columns by name (supports different providers)
@@ -233,6 +237,7 @@ async fn handle_sync_batch(
             output_tokens: 0,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            usage_total: 0,
         };
 
         for (i, col) in batch.token_columns.iter().enumerate() {
@@ -242,11 +247,15 @@ async fn handle_sync_batch(
                 "output" => se.output_tokens = item.event.tokens[i],
                 "cache_create" => se.cache_creation_input_tokens = item.event.tokens[i],
                 "cache_read" => se.cache_read_input_tokens = item.event.tokens[i],
-                // cached_input ⊂ input, reasoning_output ⊂ output — subsets, not additional
-                "cached_input" | "reasoning_output" => {}
+                // Codex subsets: store in the corresponding fields but they're
+                // already excluded from usage_total by the daemon
+                "cached_input" => se.cache_read_input_tokens = item.event.tokens[i],
+                "reasoning_output" => se.cache_creation_input_tokens = item.event.tokens[i],
                 _ => {}
             }
         }
+
+        se.usage_total = item.usage_total;
 
         se
     }).collect();
@@ -267,310 +276,3 @@ async fn handle_sync_batch(
     Ok(max_ts)
 }
 
-// ─── Prometheus value escaping ────────────────────────────────────────────────
-
-#[allow(dead_code)]
-fn escape_prom_value(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-// ─── Direct Prometheus text builder ──────────────────────────────────────────
-
-#[allow(dead_code)]
-fn build_prometheus_text(
-    batch: &SyncBatchPayload,
-    user_id: &str,
-    device_id: &str,
-    provider: &str,
-) -> String {
-    use std::fmt::Write;
-
-    let empty = String::new();
-    let esc_provider = escape_prom_value(provider);
-    let esc_user = escape_prom_value(user_id);
-    let esc_device = escape_prom_value(device_id);
-
-    let safe_columns: Vec<String> = batch.token_columns.iter().map(|name| {
-        name.chars().filter(|c| c.is_alphanumeric() || *c == '_').collect::<String>()
-    }).collect();
-
-    // Write each event with its original timestamp (ms).
-    // No pre-aggregation — VM stores multiple data points per series.
-    // Series count stays low: model × type × project (~20 series).
-    // Data point count = event count (VM handles millions per series).
-    // sum_over_time[step] at any granularity gives exact results.
-    let mut out = String::with_capacity(batch.items.len() * 200);
-
-    for item in &batch.items {
-        if item.event.tokens.len() != safe_columns.len() { continue; }
-
-        let model = escape_prom_value(batch.dict.get(&item.event.model_id).unwrap_or(&empty));
-        let project = batch.dict
-            .get(&item.event.project_name_id)
-            .filter(|s| !s.is_empty())
-            .map(|s| escape_prom_value(s))
-            .unwrap_or_default();
-
-        // Per-type tokens at original event timestamp
-        for (i, col_name) in safe_columns.iter().enumerate() {
-            let val = item.event.tokens[i];
-            if val == 0 || col_name.is_empty() { continue; }
-            write!(
-                out,
-                "toki_tokens_total{{model=\"{model}\",provider=\"{esc_provider}\",user=\"{esc_user}\",device=\"{esc_device}\",project=\"{project}\",type=\"{col_name}\"}} {val} {ts}\n",
-                ts = item.ts_ms,
-            ).unwrap();
-        }
-
-        // Event count (1 per NEW event only — corrections don't increment because
-        // they're updating a previously counted event, not adding a new one)
-        if !item.is_correction {
-            write!(
-                out,
-                "toki_events_total{{model=\"{model}\",provider=\"{esc_provider}\",user=\"{esc_user}\",device=\"{esc_device}\",project=\"{project}\"}} 1 {ts}\n",
-                ts = item.ts_ms,
-            ).unwrap();
-        }
-
-        // Usage total
-        if item.usage_total > 0 {
-            write!(
-                out,
-                "toki_usage_total{{model=\"{model}\",provider=\"{esc_provider}\",user=\"{esc_user}\",device=\"{esc_device}\",project=\"{project}\"}} {usage} {ts}\n",
-                usage = item.usage_total,
-                ts = item.ts_ms,
-            ).unwrap();
-        }
-    }
-    out
-}
-
-/// Legacy structured metric point builder (kept for potential use by other backends).
-#[allow(dead_code)]
-fn build_metric_points(
-    batch: &SyncBatchPayload,
-    user_id: &str,
-    device_id: &str,
-    provider: &str,
-) -> Vec<MetricPoint> {
-    let empty = String::new();
-    let mut points = Vec::with_capacity(batch.items.len() * 4);
-
-    let esc_provider  = escape_prom_value(provider);
-    let esc_user_id   = escape_prom_value(user_id);
-    let esc_device_id = escape_prom_value(device_id);
-
-    for item in &batch.items {
-        let model   = batch.dict.get(&item.event.model_id).unwrap_or(&empty);
-        let session = batch.dict.get(&item.event.session_id).unwrap_or(&empty);
-        let project = batch.dict
-            .get(&item.event.project_name_id)
-            .filter(|s| !s.is_empty())
-            .map(String::as_str)
-            .unwrap_or("");
-
-        let base: Vec<(String, String)> = vec![
-            ("model".into(),    escape_prom_value(model)),
-            ("session".into(),  escape_prom_value(session)),
-            ("provider".into(), esc_provider.clone()),
-            ("user".into(),     esc_user_id.clone()),
-            ("device".into(),   esc_device_id.clone()),
-            ("project".into(),  escape_prom_value(project)),
-        ];
-
-        let ts = item.ts_ms;
-
-        for (count_val, col_name) in item.event.tokens.iter().zip(batch.token_columns.iter()) {
-            if *count_val == 0 { continue; }
-            let mut labels = base.clone();
-            labels.push(("type".into(), col_name.clone()));
-            points.push(MetricPoint {
-                name: "toki_tokens_total".to_string(),
-                labels,
-                value: *count_val as f64,
-                timestamp_ms: ts,
-            });
-        }
-    }
-
-    points
-}
-
-// ─── Unit tests ──────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
-    use super::*;
-
-    fn make_batch(items: Vec<SyncItem>) -> SyncBatchPayload {
-        make_batch_with_columns(items, vec!["input".into(), "output".into(), "cache_create".into(), "cache_read".into()])
-    }
-
-    fn make_batch_with_columns(items: Vec<SyncItem>, token_columns: Vec<String>) -> SyncBatchPayload {
-        let mut dict = HashMap::new();
-        dict.insert(1u32, "claude-opus-4-6".to_string());
-        dict.insert(2u32, "sess-abc".to_string());
-        dict.insert(3u32, "/path/to/file.jsonl".to_string());
-        dict.insert(4u32, "my-project".to_string());
-        SyncBatchPayload { items, dict, provider: "claude_code".to_string(), token_columns }
-    }
-
-    #[test]
-    fn test_build_metric_points_basic() {
-        let item = SyncItem {
-            ts_ms: 1_700_000_000_000,
-            message_id: "msg1".into(),
-            event: StoredEvent {
-                model_id:   1,
-                session_id: 2,
-                source_file_id:  3,
-                project_name_id: 4,
-                tokens: vec![100, 50, 0, 0],
-            },
-            usage_total: 150, is_correction: false,
-        };
-        let batch  = make_batch(vec![item]);
-        let points = build_metric_points(&batch, "user-1", "device-1", "claude_code");
-
-        assert_eq!(points.len(), 2, "input + output only (cache=0 skipped)");
-
-        let input_pt = points.iter().find(|p| p.labels.iter().any(|(k,v)| k == "type" && v == "input")).unwrap();
-        assert_eq!(input_pt.value, 100.0);
-        assert_eq!(input_pt.timestamp_ms, 1_700_000_000_000);
-
-        let output_pt = points.iter().find(|p| p.labels.iter().any(|(k,v)| k == "type" && v == "output")).unwrap();
-        assert_eq!(output_pt.value, 50.0);
-    }
-
-    #[test]
-    fn test_build_metric_points_all_types() {
-        let item = SyncItem {
-            ts_ms: 1_000,
-            message_id: "msg1".into(),
-            event: StoredEvent {
-                model_id:   1,
-                session_id: 2,
-                source_file_id:  3,
-                project_name_id: 4,
-                tokens: vec![10, 20, 5, 3],
-            },
-            usage_total: 38,
-            is_correction: false,
-        };
-        let batch  = make_batch(vec![item]);
-        let points = build_metric_points(&batch, "user-1", "device-1", "claude_code");
-        assert_eq!(points.len(), 4);
-    }
-
-    #[test]
-    fn test_build_metric_points_user_label_present() {
-        let item = SyncItem {
-            ts_ms: 1_000,
-            message_id: "msg1".into(),
-            event: StoredEvent {
-                model_id:   1,
-                session_id: 2,
-                source_file_id:  3,
-                project_name_id: 4,
-                tokens: vec![1, 0, 0, 0],
-            },
-            usage_total: 1,
-            is_correction: false,
-        };
-        let batch  = make_batch(vec![item]);
-        let points = build_metric_points(&batch, "user-xyz", "device-1", "claude_code");
-        assert_eq!(points.len(), 1);
-        let pt = &points[0];
-        let user_label = pt.labels.iter().find(|(k, _)| k == "user").unwrap();
-        assert_eq!(user_label.1, "user-xyz");
-        let device_label = pt.labels.iter().find(|(k, _)| k == "device").unwrap();
-        assert_eq!(device_label.1, "device-1");
-    }
-
-    #[test]
-    fn test_build_metric_points_empty_batch() {
-        let batch  = make_batch(vec![]);
-        let points = build_metric_points(&batch, "user-1", "device-1", "claude_code");
-        assert!(points.is_empty());
-    }
-
-    #[test]
-    fn test_build_prometheus_text_codex_labels() {
-        let item = SyncItem {
-            ts_ms: 1_700_000_000_000,
-            message_id: "msg1".into(),
-            event: StoredEvent {
-                model_id:   1,
-                session_id: 2,
-                source_file_id:  3,
-                project_name_id: 4,
-                tokens: vec![200, 100, 30, 50],
-            },
-            usage_total: 380,
-            is_correction: false,
-        };
-        let batch = make_batch_with_columns(
-            vec![item],
-            vec!["input".into(), "output".into(), "cached_input".into(), "reasoning_output".into()],
-        );
-        let text = build_prometheus_text(&batch, "user-1", "device-1", "codex");
-        let lines: Vec<&str> = text.trim().lines().collect();
-        // 4 token lines + 1 events_total + 1 usage_total = 6
-        assert_eq!(lines.len(), 6);
-        assert!(lines[0].contains("type=\"input\""));
-        assert!(lines[0].contains("200"));
-        assert!(lines[1].contains("type=\"output\""));
-        assert!(lines[1].contains("100"));
-        assert!(lines[2].contains("type=\"cached_input\""));
-        assert!(lines[2].contains("30"));
-        assert!(lines[3].contains("type=\"reasoning_output\""));
-        assert!(lines[3].contains("50"));
-        assert!(lines[4].contains("toki_events_total"));
-        assert!(lines[5].contains("toki_usage_total"));
-        // Ensure no claude-specific labels appear
-        assert!(!text.contains("cache_create"));
-        assert!(!text.contains("cache_read"));
-    }
-
-    #[test]
-    fn test_build_prometheus_text_basic() {
-        let item = SyncItem {
-            ts_ms: 1_700_000_000_000,
-            message_id: "msg1".into(),
-            event: StoredEvent {
-                model_id:   1,
-                session_id: 2,
-                source_file_id:  3,
-                project_name_id: 4,
-                tokens: vec![100, 50, 0, 0],
-            },
-            usage_total: 150, is_correction: false,
-        };
-        let batch = make_batch(vec![item]);
-        let text = build_prometheus_text(&batch, "user-1", "device-1", "claude_code");
-        let lines: Vec<&str> = text.trim().lines().collect();
-        // 2 token lines + 1 events_total + 1 usage_total = 4
-        assert_eq!(lines.len(), 4, "input + output + events_total + usage_total");
-        assert!(lines[0].contains("type=\"input\""));
-        assert!(lines[0].contains("100"));
-        assert!(lines[1].contains("type=\"output\""));
-        assert!(lines[1].contains("50"));
-    }
-
-    #[test]
-    fn test_build_prometheus_text_empty() {
-        let batch = make_batch(vec![]);
-        let text = build_prometheus_text(&batch, "user-1", "device-1", "claude_code");
-        assert!(text.is_empty());
-    }
-}

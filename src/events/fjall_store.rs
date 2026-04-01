@@ -13,6 +13,9 @@ use super::{EventStore, ServerEvent, UserFilter};
 ///
 /// On upsert: if (device_id, msg_id) already exists, delete old event, insert new.
 /// Atomic via OwnedWriteBatch.
+///
+/// All fields (`FjallDatabase`, `Keyspace`) are internally `Arc`-wrapped and Clone,
+/// so they can be safely moved into `spawn_blocking` closures without unsafe code.
 pub struct FjallEventStore {
     db: FjallDatabase,
     events: Keyspace,
@@ -22,7 +25,8 @@ pub struct FjallEventStore {
 impl FjallEventStore {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).ok();
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create directory for event store: {}", parent.display()))?;
         }
 
         let db = FjallDatabase::builder(path)
@@ -54,89 +58,96 @@ impl FjallEventStore {
         key.extend_from_slice(msg_id.as_bytes());
         key
     }
-
-    /// Upsert a single event within a batch.
-    fn upsert_one(&self, batch: &mut fjall::OwnedWriteBatch, event: &ServerEvent) {
-        let idx_key = Self::idx_key(&event.device_id, &event.msg_id);
-        let new_event_key = Self::event_key(event.ts_ms, &event.device_id, &event.msg_id);
-        let value = bincode::serialize(event).expect("ServerEvent serialize");
-
-        // Check if previous event exists for this (device_id, msg_id)
-        if let Ok(Some(prev_key)) = self.idx_msg.get(&idx_key) {
-            // Delete old event from events keyspace
-            batch.remove(&self.events, prev_key.to_vec());
-        }
-
-        // Insert new event + update idx_msg
-        batch.insert(&self.events, new_event_key.clone(), value);
-        batch.insert(&self.idx_msg, idx_key, new_event_key);
-    }
-
-    /// Iterate events in time range [since_ms, until_ms), applying user filter.
-    fn scan_events(
-        &self,
-        since_ms: i64,
-        until_ms: i64,
-        filter: &UserFilter,
-    ) -> Vec<ServerEvent> {
-        let start_key = since_ms.to_be_bytes().to_vec();
-        let mut results = Vec::new();
-
-        for guard in self.events.range(start_key..) {
-            let kv = match guard.into_inner() {
-                Ok(kv) => kv,
-                Err(_) => continue,
-            };
-            let key = &kv.0;
-            if key.len() < 8 { continue; }
-
-            let ts = i64::from_be_bytes(match key[..8].try_into() {
-                Ok(b) => b,
-                Err(_) => continue,
-            });
-            if ts >= until_ms { break; }
-
-            let event: ServerEvent = match bincode::deserialize(&kv.1) {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-
-            // Apply user filter
-            match filter {
-                UserFilter::Single(uid) => {
-                    if event.user_id != *uid { continue; }
-                }
-                UserFilter::Multiple(uids) => {
-                    if !uids.contains(&event.user_id) { continue; }
-                }
-                UserFilter::All => {}
-            }
-
-            results.push(event);
-        }
-
-        results
-    }
 }
 
-// Fjall types are thread-safe.
-unsafe impl Send for FjallEventStore {}
-unsafe impl Sync for FjallEventStore {}
+/// Upsert a single event within a batch (free function to avoid &self borrow issues).
+fn upsert_one(
+    events_ks: &Keyspace,
+    idx_msg_ks: &Keyspace,
+    batch: &mut fjall::OwnedWriteBatch,
+    event: &ServerEvent,
+) {
+    let idx_key = FjallEventStore::idx_key(&event.device_id, &event.msg_id);
+    let new_event_key = FjallEventStore::event_key(event.ts_ms, &event.device_id, &event.msg_id);
+    let value = bincode::serialize(event).expect("ServerEvent serialize");
+
+    // Check if previous event exists for this (device_id, msg_id)
+    if let Ok(Some(prev_key)) = idx_msg_ks.get(&idx_key) {
+        // Delete old event from events keyspace
+        batch.remove(events_ks, prev_key.to_vec());
+    }
+
+    // Insert new event + update idx_msg
+    batch.insert(events_ks, new_event_key.clone(), value);
+    batch.insert(idx_msg_ks, idx_key, new_event_key);
+}
+
+/// Iterate events in time range [since_ms, until_ms), applying user filter.
+///
+/// Uses half-open interval `[since_ms, until_ms)` which matches the final
+/// result of `aggregate_events_to_toki_json` (which skips `ts_ms >= until_ms`).
+/// Note: the local daemon's `for_each_event` uses `[since, until]` (inclusive),
+/// but its aggregate function then filters with `ts_ms >= until_ms { continue }`,
+/// producing the same effective `[since, until)` range.
+fn scan_events(
+    events_ks: &Keyspace,
+    since_ms: i64,
+    until_ms: i64,
+    filter: &UserFilter,
+) -> Vec<ServerEvent> {
+    let start_key = since_ms.to_be_bytes().to_vec();
+    let mut results = Vec::new();
+
+    for guard in events_ks.range(start_key..) {
+        let kv = match guard.into_inner() {
+            Ok(kv) => kv,
+            Err(_) => continue,
+        };
+        let key = &kv.0;
+        if key.len() < 8 { continue; }
+
+        let ts = i64::from_be_bytes(match key[..8].try_into() {
+            Ok(b) => b,
+            Err(_) => continue,
+        });
+        if ts >= until_ms { break; }
+
+        let event: ServerEvent = match bincode::deserialize(&kv.1) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        // Apply user filter
+        match filter {
+            UserFilter::Single(uid) => {
+                if event.user_id != *uid { continue; }
+            }
+            UserFilter::Multiple(uids) => {
+                if !uids.contains(&event.user_id) { continue; }
+            }
+            UserFilter::All => {}
+        }
+
+        results.push(event);
+    }
+
+    results
+}
 
 #[async_trait::async_trait]
 impl EventStore for FjallEventStore {
     async fn upsert_events(&self, events: &[ServerEvent]) -> Result<()> {
         if events.is_empty() { return Ok(()); }
 
-        let store_ptr = self as *const FjallEventStore as usize;
+        let db = self.db.clone();
+        let events_ks = self.events.clone();
+        let idx_msg_ks = self.idx_msg.clone();
         let events = events.to_vec();
 
         tokio::task::spawn_blocking(move || {
-            // SAFETY: FjallEventStore lives in Arc, outlives this closure.
-            let store = unsafe { &*(store_ptr as *const FjallEventStore) };
-            let mut batch = store.db.batch();
+            let mut batch = db.batch();
             for event in &events {
-                store.upsert_one(&mut batch, event);
+                upsert_one(&events_ks, &idx_msg_ks, &mut batch, event);
             }
             batch.commit().context("fjall batch commit")?;
             Ok(())
@@ -151,23 +162,23 @@ impl EventStore for FjallEventStore {
         until_ms: i64,
         filter: UserFilter,
     ) -> Result<Vec<ServerEvent>> {
-        let store_ptr = self as *const FjallEventStore as usize;
+        let events_ks = self.events.clone();
 
         tokio::task::spawn_blocking(move || {
-            let store = unsafe { &*(store_ptr as *const FjallEventStore) };
-            Ok(store.scan_events(since_ms, until_ms, &filter))
+            Ok(scan_events(&events_ks, since_ms, until_ms, &filter))
         })
         .await
         .context("spawn_blocking panicked")?
     }
 
     async fn delete_device_events(&self, device_id: &str) -> Result<()> {
-        let store_ptr = self as *const FjallEventStore as usize;
+        let db = self.db.clone();
+        let events_ks = self.events.clone();
+        let idx_msg_ks = self.idx_msg.clone();
         let device_id = device_id.to_string();
 
         tokio::task::spawn_blocking(move || {
-            let store = unsafe { &*(store_ptr as *const FjallEventStore) };
-            let mut batch = store.db.batch();
+            let mut batch = db.batch();
 
             // Scan idx_msg for entries with this device_id prefix
             let prefix = {
@@ -177,17 +188,17 @@ impl EventStore for FjallEventStore {
             };
 
             let mut idx_keys_to_delete = Vec::new();
-            for guard in store.idx_msg.prefix(&prefix) {
+            for guard in idx_msg_ks.prefix(&prefix) {
                 let kv = match guard.into_inner() {
                     Ok(kv) => kv,
                     Err(_) => continue,
                 };
-                batch.remove(&store.events, kv.1.to_vec());
+                batch.remove(&events_ks, kv.1.to_vec());
                 idx_keys_to_delete.push(kv.0.to_vec());
             }
 
             for key in idx_keys_to_delete {
-                batch.remove(&store.idx_msg, key);
+                batch.remove(&idx_msg_ks, key);
             }
 
             batch.commit().context("fjall delete_device commit")?;
@@ -216,6 +227,7 @@ mod tests {
             output_tokens: 0,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            usage_total: input,
         }
     }
 
