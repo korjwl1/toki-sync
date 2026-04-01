@@ -41,6 +41,10 @@ pub struct TokiQueryParams {
     #[serde(default)]
     pub step: Option<String>,
     pub scope: Option<String>,
+    #[serde(default)]
+    pub tz: Option<String>,
+    #[serde(default)]
+    pub start_of_week: Option<String>,
 }
 
 // ─── Scope types ─────────────────────────────────────────────────────────────
@@ -273,9 +277,12 @@ pub async fn toki_query(
 
     let pricing = state.pricing.read().await;
     let effective_step = if is_range { step_secs } else { (end_ts - start_ts).max(1) };
+    let tz: Option<chrono_tz::Tz> = params.tz.as_deref()
+        .and_then(|s| s.parse().ok());
     let toki_json = aggregate_events_to_toki_json(
         &all_events, effective_step, since_ms, until_ms,
         rewritten.needs_cost_compute, rewritten.is_events, &rewritten.group_by, &pricing,
+        tz.as_ref(),
     )?;
 
     Ok((
@@ -304,6 +311,7 @@ fn aggregate_events_to_toki_json(
     is_events: bool,
     group_by: &str,
     pricing: &crate::pricing::PricingTable,
+    tz: Option<&chrono_tz::Tz>,
 ) -> Result<Vec<u8>, AppError> {
     use std::collections::BTreeMap;
 
@@ -313,6 +321,7 @@ fn aggregate_events_to_toki_json(
     struct ModelBucket {
         input: u64, output: u64, cache_create: u64, cache_read: u64,
         usage_total: u64, events: u64, cost_usd: Option<f64>,
+        provider: String,
     }
 
     let mut buckets: BTreeMap<(i64, String), ModelBucket> = BTreeMap::new();
@@ -334,6 +343,11 @@ fn aggregate_events_to_toki_json(
         };
 
         let entry = buckets.entry((bucket_sec, group_key.clone())).or_default();
+
+        // Track provider from first event in bucket
+        if entry.provider.is_empty() && !event.provider.is_empty() {
+            entry.provider = event.provider.clone();
+        }
 
         // 4. Accumulate
         if is_events {
@@ -359,22 +373,36 @@ fn aggregate_events_to_toki_json(
     // Build toki JSON
     let mut periods: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
     for ((bucket_sec, model), bucket) in &buckets {
-        let ts = chrono::DateTime::from_timestamp(*bucket_sec, 0)
-            .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S").to_string())
-            .unwrap_or_default();
+        let ts_str = if let Some(tz) = tz {
+            chrono::DateTime::from_timestamp(*bucket_sec, 0)
+                .map(|dt| dt.with_timezone(tz).format("%Y-%m-%dT%H:%M:%S").to_string())
+                .unwrap_or_default()
+        } else {
+            chrono::DateTime::from_timestamp(*bucket_sec, 0)
+                .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S").to_string())
+                .unwrap_or_default()
+        };
+
+        let is_codex = bucket.provider == "codex";
         let mut entry = serde_json::json!({
             "model": model,
             "input_tokens": bucket.input,
             "output_tokens": bucket.output,
-            "cache_creation_input_tokens": bucket.cache_create,
-            "cache_read_input_tokens": bucket.cache_read,
             "total_tokens": bucket.usage_total,
             "events": bucket.events,
         });
+        if is_codex {
+            entry["cached_input_tokens"] = serde_json::json!(bucket.cache_read);
+            entry["reasoning_output_tokens"] = serde_json::json!(bucket.cache_create);
+        } else {
+            entry["cache_creation_input_tokens"] = serde_json::json!(bucket.cache_create);
+            entry["cache_read_input_tokens"] = serde_json::json!(bucket.cache_read);
+        }
+
         if let Some(cost) = bucket.cost_usd.or_else(|| pricing.cost(model, bucket.input, bucket.output, bucket.cache_create, bucket.cache_read)) {
             entry["cost_usd"] = serde_json::json!(cost);
         }
-        let period_key = format!("{}|{}", ts, model);
+        let period_key = format!("{}|{}", ts_str, model);
         periods.entry(period_key).or_default().push(entry);
     }
 
