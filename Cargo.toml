@@ -26,7 +26,7 @@ async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bincode = "1"
-toki-sync-protocol = { git = "https://github.com/korjwl1/toki-sync-protocol.git" }
+toki-sync-protocol = { git = "https://github.com/korjwl1/toki-sync-protocol.git", tag = "v1.0.0" }
 toml = "0.8"
 
 # Auth
