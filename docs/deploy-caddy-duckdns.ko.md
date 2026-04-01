@@ -76,12 +76,11 @@ DUCKDNS_TOKEN=a1b2c3d4-e5f6-7890-abcd-ef1234567890
 docker compose --profile caddy up -d
 ```
 
-3개의 컨테이너가 시작됩니다:
+2개의 컨테이너가 시작됩니다:
 
 | 컨테이너 | 용도 | 포트 |
 |----------|------|------|
-| **toki-sync-server** | 동기화 프로토콜 + 인증 API | TCP :9090, HTTP :9091 (내부) |
-| **VictoriaMetrics** | 시계열 저장소 | 내부 전용 |
+| **toki-sync-server** | 동기화 프로토콜 + 인증 API + 내장 이벤트 스토어 (Fjall) | TCP :9090, HTTP :9091 (내부) |
 | **Caddy** | TLS 종단 | :443 (HTTPS), :9090 (TLS TCP) |
 
 ---

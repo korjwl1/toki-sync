@@ -1,22 +1,21 @@
 # ── Stage 1: Build ────────────────────────────────────────────────────────────
-# Alpine-based rust image uses musl by default → static binary
-FROM rust:1.82-alpine AS builder
+FROM rust:1.92-slim AS builder
 
-RUN apk add --no-cache musl-dev pkgconfig openssl-dev openssl-libs-static
+RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY static ./static
 
-ENV RUSTFLAGS="-C target-feature=+crt-static"
 RUN cargo build --release
 
 # ── Stage 2: Runtime ──────────────────────────────────────────────────────────
-FROM alpine:3.20
+FROM debian:bookworm-slim
 
-RUN apk add --no-cache ca-certificates tzdata && \
-    addgroup -S toki && adduser -S -G toki toki
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3 wget && \
+    rm -rf /var/lib/apt/lists/* && \
+    groupadd -r toki && useradd -r -g toki toki
 
 COPY --from=builder /build/target/release/toki-sync /usr/local/bin/toki-sync
 

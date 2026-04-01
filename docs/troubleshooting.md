@@ -30,11 +30,17 @@
 
 ---
 
-## VictoriaMetrics not starting
+## Event store issues
 
-- Check logs: `docker logs victoriametrics`
-- Ensure the `vm-data` volume has sufficient disk space
-- Check health: `docker exec victoriametrics wget -qO- http://localhost:8428/health`
+**Fjall (default)**:
+- Fjall is embedded -- no separate container to check. Look at toki-sync-server logs: `docker logs toki-sync-server`
+- Ensure the `toki-data` volume has sufficient disk space
+- If data appears corrupted, stop the server, delete `/data/events.fjall`, and restart. Clients will perform a full re-sync.
+
+**ClickHouse (optional)**:
+- Check logs: `docker logs toki-clickhouse`
+- Check health: `docker exec toki-clickhouse wget -qO- http://localhost:8123/ping`
+- Ensure the `clickhouse-data` volume has sufficient disk space
 
 ---
 

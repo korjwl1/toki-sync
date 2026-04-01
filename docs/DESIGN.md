@@ -4,9 +4,9 @@
 
 toki-sync is a multi-device token usage sync server for the [toki](https://github.com/korjwl1/toki) ecosystem. It solves the problem of fragmented usage data: developers using AI tools across multiple machines (macOS desktop, Linux server, CI runners) have no unified view of their token consumption.
 
-toki-sync collects delta events from toki daemons over persistent TCP connections, stores them in VictoriaMetrics as time-series data, and serves PromQL queries through an authenticated HTTP proxy. A single server instance handles personal use through enterprise teams, with SQLite for small deployments and PostgreSQL for scale.
+toki-sync collects delta events from toki daemons over persistent TCP connections, stores them in an EventStore (Fjall embedded by default, or ClickHouse for scale), and serves a web dashboard and optional PromQL queries through an authenticated HTTP proxy. A single server instance handles personal use through enterprise teams, with SQLite for small deployments and PostgreSQL for scale.
 
-The server is stateless by design. Auth and device metadata live in the database, time-series data lives in VictoriaMetrics, and the server itself is a protocol translator and auth gateway. This makes horizontal scaling straightforward: put N instances behind a load balancer.
+The server is stateless by design. Auth and device metadata live in the database, event data lives in the EventStore (Fjall or ClickHouse), and the server itself is a protocol translator and auth gateway. This makes horizontal scaling straightforward: put N instances behind a load balancer.
 
 ## Architecture
 
@@ -34,13 +34,14 @@ graph TD
 
         subgraph Storage["Storage Layer"]
             DB["SQLite / PostgreSQL<br/>users, devices, cursors,<br/>refresh_tokens, teams"]
-            WriteSem["VM Write Semaphore(10)<br/>global batch throttle"]
+            ES["EventStore<br/>Fjall (embedded) or ClickHouse"]
+            WriteSem["Write Semaphore(10)<br/>global batch throttle"]
         end
     end
 
     subgraph External["External Services"]
-        VM["VictoriaMetrics<br/>/api/v1/import/prometheus<br/>(internal network only)"]
         Caddy["Caddy / nginx<br/>TLS termination"]
+        VM["VictoriaMetrics (optional)<br/>PromQL proxy target"]
     end
 
     subgraph Consumers["Query Consumers"]
@@ -52,22 +53,22 @@ graph TD
     D1 & D2 & D3 -->|"TCP+TLS<br/>bincode frames"| Caddy
     Caddy -->|"plain TCP"| Accept
     Accept --> Handler
-    Handler -->|"Prometheus text<br/>import batches"| WriteSem
-    WriteSem --> VM
+    Handler -->|"event batches"| WriteSem
+    WriteSem --> ES
 
     CLI & Monitor & Web -->|"HTTPS"| Caddy
     Caddy -->|"HTTP"| Auth & Proxy & Dashboard
-    Proxy -->|"PromQL + user label"| VM
+    Proxy -.->|"PromQL + user label<br/>(optional)"| VM
 ```
 
 ### Thread/Task Model
 
-The server is fully async on tokio. There are no blocking threads or `spawn_blocking` calls — bincode deserialization is fast enough to run on the async executor, and VM writes are HTTP I/O.
+The server is fully async on tokio. There are no blocking threads or `spawn_blocking` calls — bincode deserialization is fast enough to run on the async executor, and EventStore writes are I/O-bound.
 
 | Resource | Bound | Purpose |
 |----------|-------|---------|
 | TCP connection Semaphore | 500 | Prevents fd exhaustion from connection floods |
-| VM write Semaphore | 10 | Limits concurrent Prometheus text import requests to VM |
+| Write Semaphore | 10 | Limits concurrent batch writes to the EventStore |
 | Read timeout (server) | 120s | Drops idle connections that miss PING/PONG |
 | Read timeout (client) | 90s | Detects dead server before server timeout fires |
 
@@ -120,7 +121,7 @@ Payload length is capped at `MAX_PAYLOAD_SIZE` (16 MiB). Any frame exceeding thi
 sequenceDiagram
     participant C as Client (toki daemon)
     participant S as Server (toki-sync)
-    participant VM as VictoriaMetrics
+    participant ES as EventStore
 
     C->>S: AUTH { jwt, device_key, provider, schema_version, protocol_version }
     S->>S: Verify JWT, register/lookup device
@@ -131,8 +132,8 @@ sequenceDiagram
 
     loop For each batch of up to 1,000 events
         C->>S: SYNC_BATCH { items, dict, provider }
-        S->>VM: POST /api/v1/import/prometheus (text format)
-        VM-->>S: 204 No Content
+        S->>ES: Write events (Fjall insert / ClickHouse INSERT)
+        ES-->>S: OK (duplicates silently ignored via msg_id dedup)
         S->>S: Update cursor (device_id, provider) = last_ts_ms
         S-->>C: SYNC_ACK { last_ts_ms }
     end
@@ -156,7 +157,7 @@ sequenceDiagram
 
 Each SYNC_BATCH must be acknowledged before the next is sent. This provides natural backpressure:
 
-- If VM is slow, the server delays ACK, and the client automatically waits
+- If the EventStore is slow, the server delays ACK, and the client automatically waits
 - 100 devices x ~100KB per in-flight batch = ~10MB total server memory. No OOM risk
 - No rate limit messages, no token bucket, no configuration needed
 - The client's local fjall DB acts as a persistent queue: if the server is down, events accumulate locally and sync on reconnect
@@ -175,14 +176,15 @@ Initial bulk sync (full history) benefits significantly. Steady-state incrementa
 
 ### Dedup Strategy
 
-VictoriaMetrics deduplicates by `(timestamp_ms, label_set)`. The label set is `{device, model, provider, session, project, user}`. There is no `msg_id` in the labels.
+The EventStore deduplicates events using `msg_id`, a unique identifier generated by the client for each event.
 
-Why this works:
-- Two events from the same session at the same millisecond with the same model/project is physically impossible (API response time is hundreds of ms)
-- ACK-lost retransmission sends identical `(timestamp, labels, value)` tuples, which VM resolves via last-write-wins with identical values
-- Adding `msg_id` as a label would create one unique time series per event, causing cardinality explosion
+- **Fjall**: uses an `idx_msg` secondary index with a unique constraint on `msg_id`. Duplicate inserts are silently ignored.
+- **ClickHouse**: uses `ReplacingMergeTree` engine keyed on `msg_id`. Duplicates are collapsed during background merges.
 
-No server-side msg_id tracking is needed. The `last_ts` cursor alone is sufficient.
+Why msg_id-based dedup:
+- ACK-lost retransmission sends the same events with the same `msg_id` values, which are silently deduplicated
+- The `last_ts` cursor provides the primary sync mechanism; msg_id dedup is the safety net for edge cases
+- No cardinality explosion (unlike adding msg_id as a time-series label)
 
 ### SyncBatch Structure
 
@@ -199,7 +201,7 @@ struct SyncItem {
 }
 ```
 
-The client sends dict IDs (compact u32 references) along with a dict map that resolves them to strings. The server uses this map to decode IDs into human-readable labels before writing to VM.
+The client sends dict IDs (compact u32 references) along with a dict map that resolves them to strings. The server uses this map to decode IDs into human-readable fields before writing to the EventStore.
 
 **Why dict IDs + dict map instead of decoded strings**: toki's local DB stores events with dictionary-compressed fields (model, session_id, project). Sending the compact representation with a per-batch mapping avoids redundant string allocation on the client and reduces wire size — the dict map contains each unique string once, while items reference them by ID.
 
@@ -225,28 +227,28 @@ The client never persists its own cursor. On every connection (including reconne
 - No cursor file corruption or staleness after crash
 - Reconnection after any failure reduces to: `GET_LAST_TS` -> query local DB for events after that timestamp -> send batches
 
-### Write Ordering: VM Write Before Cursor Update
+### Write Ordering: EventStore Write Before Cursor Update
 
 The server MUST execute in this order:
 
 ```
-1. Write batch to VictoriaMetrics
+1. Write batch to EventStore (Fjall / ClickHouse)
 2. Update cursor in SQLite/PG
 3. Send SYNC_ACK to client
 ```
 
-Reversing steps 1 and 2 (cursor update before VM write) causes **permanent data loss**: the cursor advances past events that were never written to VM. On reconnect, the client sees the advanced cursor and skips those events.
+Reversing steps 1 and 2 (cursor update before EventStore write) causes **permanent data loss**: the cursor advances past events that were never written. On reconnect, the client sees the advanced cursor and skips those events.
 
 ### Reconnection Scenarios
 
 | Scenario | Server State | On Reconnect |
 |----------|-------------|--------------|
-| Batch sent, connection drops before VM write | VM: no data, cursor: unchanged | GET_LAST_TS -> full retransmission |
-| VM write completes, connection drops before ACK | VM: has data, cursor: updated | GET_LAST_TS -> cursor advanced, no retransmission needed |
-| VM write completes, connection drops before cursor update | VM: has data, cursor: old | GET_LAST_TS -> retransmission, VM dedup handles duplicates |
+| Batch sent, connection drops before EventStore write | EventStore: no data, cursor: unchanged | GET_LAST_TS -> full retransmission |
+| EventStore write completes, connection drops before ACK | EventStore: has data, cursor: updated | GET_LAST_TS -> cursor advanced, no retransmission needed |
+| EventStore write completes, connection drops before cursor update | EventStore: has data, cursor: old | GET_LAST_TS -> retransmission, msg_id dedup handles duplicates |
 | Server down for hours/days | fjall DB accumulates locally | Reconnect -> GET_LAST_TS -> send accumulated delta |
 
-All four scenarios result in zero data loss. The worst case is redundant retransmission, which VM dedup resolves silently.
+All four scenarios result in zero data loss. The worst case is redundant retransmission, which msg_id-based dedup resolves silently.
 
 ## Authentication & Security
 
@@ -287,18 +289,18 @@ Login attempts are tracked by `(IP, username)` composite key:
 
 The guard uses a sweep-based cleanup: expired entries are removed periodically rather than on every request. A hard cap on total tracked entries prevents memory exhaustion from distributed attacks.
 
-### PromQL Label Injection
+### PromQL Label Injection (optional, requires VictoriaMetrics)
 
-VictoriaMetrics runs on an internal network with no authentication. All external queries pass through the toki-sync HTTP proxy, which:
+When VictoriaMetrics is configured via `[backend].vm_url`, the server provides a PromQL proxy. VictoriaMetrics runs on an internal network with no authentication. All external queries pass through the toki-sync HTTP proxy, which:
 
 1. Validates the JWT from the request
 2. Extracts the `user` claim
 3. Injects `{user="<username>"}` into the PromQL expression
-4. Forwards the modified query to VM
+4. Forwards the modified query to VictoriaMetrics
 
-**Why not just VM auth**: VM's built-in auth is binary (full access or no access). It cannot enforce per-user data isolation. The proxy layer adds row-level security by rewriting queries.
+This is an optional feature for backward compatibility with PromQL-based tooling (toki CLI `--remote`, Toki Monitor server mode). The core sync functionality does not require VictoriaMetrics.
 
-**Injection defense**: Label values are escaped (`\` -> `\\`, `"` -> `\"`) before insertion into the query. A naive string concatenation like `user="alice"} or {user="` would bypass isolation. The proxy either parses the PromQL AST and adds the matcher programmatically, or applies strict escaping before URL-encoding.
+**Injection defense**: Label values are escaped (`\` -> `\\`, `"` -> `\"`) before insertion into the query. The proxy either parses the PromQL AST and adds the matcher programmatically, or applies strict escaping before URL-encoding.
 
 ### OIDC Flow
 
@@ -410,68 +412,60 @@ team_members
 
 Migrations use `ALTER TABLE` for SQLite and `IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS` for PostgreSQL. Schema version is tracked in a `meta` table. On startup, the server applies any pending migrations sequentially.
 
-Schema mismatch between client and server (detected via `schema_version` in AUTH) triggers a clean re-sync: the server deletes the device's VM data and resets its cursor, and the client performs a full re-upload.
+Schema mismatch between client and server (detected via `schema_version` in AUTH) triggers a clean re-sync: the server deletes the device's event data and resets its cursor, and the client performs a full re-upload.
 
-## VictoriaMetrics Integration
+## EventStore Integration
 
-### Why VictoriaMetrics
+### Why Fjall (Default)
 
-| Requirement | VM Capability |
-|-------------|---------------|
-| PromQL-native queries | Full PromQL + MetricsQL extensions |
-| Low resource usage | ~50 MB RAM for toki-scale workloads |
-| Time-series at scale | Millions of series, hundreds of thousands of samples/sec |
-| Built-in dedup | `dedup.minScrapeInterval` for ACK-lost retransmission |
-| No external dependencies | Single binary, no cluster needed for Phase 1 |
+| Requirement | Fjall Capability |
+|-------------|-----------------|
+| Zero external dependencies | Embedded Rust library, no separate process |
+| Low resource usage | Minimal RAM overhead for toki-scale workloads |
+| Built-in dedup | `idx_msg` unique index on `msg_id` for ACK-lost retransmission |
+| Simple operations | Data is a directory on disk; backup = copy directory |
 
-Expected data volume for heavy personal use: ~207 events/min peak (3-4/sec). Even 16x this load (~3,300/min) is trivial for VM. Expected max cardinality: ~5,600 time series (session x model combinations).
+### Why ClickHouse (Optional)
 
-### Prometheus Text Format
+| Requirement | ClickHouse Capability |
+|-------------|----------------------|
+| Large-scale analytics | Column-oriented storage optimized for aggregation queries |
+| High write throughput | Handles millions of inserts/sec |
+| Built-in dedup | `ReplacingMergeTree` engine collapses duplicates by `msg_id` |
+| SQL queries | Standard SQL for ad-hoc analysis |
 
-The server writes to VM using the Prometheus text exposition format via `POST /api/v1/import/prometheus`:
+Expected data volume for heavy personal use: ~207 events/min peak (3-4/sec). Even 16x this load (~3,300/min) is trivial for either backend.
 
-```
-toki_input_tokens{device="macbook",model="claude-opus-4-6",provider="claude_code",session="sess-abc",project="myapp",user="alice"} 1500 1743000000000
-toki_output_tokens{device="macbook",model="claude-opus-4-6",provider="claude_code",session="sess-abc",project="myapp",user="alice"} 800 1743000000000
-toki_cache_creation_tokens{device="macbook",model="claude-opus-4-6",provider="claude_code",session="sess-abc",project="myapp",user="alice"} 200 1743000000000
-toki_cache_read_tokens{device="macbook",model="claude-opus-4-6",provider="claude_code",session="sess-abc",project="myapp",user="alice"} 100 1743000000000
-```
+### Event Fields
 
-**Why Prometheus text format instead of remote_write protobuf**: VM supports both, but text format requires no protobuf dependency, no `.proto` compilation step, and is trivially debuggable with `curl`. The performance difference is negligible at toki's data volume.
-
-### Label Structure
-
-| Label | Source | Purpose |
+| Field | Source | Purpose |
 |-------|--------|---------|
+| `msg_id` | Client-generated UUID | Deduplication key |
 | `device` | AUTH device_name | Filter by machine |
 | `model` | SyncItem (dict decoded) | Filter/group by AI model |
 | `provider` | SyncBatchPayload.provider | Filter by tool (claude_code, codex) |
 | `session` | SyncItem (dict decoded) | Drill down to individual sessions |
 | `project` | SyncItem (dict decoded) | Group by codebase/project |
 | `user` | JWT claim | Per-user data isolation |
-
-Every dimension is PromQL-filterable. The `user` label is injected server-side, never sent by the client.
-
-### Direct Text Generation
-
-The server converts SyncBatchPayload directly to Prometheus text lines without an intermediate `MetricPoint` struct. Each SyncItem produces 4 text lines (one per token type). This avoids allocating and populating an intermediate representation that would immediately be serialized to text — a measurable saving when processing batches of 1,000 events (4,000 metric lines).
+| `ts_ms` | SyncItem timestamp | Event timestamp |
+| `input_tokens`, `output_tokens`, etc. | SyncItem token counts | Usage metrics |
 
 ## Overload Protection
 
 | Guard | Limit | Protects Against |
 |-------|-------|------------------|
 | TCP Semaphore | 500 connections | Connection flood / fd exhaustion |
-| VM Write Semaphore | 10 concurrent | VM overload from simultaneous batch writes |
+| Write Semaphore | 10 concurrent | EventStore overload from simultaneous batch writes |
 | Server read timeout | 120s | Dead/hung clients holding connections |
 | Client read timeout | 90s | Detecting dead server before server-side timeout |
 | MAX_PAYLOAD_SIZE | 16 MiB | Malicious clients sending oversized frames |
 | Zstd decompression limit | 64 MiB | Zstd bomb (small compressed payload, huge output) |
-| VM response limit | 32 MiB | Runaway PromQL queries returning excessive data |
+| Query response limit | 32 MiB | Runaway queries returning excessive data |
 | PING/PONG interval | 60s | NAT/firewall idle connection timeout |
 
 **Why these specific numbers**:
 - **500 connections**: Each connection is lightweight (one tokio task). 500 is well within fd limits and covers the largest expected deployment.
-- **10 VM writes**: VM's `/api/v1/import/prometheus` endpoint handles requests sequentially internally. More than 10 concurrent requests just queue inside VM. Limiting server-side prevents unbounded task spawning.
+- **10 writes**: Limits concurrent batch writes to the EventStore. More than 10 concurrent requests just queue. Limiting server-side prevents unbounded task spawning.
 - **120s/90s timeouts**: Client timeout must be shorter than server timeout so the client detects failure first and initiates reconnection, rather than the server dropping a connection the client still considers alive.
 - **16 MiB payload**: A 1,000-event batch is ~200 KB uncompressed. 16 MiB allows for pathologically large batches while preventing multi-GB allocation attacks.
 - **64 MiB decompression**: 4x the payload limit. A legitimate zstd-compressed 16 MiB payload decompresses to at most a few MB. 64 MiB catches bombs while allowing generous headroom.
@@ -485,7 +479,7 @@ The server converts SyncBatchPayload directly to Prometheus text lines without a
 | **Accept loop error** | 1-second backoff, then resume accepting. Does not crash the server |
 | **Client sync thread panic** | `catch_unwind` catches the panic. Auto-respawn after backoff |
 | **Client worker thread panic** | Process exit. The system supervisor (launchd/systemd) restarts the daemon |
-| **VM temporarily unavailable** | SYNC_ERR returned to client. Client disconnects and retries with backoff. No data loss (events remain in local fjall DB) |
+| **EventStore temporarily unavailable** | SYNC_ERR returned to client. Client disconnects and retries with backoff. No data loss (events remain in local fjall DB) |
 | **SQLite/PG connection failure** | Auth and cursor operations fail. Existing sync connections continue until next DB-dependent operation |
 | **Network partition** | PING/PONG timeout detection (max 60s). Reconnect with exponential backoff (cap: 5 min) |
 
@@ -581,17 +575,17 @@ The server supports three registration modes via `registration_mode`:
 |---------|-------------|
 | `trust_proxy` | When `true`, the server reads client IP from `X-Forwarded-For` / `X-Real-IP` headers for brute force tracking. Only enable behind a trusted reverse proxy |
 | `max_query_scope` | Limits the maximum time range for PromQL queries (e.g., `"365d"`). Prevents expensive queries spanning too much data |
-| `max_concurrent_writes` | Limits parallel VictoriaMetrics batch writes (default: 10) |
+| `max_concurrent_writes` | Limits parallel EventStore batch writes (default: 10) |
 
 ## Scaling Guide
 
-| Scale | Devices | Infra | Database | VictoriaMetrics | Notes |
-|-------|---------|-------|----------|-----------------|-------|
-| Personal | 1-10 | t2.micro (1 GB) | SQLite | Single node (~50 MB RAM) | Everything fits comfortably |
-| Small team | 10-50 | t3.small (2 GB) | SQLite | Single node | SQLite WAL handles this concurrency fine |
-| Medium team | 50-200 | t3.medium+ (4+ GB) | Consider PG | Single node + backup | PG recommended for concurrent HTTP + sync load |
-| Enterprise | 200+ | Multiple instances | PostgreSQL (RDS) | VM cluster (vminsert/vmselect/vmstorage) | Stateless servers behind L4 LB + sticky sessions |
+| Scale | Devices | Infra | Database | EventStore | Notes |
+|-------|---------|-------|----------|------------|-------|
+| Personal | 1-10 | t2.micro (1 GB) | SQLite | Fjall (embedded) | Everything fits comfortably, no external deps |
+| Small team | 10-50 | t3.small (2 GB) | SQLite | Fjall (embedded) | SQLite WAL handles this concurrency fine |
+| Medium team | 50-200 | t3.medium+ (4+ GB) | Consider PG | Fjall or ClickHouse | PG recommended for concurrent HTTP + sync load |
+| Enterprise | 200+ | Multiple instances | PostgreSQL (RDS) | ClickHouse cluster | Stateless servers behind L4 LB + sticky sessions |
 
-**Data volume reference**: A heavy personal user generates ~207 events/min at peak. 200 such users = ~41,400 events/min = ~690/sec. VM handles millions of samples/sec.
+**Data volume reference**: A heavy personal user generates ~207 events/min at peak. 200 such users = ~41,400 events/min = ~690/sec. Both Fjall and ClickHouse handle this with ease.
 
-**Storage growth**: Each event produces 4 time series samples (~200 bytes in VM). 200 users x 1,000 events/day x 200 bytes = ~40 MB/day. With VM's compression, actual disk usage is significantly lower.
+**Storage growth**: Each event is ~200 bytes. 200 users x 1,000 events/day x 200 bytes = ~40 MB/day. With Fjall's LSM compression or ClickHouse's column compression, actual disk usage is significantly lower.

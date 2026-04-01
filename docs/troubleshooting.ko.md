@@ -30,11 +30,17 @@
 
 ---
 
-## VictoriaMetrics가 시작되지 않음
+## 이벤트 스토어 문제
 
-- 로그 확인: `docker logs victoriametrics`
-- `vm-data` 볼륨에 충분한 디스크 공간이 있는지 확인
-- 헬스 체크: `docker exec victoriametrics wget -qO- http://localhost:8428/health`
+**Fjall (기본)**:
+- Fjall은 내장되어 있습니다 -- 별도 컨테이너를 확인할 필요 없음. toki-sync-server 로그를 확인하세요: `docker logs toki-sync-server`
+- `toki-data` 볼륨에 충분한 디스크 공간이 있는지 확인
+- 데이터가 손상된 것으로 보이면 서버를 중지하고 `/data/events.fjall`을 삭제한 후 재시작하세요. 클라이언트가 전체 재동기화를 수행합니다.
+
+**ClickHouse (선택)**:
+- 로그 확인: `docker logs toki-clickhouse`
+- 헬스 체크: `docker exec toki-clickhouse wget -qO- http://localhost:8123/ping`
+- `clickhouse-data` 볼륨에 충분한 디스크 공간이 있는지 확인
 
 ---
 

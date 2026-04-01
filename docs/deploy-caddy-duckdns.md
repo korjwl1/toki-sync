@@ -76,12 +76,11 @@ DUCKDNS_TOKEN=a1b2c3d4-e5f6-7890-abcd-ef1234567890
 docker compose --profile caddy up -d
 ```
 
-This starts three containers:
+This starts two containers:
 
 | Container | Purpose | Ports |
 |-----------|---------|-------|
-| **toki-sync-server** | Sync protocol + auth API | TCP :9090, HTTP :9091 (internal) |
-| **VictoriaMetrics** | Time-series storage | Internal only |
+| **toki-sync-server** | Sync protocol + auth API + embedded event store (Fjall) | TCP :9090, HTTP :9091 (internal) |
 | **Caddy** | TLS termination | :443 (HTTPS), :9090 (TLS TCP) |
 
 ---

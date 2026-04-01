@@ -4,11 +4,11 @@
 
 | 볼륨 | 경로 | 내용 | 손실 시 |
 |------|------|------|---------|
-| `toki-data` | `/data` | SQLite (사용자, 디바이스, 커서) | 재로그인 + 전체 재동기화 필요 |
-| `vm-data` | `/vm-data` | VictoriaMetrics 시계열 데이터 | **복구 불가** — 모든 과거 사용량 데이터 손실 |
+| `toki-data` | `/data` | SQLite (사용자, 디바이스, 커서) + Fjall 이벤트 스토어 | 재로그인 + 전체 재동기화 필요 |
+| `clickhouse-data` | `/var/lib/clickhouse` | ClickHouse 이벤트 데이터 (`--profile clickhouse` 사용 시만) | 클라이언트 재동기화로 복구 가능 |
 | `caddy-data` | `/data` | Let's Encrypt 인증서 | 자동 재발급 (주당 5회 제한) |
 
-`vm-data`가 핵심 볼륨입니다. 손실되면 모든 과거 토큰 사용량 데이터가 영구적으로 사라집니다.
+기본 Fjall 백엔드에서는 `toki-data`에 메타데이터와 이벤트가 모두 포함됩니다. 손실되면 클라이언트가 재연결 시 로컬 이력에서 전체 재동기화를 수행합니다. ClickHouse 사용 시 이벤트 데이터는 `clickhouse-data`에 별도로 저장됩니다.
 
 ---
 
@@ -18,30 +18,43 @@
 
 ```yaml
 volumes:
-  - ./data/vm:/vm-data
   - ./data/toki:/data
 ```
 
 ---
 
-## VictoriaMetrics 핫 스냅샷
+## Fjall 백업 (기본 백엔드)
 
-VictoriaMetrics는 다운타임 없이 스냅샷을 생성할 수 있습니다:
+Fjall은 데이터를 디렉토리의 파일로 저장합니다. 백업하려면:
 
 ```bash
-# 스냅샷 생성
-docker exec victoriametrics wget -qO- http://localhost:8428/snapshot/create
+# 일관성을 위해 컨테이너 중지
+docker compose down
 
-# 스냅샷 목록
-docker exec victoriametrics wget -qO- http://localhost:8428/snapshot/list
+# 데이터 디렉토리 아카이브
+tar czf toki-sync-backup-$(date +%Y%m%d).tar.gz ./data/
 
-# 스냅샷 삭제
-docker exec victoriametrics wget -qO- "http://localhost:8428/snapshot/delete?snapshot=SNAPSHOT_NAME"
+# 재시작
+docker compose --profile caddy up -d
 ```
 
-스냅샷은 `vm-data` 볼륨의 `snapshots/` 디렉토리에 저장됩니다.
+또는 핫 백업(서버 실행 중)으로 Fjall 디렉토리를 복사할 수 있습니다. Fjall은 실행 중 복사해도 안전한 LSM-tree 구조를 사용하지만, 서버를 중지하면 완전한 일관성을 보장합니다.
 
-자세한 내용은 [VictoriaMetrics 백업 문서](https://docs.victoriametrics.com/single-server-victoriametrics/#backups)를 참고하세요.
+---
+
+## ClickHouse 백업 (선택적 백엔드)
+
+ClickHouse를 이벤트 스토어로 사용하는 경우:
+
+```bash
+# clickhouse-backup 도구 사용
+docker exec toki-clickhouse clickhouse-backup create backup_$(date +%Y%m%d)
+
+# 또는 clickhouse-client로 내보내기
+docker exec toki-clickhouse clickhouse-client --query "SELECT * FROM events FORMAT Native" > events_backup.bin
+```
+
+자세한 내용은 [ClickHouse 백업 문서](https://clickhouse.com/docs/en/operations/backup)를 참고하세요.
 
 ---
 
@@ -53,7 +66,7 @@ docker exec victoriametrics wget -qO- "http://localhost:8428/snapshot/delete?sna
 2. 클라우드 제공자 콘솔에서 전체 VM/VPS 디스크 스냅샷
 3. 재시작: `docker compose --profile caddy up -d`
 
-데이터베이스, 시계열, 인증서 모두를 캡처합니다.
+데이터베이스, 이벤트 스토어, 인증서 모두를 캡처합니다.
 
 ---
 

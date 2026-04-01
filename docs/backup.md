@@ -4,11 +4,11 @@
 
 | Volume | Path | Contents | On loss |
 |--------|------|----------|---------|
-| `toki-data` | `/data` | SQLite (users, devices, cursors) | Re-login + full re-sync required |
-| `vm-data` | `/vm-data` | VictoriaMetrics time-series data | **Unrecoverable** — all historical usage data is lost |
+| `toki-data` | `/data` | SQLite (users, devices, cursors) + Fjall event store | Re-login + full re-sync required |
+| `clickhouse-data` | `/var/lib/clickhouse` | ClickHouse event data (only with `--profile clickhouse`) | Recoverable via client re-sync |
 | `caddy-data` | `/data` | Let's Encrypt certificates | Auto-reissue (rate limit: 5/week) |
 
-`vm-data` is the critical volume. If lost, all historical token usage data is gone permanently.
+With the default Fjall backend, `toki-data` contains both metadata and events. If lost, clients will perform a full re-sync from their local history on reconnect. With ClickHouse, event data is stored separately in `clickhouse-data`.
 
 ---
 
@@ -18,30 +18,43 @@ For easier backup access, use bind mounts instead of named volumes in `docker-co
 
 ```yaml
 volumes:
-  - ./data/vm:/vm-data
   - ./data/toki:/data
 ```
 
 ---
 
-## VictoriaMetrics Hot Snapshots
+## Fjall Backup (default backend)
 
-VictoriaMetrics supports creating snapshots without downtime:
+Fjall stores data as files in a directory. To back up:
 
 ```bash
-# Create snapshot
-docker exec victoriametrics wget -qO- http://localhost:8428/snapshot/create
+# Stop containers to ensure consistency
+docker compose down
 
-# List snapshots
-docker exec victoriametrics wget -qO- http://localhost:8428/snapshot/list
+# Archive the data directory
+tar czf toki-sync-backup-$(date +%Y%m%d).tar.gz ./data/
 
-# Delete a snapshot
-docker exec victoriametrics wget -qO- "http://localhost:8428/snapshot/delete?snapshot=SNAPSHOT_NAME"
+# Restart
+docker compose --profile caddy up -d
 ```
 
-Snapshots are stored under the `vm-data` volume in a `snapshots/` directory.
+Alternatively, for a hot backup (server running), copy the Fjall directory. Fjall uses an LSM-tree structure that is safe to copy while running, though stopping the server ensures full consistency.
 
-See [VictoriaMetrics backup docs](https://docs.victoriametrics.com/single-server-victoriametrics/#backups) for full details.
+---
+
+## ClickHouse Backup (optional backend)
+
+If using ClickHouse as the event store:
+
+```bash
+# Use clickhouse-backup tool
+docker exec toki-clickhouse clickhouse-backup create backup_$(date +%Y%m%d)
+
+# Or use clickhouse-client to export
+docker exec toki-clickhouse clickhouse-client --query "SELECT * FROM events FORMAT Native" > events_backup.bin
+```
+
+See [ClickHouse backup documentation](https://clickhouse.com/docs/en/operations/backup) for full details.
 
 ---
 
@@ -53,7 +66,7 @@ The simplest approach for small deployments:
 2. Snapshot the entire VM/VPS disk via your cloud provider's console
 3. Restart: `docker compose --profile caddy up -d`
 
-This captures everything — database, time-series, and certificates.
+This captures everything -- database, event store, and certificates.
 
 ---
 

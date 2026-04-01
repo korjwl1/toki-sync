@@ -1,0 +1,15 @@
+[server]
+http_port = 9091
+tcp_port = 9090
+
+[auth]
+jwt_secret = "test-tls-secret"
+
+[storage]
+sqlite_path = "/data/toki-sync.db"
+
+[events]
+backend = "fjall"
+fjall_path = "/data/events.fjall"
+# backend = "clickhouse"
+# clickhouse_url = "http://clickhouse:8123"

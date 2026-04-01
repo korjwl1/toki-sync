@@ -16,28 +16,23 @@ services:
     networks:
       - internal
     # For Scenario B (no Caddy): add `ports: ["9090:9090", "9091:9091"]` and `networks: [internal, external]`
-    depends_on:
-      victoriametrics:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:9091/health"]
       interval: 10s
       timeout: 5s
       retries: 3
 
-  victoriametrics:
-    image: victoriametrics/victoria-metrics:v1.101.0
+  clickhouse:
+    profiles: ["clickhouse"]
+    image: clickhouse/clickhouse-server:latest
+    container_name: toki-clickhouse
     restart: unless-stopped
-    command:
-      - -retentionPeriod=12
-      - -storageDataPath=/vm-data
-      - -dedup.minScrapeInterval=1ms
     volumes:
-      - vm-data:/vm-data
+      - clickhouse-data:/var/lib/clickhouse
     networks:
       - internal
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8428/health"]
+      test: ["CMD", "wget", "-qO-", "http://localhost:8123/ping"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -75,6 +70,6 @@ networks:
     driver: bridge
 
 volumes:
-  toki-data:      # SQLite: user/device/cursor state. Loss requires re-login + full re-sync
-  vm-data:        # VictoriaMetrics: all token usage history. Loss is unrecoverable
-  caddy-data:     # Let's Encrypt certificates. Loss triggers auto-reissue (rate limit: 5/week)
+  toki-data:        # SQLite + Fjall: user/device/cursor state + event store. Loss requires re-login + full re-sync
+  clickhouse-data:  # ClickHouse event data (only used with --profile clickhouse). Loss is recoverable via client re-sync
+  caddy-data:       # Let's Encrypt certificates. Loss triggers auto-reissue (rate limit: 5/week)

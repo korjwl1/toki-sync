@@ -326,9 +326,11 @@ OIDC callback handler. Exchanges the authorization code for tokens and creates/f
 
 ---
 
-## PromQL Proxy (JWT required)
+## PromQL Proxy (JWT required, optional -- requires VictoriaMetrics)
 
-These endpoints proxy PromQL queries to VictoriaMetrics with per-user label injection for data isolation. Each user can only query their own data.
+These endpoints proxy PromQL queries to an external VictoriaMetrics instance with per-user label injection for data isolation. Each user can only query their own data.
+
+These endpoints are only available when `[backend].vm_url` is configured in `toki-sync.toml`. Without VictoriaMetrics, these endpoints return an error.
 
 ### `GET /api/v1/query`
 
@@ -341,7 +343,7 @@ Instant PromQL query.
 | `query` | Yes | PromQL expression |
 | `time` | No | Evaluation timestamp (RFC3339 or Unix timestamp) |
 
-**Response** `200 OK` — VictoriaMetrics response format:
+**Response** `200 OK` — VictoriaMetrics response format (when VM is configured):
 
 ```json
 {
@@ -356,6 +358,12 @@ Instant PromQL query.
     ]
   }
 }
+```
+
+**Response** `503 Service Unavailable` (when VM is not configured):
+
+```json
+{ "error": "PromQL proxy not available: VictoriaMetrics not configured" }
 ```
 
 ---
@@ -373,7 +381,7 @@ Range PromQL query.
 | `end` | Yes | End timestamp |
 | `step` | Yes | Query resolution step (e.g., `60s`, `5m`, `1h`) |
 
-**Response** `200 OK` — VictoriaMetrics response format with `resultType: "matrix"`.
+**Response** `200 OK` — VictoriaMetrics response format with `resultType: "matrix"` (when VM is configured).
 
 ---
 
@@ -469,11 +477,11 @@ List team memberships for the authenticated user.
 
 ### `GET /api/v1/teams/:team_id/query_range`
 
-Aggregated PromQL range query across all team members. The server injects a regex label matcher for all users in the team.
+Aggregated PromQL range query across all team members. The server injects a regex label matcher for all users in the team. Requires VictoriaMetrics to be configured.
 
-**Query Parameters** — same as `/api/v1/query_range`.
+**Query Parameters** -- same as `/api/v1/query_range`.
 
-**Response** `200 OK` — VictoriaMetrics response format.
+**Response** `200 OK` -- VictoriaMetrics response format (when VM is configured).
 
 ---
 

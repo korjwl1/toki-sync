@@ -56,7 +56,7 @@ services:
 docker compose up -d
 ```
 
-toki-sync-server와 VictoriaMetrics만 시작됩니다 (Caddy 없음).
+toki-sync-server와 내장 Fjall 이벤트 스토어만 시작됩니다 (Caddy 없음).
 
 ---
 

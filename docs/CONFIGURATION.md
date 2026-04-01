@@ -24,8 +24,11 @@ jwt_secret = "${JWT_SECRET}"
 [storage]
 db_path = "/data/toki_sync.db"
 
-[backend]
-vm_url = "http://victoriametrics:8428"
+[events]
+backend = "fjall"
+fjall_path = "/data/events.fjall"
+# backend = "clickhouse"
+# clickhouse_url = "http://clickhouse:8123"
 
 [features]
 # max_query_scope = "365d"
@@ -45,7 +48,7 @@ json = true
 | `http_port` | integer | `9091` | HTTP API port (REST, dashboard, PromQL proxy) |
 | `tcp_port` | integer | `9090` | TCP sync protocol port (toki daemon connections) |
 | `external_url` | string | *(empty)* | Public URL used for JWT `iss` claim and OIDC redirect URI derivation. Example: `https://sync.example.com` |
-| `max_concurrent_writes` | integer | `10` | Maximum parallel VictoriaMetrics batch writes. Limits thundering-herd pressure when many devices sync simultaneously |
+| `max_concurrent_writes` | integer | `10` | Maximum parallel event store batch writes. Limits thundering-herd pressure when many devices sync simultaneously |
 | `trust_proxy` | boolean | `false` | Trust `X-Forwarded-For` and `X-Real-IP` headers from a reverse proxy for client IP resolution (brute force tracking). Only enable when behind a trusted reverse proxy |
 
 ---
@@ -113,13 +116,42 @@ postgres_url = "postgres://toki:password@db:5432/toki_sync"
 
 ---
 
-## `[backend]`
+## `[events]`
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `vm_url` | string | `http://victoriametrics:8428` | VictoriaMetrics HTTP endpoint. The server writes time-series data here and proxies PromQL queries through it |
+| `backend` | string | `fjall` | Event store backend: `fjall` (embedded, no external dependencies) or `clickhouse` (external ClickHouse server) |
+| `fjall_path` | string | `/data/events.fjall` | Fjall database directory path. Used when `backend = "fjall"` |
+| `clickhouse_url` | string | `http://clickhouse:8123` | ClickHouse HTTP endpoint. Used when `backend = "clickhouse"` |
 
-In Docker Compose, VictoriaMetrics runs as a service named `victoriametrics`, so the default URL works out of the box. If running outside Docker, adjust to the actual VictoriaMetrics address.
+### Fjall vs ClickHouse
+
+- **Fjall** (default): embedded LSM-tree storage. Zero external dependencies. Data deduplication via `idx_msg` unique index on `msg_id`. Recommended for personal use and small teams.
+- **ClickHouse**: external column-oriented database. Better query performance for large datasets. Data deduplication via `ReplacingMergeTree` engine. Recommended for large teams or when advanced analytics are needed.
+
+```toml
+# Fjall (default — no external dependencies)
+[events]
+backend = "fjall"
+fjall_path = "/data/events.fjall"
+
+# ClickHouse (requires external ClickHouse server)
+[events]
+backend = "clickhouse"
+clickhouse_url = "http://clickhouse:8123"
+```
+
+In Docker Compose, enable ClickHouse with `docker compose --profile clickhouse up -d`. The default URL (`http://clickhouse:8123`) works out of the box with the included ClickHouse service.
+
+---
+
+## `[backend]` (optional, legacy)
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `vm_url` | string | *(empty)* | VictoriaMetrics HTTP endpoint. Only needed if using the optional PromQL proxy with an external VictoriaMetrics instance |
+
+This section is optional. It is only required for legacy PromQL proxy compatibility (e.g., `toki report query --remote` or Toki Monitor server mode). If not configured, the `/api/v1/query` and `/api/v1/query_range` endpoints will return an error indicating that VictoriaMetrics is not configured.
 
 ---
 

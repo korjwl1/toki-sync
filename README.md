@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>Multi-device token usage sync server</b><br>
-  Collects AI tool usage from all your machines, stores time-series in VictoriaMetrics, serves a unified dashboard.
+  Collects AI tool usage from all your machines, stores events in an embedded event store (Fjall), serves a unified dashboard.
 </p>
 
 <p align="center">
@@ -62,9 +62,9 @@ toki settings sync disable --keep       # Keep remote data, only disable locally
 
 ## Who is this for?
 
-- **Using AI tools on multiple machines?** See all your token usage in one place — queryable via PromQL, visible in the web dashboard or [Toki Monitor](https://github.com/korjwl1/toki-monitor).
+- **Using AI tools on multiple machines?** See all your token usage in one place — visible in the web dashboard or [Toki Monitor](https://github.com/korjwl1/toki-monitor).
 
-- **Want a team usage dashboard?** Aggregate token usage across team members with team-scoped PromQL queries and role-based access control.
+- **Want a team usage dashboard?** Aggregate token usage across team members with team-scoped queries and role-based access control.
 
 - **Need a self-hosted solution?** One `docker compose up` gives you a complete sync server with automatic TLS, no cloud dependencies, no telemetry.
 
@@ -79,16 +79,15 @@ toki daemon  toki daemon  toki daemon
                               v
                       toki-sync server
                       |-- TCP :9090 (sync protocol)
-                      |-- HTTP :9091 (auth + PromQL proxy + dashboard)
-                      +-- SQLite / PostgreSQL
-                              |
-                      VictoriaMetrics
-                      (time-series storage)
+                      |-- HTTP :9091 (auth + dashboard)
+                      +-- SQLite / PostgreSQL (metadata)
+                      +-- EventStore: Fjall (embedded) or ClickHouse (optional)
 ```
 
 - **toki daemons** maintain persistent TLS connections, batch events (1,000/batch), zstd-compress, and send with ACK-based flow control
-- **toki-sync server** authenticates users, stores metadata in SQLite/PostgreSQL, writes time-series to VictoriaMetrics
-- **PromQL proxy** injects per-user labels for data isolation — each user only sees their own data
+- **toki-sync server** authenticates users, stores metadata in SQLite/PostgreSQL, writes events to the EventStore (Fjall by default, ClickHouse optional)
+- **EventStore** handles deduplication via msg_id (Fjall: idx_msg unique index, ClickHouse: ReplacingMergeTree)
+- **PromQL proxy** (optional, requires VictoriaMetrics) injects per-user labels for data isolation
 
 ---
 
@@ -96,7 +95,7 @@ toki daemon  toki daemon  toki daemon
 
 - **Multi-device sync** — TCP binary protocol with zstd compression, ACK flow control, delta-sync on reconnect
 - **Device code authentication** — browser-based device code flow, OIDC (Google, GitHub, etc.), and password login
-- **PromQL proxy** — per-user label injection for data isolation; compatible with toki CLI `--remote` and Toki Monitor
+- **PromQL proxy** (optional) — per-user label injection for data isolation; compatible with toki CLI `--remote` and Toki Monitor. Requires external VictoriaMetrics
 - **Web dashboard** — chart panels, time range picker, device list, team views
 - **Teams / organizations** — aggregate queries across team members
 - **Dual database backend** — SQLite (default, zero-config) or PostgreSQL (for scale)
@@ -110,7 +109,7 @@ toki daemon  toki daemon  toki daemon
 
 - **No prompt access** — only token counts and metadata (model, session ID, project name) are transmitted. Never prompts or responses.
 - **TLS everywhere** — all sync traffic is encrypted. Caddy handles certificates automatically via Let's Encrypt.
-- **Per-user data isolation** — PromQL proxy injects user labels, so each user can only query their own data.
+- **Per-user data isolation** — each user can only query their own data. PromQL proxy (optional) injects user labels for VictoriaMetrics compatibility.
 - **Self-hosted** — your data stays on your server. No telemetry, no cloud dependencies.
 
 ---
@@ -145,7 +144,7 @@ See also: [Backup & Restore](docs/backup.md) | [Troubleshooting](docs/troublesho
 | HTTP framework | axum 0.7 | Async, tower middleware ecosystem |
 | Async runtime | tokio | Full-featured async I/O |
 | Database | sqlx 0.8 (SQLite + PostgreSQL) | Compile-time query checking, dual backend |
-| Time-series | VictoriaMetrics | PromQL-compatible, low resource usage |
+| Event store | Fjall (embedded) / ClickHouse (optional) | Zero-dependency default, scalable option |
 | Auth | jsonwebtoken 9 + bcrypt | JWT access/refresh tokens, secure password hashing |
 | OIDC | reqwest + manual discovery | Standard OIDC flow without heavy framework |
 | Sync protocol | toki-sync-protocol (shared crate) | Wire-compatible types, bincode serialization |

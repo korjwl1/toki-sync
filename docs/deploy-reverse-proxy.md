@@ -56,7 +56,7 @@ services:
 docker compose up -d
 ```
 
-This starts only toki-sync-server and VictoriaMetrics (no Caddy).
+This starts only toki-sync-server with the embedded Fjall event store (no Caddy).
 
 ---
 

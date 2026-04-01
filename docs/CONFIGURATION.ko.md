@@ -24,8 +24,11 @@ jwt_secret = "${JWT_SECRET}"
 [storage]
 db_path = "/data/toki_sync.db"
 
-[backend]
-vm_url = "http://victoriametrics:8428"
+[events]
+backend = "fjall"
+fjall_path = "/data/events.fjall"
+# backend = "clickhouse"
+# clickhouse_url = "http://clickhouse:8123"
 
 [features]
 # max_query_scope = "365d"
@@ -45,7 +48,7 @@ json = true
 | `http_port` | integer | `9091` | HTTP API 포트 (REST, 대시보드, PromQL 프록시) |
 | `tcp_port` | integer | `9090` | TCP 동기화 프로토콜 포트 (toki 데몬 연결) |
 | `external_url` | string | *(빈값)* | JWT `iss` 클레임 및 OIDC 리다이렉트 URI 도출에 사용되는 공개 URL. 예: `https://sync.example.com` |
-| `max_concurrent_writes` | integer | `10` | VictoriaMetrics 동시 배치 쓰기 최대 수. 여러 디바이스가 동시에 동기화할 때 thundering-herd 압력을 제한합니다 |
+| `max_concurrent_writes` | integer | `10` | 이벤트 스토어 동시 배치 쓰기 최대 수. 여러 디바이스가 동시에 동기화할 때 thundering-herd 압력을 제한합니다 |
 | `trust_proxy` | boolean | `false` | 리버스 프록시의 `X-Forwarded-For` 및 `X-Real-IP` 헤더를 신뢰하여 클라이언트 IP를 확인합니다 (무차별 대입 추적용). 신뢰할 수 있는 리버스 프록시 뒤에 있을 때만 활성화하세요 |
 
 ---
@@ -113,13 +116,42 @@ postgres_url = "postgres://toki:password@db:5432/toki_sync"
 
 ---
 
-## `[backend]`
+## `[events]`
 
 | 키 | 타입 | 기본값 | 설명 |
 |----|------|--------|------|
-| `vm_url` | string | `http://victoriametrics:8428` | VictoriaMetrics HTTP 엔드포인트. 서버가 시계열 데이터를 여기에 쓰고 PromQL 쿼리를 프록시합니다 |
+| `backend` | string | `fjall` | 이벤트 스토어 백엔드: `fjall` (내장, 외부 의존성 없음) 또는 `clickhouse` (외부 ClickHouse 서버) |
+| `fjall_path` | string | `/data/events.fjall` | Fjall 데이터베이스 디렉토리 경로. `backend = "fjall"`일 때 사용 |
+| `clickhouse_url` | string | `http://clickhouse:8123` | ClickHouse HTTP 엔드포인트. `backend = "clickhouse"`일 때 사용 |
 
-Docker Compose에서는 VictoriaMetrics가 `victoriametrics`라는 서비스명으로 실행되므로 기본 URL이 그대로 동작합니다. Docker 외부에서 실행할 때는 실제 VictoriaMetrics 주소로 변경하세요.
+### Fjall vs ClickHouse
+
+- **Fjall** (기본): 내장 LSM-tree 저장소. 외부 의존성 없음. `msg_id`의 `idx_msg` 고유 인덱스를 통한 데이터 중복 제거. 개인 사용 및 소규모 팀에 권장합니다.
+- **ClickHouse**: 외부 컬럼 지향 데이터베이스. 대용량 데이터셋에서 더 나은 쿼리 성능. `ReplacingMergeTree` 엔진을 통한 데이터 중복 제거. 대규모 팀이나 고급 분석이 필요한 경우 권장합니다.
+
+```toml
+# Fjall (기본 — 외부 의존성 없음)
+[events]
+backend = "fjall"
+fjall_path = "/data/events.fjall"
+
+# ClickHouse (외부 ClickHouse 서버 필요)
+[events]
+backend = "clickhouse"
+clickhouse_url = "http://clickhouse:8123"
+```
+
+Docker Compose에서 ClickHouse를 사용하려면 `docker compose --profile clickhouse up -d`로 활성화하세요. 기본 URL(`http://clickhouse:8123`)이 포함된 ClickHouse 서비스와 바로 동작합니다.
+
+---
+
+## `[backend]` (선택, 레거시)
+
+| 키 | 타입 | 기본값 | 설명 |
+|----|------|--------|------|
+| `vm_url` | string | *(빈값)* | VictoriaMetrics HTTP 엔드포인트. 외부 VictoriaMetrics 인스턴스와 선택적 PromQL 프록시를 사용할 때만 필요 |
+
+이 섹션은 선택 사항입니다. 레거시 PromQL 프록시 호환성(예: `toki report query --remote` 또는 Toki Monitor 서버 모드)에만 필요합니다. 설정하지 않으면 `/api/v1/query` 및 `/api/v1/query_range` 엔드포인트가 VictoriaMetrics가 설정되지 않았음을 나타내는 오류를 반환합니다.
 
 ---
 

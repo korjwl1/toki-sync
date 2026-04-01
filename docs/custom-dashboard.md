@@ -4,12 +4,12 @@ This guide explains how to build custom dashboards using the toki-sync API for v
 
 ## Overview
 
-toki-sync provides a PromQL proxy with JWT authentication and scope-based access control. All queries go through toki-sync, which enforces user-level data isolation by injecting label filters into PromQL expressions before forwarding to VictoriaMetrics.
+toki-sync provides a query API with JWT authentication and scope-based access control. All queries go through toki-sync, which enforces user-level data isolation. When VictoriaMetrics is configured (optional), a PromQL proxy is also available that injects label filters into PromQL expressions before forwarding.
 
 There are two approaches for building dashboards:
 
 - **Tier 1: Direct Connection** -- Frontend talks directly to toki-sync API
-- **Tier 2: Custom Backend** -- Your backend mediates between frontend and toki-sync/VictoriaMetrics
+- **Tier 2: Custom Backend** -- Your backend mediates between frontend and toki-sync (optionally with direct VictoriaMetrics access)
 
 ## Tier 1: Direct Connection
 
@@ -111,7 +111,7 @@ GET /api/v1/query_range?query=sum by (provider)(increase(toki_tokens_total[1h]))
 
 ## Tier 2: Custom Backend
 
-Architecture: `Frontend -> Your Backend -> toki-sync (user/team info) + VictoriaMetrics (data)`
+Architecture: `Frontend -> Your Backend -> toki-sync (user/team info + event data)`
 
 Use this approach when you need fine-grained access control beyond `self`/`team`/`all`, or when you want to combine toki-sync data with other data sources.
 
@@ -122,18 +122,18 @@ Use this approach when you need fine-grained access control beyond `self`/`team`
    - `GET /me/teams` -- list the user's teams
    - `GET /admin/users` -- list all users (admin only)
    - `GET /admin/teams/:team_id/members` -- list team members (admin only)
-3. Your backend queries VictoriaMetrics directly on your internal network (no JWT needed for VM)
+3. Your backend queries toki-sync API endpoints for event data
 4. Your backend applies its own permission logic before returning data to the frontend
 
-### Direct VictoriaMetrics Query
+### Direct VictoriaMetrics Query (optional)
 
-VictoriaMetrics accepts the same PromQL endpoints:
+If VictoriaMetrics is configured as the `[backend].vm_url`, you can also query it directly on your internal network:
 
 ```
 GET http://victoriametrics:8428/api/v1/query_range?query=...&start=...&end=...&step=...
 ```
 
-When querying VM directly, you are responsible for injecting `user="..."` or `user=~"..."` label filters to enforce access control.
+When querying VictoriaMetrics directly, you are responsible for injecting `user="..."` or `user=~"..."` label filters to enforce access control. This is only available when VictoriaMetrics is deployed separately.
 
 ## Available Labels
 
