@@ -165,6 +165,10 @@ impl EventStore for ClickHouseEventStore {
     }
 
     async fn delete_device_events(&self, device_id: &str) -> Result<()> {
+        // Validate device_id format (UUID) to prevent SQL injection
+        if !device_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            anyhow::bail!("invalid device_id format: {}", device_id);
+        }
         let sql = format!(
             "ALTER TABLE toki_events DELETE WHERE device_id = '{}'",
             Self::escape(device_id)

@@ -260,14 +260,14 @@ async fn handle_sync_batch(
         se
     }).collect();
 
-    // Acquire permit
-    let _permit = batch_semaphore.acquire().await
+    // Acquire permit (limits concurrent writes to EventStore)
+    let permit = batch_semaphore.acquire().await
         .map_err(|_| anyhow::anyhow!("batch semaphore closed"))?;
 
-    // Write to EventStore — dedup by (device_id, msg_id) is handled internally
+    // Write to EventStore — dedup by (device_id, provider, msg_id) is handled internally
     events.upsert_events(&server_events).await?;
 
-    drop(_permit);
+    drop(permit);
 
     // Advance cursor to max ts in this batch
     let max_ts = batch.items.iter().map(|i| i.ts_ms).max().unwrap_or(0);

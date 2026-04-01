@@ -263,6 +263,30 @@ pub async fn toki_query(
         .map(|s| parse_duration_secs(s))
         .unwrap_or(3600);
 
+    // ── Step validation ──
+    // Prevent excessive bucket counts that would exhaust server memory.
+    // max_buckets=2000 is more than enough for any dashboard chart.
+    if is_range {
+        let range_secs = (end_ts - start_ts).max(1);
+        let max_buckets: i64 = 2000;
+        let min_step = (range_secs + max_buckets - 1) / max_buckets; // ceil division
+        if step_secs < min_step {
+            return Err(AppError {
+                status: StatusCode::BAD_REQUEST,
+                message: format!(
+                    "step {}s too small for range {}s (would produce {} buckets, max {}). minimum step: {}s",
+                    step_secs, range_secs, range_secs / step_secs, max_buckets, min_step
+                ),
+            });
+        }
+        if step_secs > range_secs {
+            return Err(AppError {
+                status: StatusCode::BAD_REQUEST,
+                message: format!("step {}s exceeds range {}s", step_secs, range_secs),
+            });
+        }
+    }
+
     // ── Query from EventStore (deduped by msg_id) ──
     //
     // EventStore handles dedup: same (device_id, msg_id) → last value only.
@@ -279,8 +303,15 @@ pub async fn toki_query(
 
     let pricing = state.pricing.read().await.clone();
     let effective_step = if is_range { step_secs } else { (end_ts - start_ts).max(1) };
-    let tz: Option<chrono_tz::Tz> = params.tz.as_deref()
-        .and_then(|s| s.parse().ok());
+    let tz: Option<chrono_tz::Tz> = params.tz.as_deref().and_then(|s| {
+        match s.parse() {
+            Ok(t) => Some(t),
+            Err(_) => {
+                tracing::warn!("invalid timezone '{s}', falling back to UTC");
+                None
+            }
+        }
+    });
     let toki_json = aggregate_events_to_toki_json(
         &all_events, effective_step, since_ms, until_ms,
         rewritten.needs_cost_compute, rewritten.is_events, &rewritten.group_by, &pricing,
