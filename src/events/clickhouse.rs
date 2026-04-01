@@ -43,7 +43,7 @@ impl ClickHouseEventStore {
                 cache_read_input_tokens UInt64,
                 usage_total UInt64
             ) ENGINE = ReplacingMergeTree(ts_ms)
-            ORDER BY (device_id, msg_id)
+            ORDER BY (device_id, provider, msg_id)
         ";
         self.execute(ddl).context("create toki_events table")?;
         Ok(())
@@ -157,6 +157,11 @@ impl EventStore for ClickHouseEventStore {
         })
         .await
         .context("spawn_blocking panicked")?
+    }
+
+    async fn cleanup_old_dedup(&self, _device_id: &str, _cutoff_ms: i64) -> Result<()> {
+        // No-op: ClickHouse handles dedup via ReplacingMergeTree, no idx_msg to clean up.
+        Ok(())
     }
 
     async fn delete_device_events(&self, device_id: &str) -> Result<()> {

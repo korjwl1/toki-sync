@@ -177,7 +177,7 @@ pub async fn promql_query(
     })?;
 
     let rewritten = rewrite_toki_query(&scoped);
-    let pricing = state.pricing.read().await;
+    let pricing = state.pricing.read().await.clone();
     let result = if rewritten.needs_cost_compute {
         let vm_result = vm.query(&rewritten.vm_query, params.time).await.map_err(AppError::bad_gateway)?;
         let computed = compute_cost_from_vm_response(&vm_result, &pricing, &rewritten.original_query)?;
@@ -208,7 +208,7 @@ pub async fn promql_query_range(
     })?;
 
     let rewritten = rewrite_toki_query(&scoped);
-    let pricing = state.pricing.read().await;
+    let pricing = state.pricing.read().await.clone();
     let step = params.step.as_deref().unwrap_or("60s");
     let result = if rewritten.needs_cost_compute {
         let vm_result = vm.query_range(&rewritten.vm_query, params.start, params.end, step)
@@ -249,9 +249,11 @@ pub async fn toki_query(
         .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
     let start_ts = params.start.as_deref()
         .map(|s| parse_toki_time(s, false))
+        .transpose()?
         .unwrap_or(0);
     let end_ts = params.end.as_deref()
         .map(|s| parse_toki_time(s, true))
+        .transpose()?
         .unwrap_or(now);
 
     let rewritten = rewrite_toki_query(&scoped);
@@ -275,7 +277,7 @@ pub async fn toki_query(
     let all_events = state.events.query_events(since_ms, until_ms, user_filter)
         .await.map_err(AppError::bad_gateway)?;
 
-    let pricing = state.pricing.read().await;
+    let pricing = state.pricing.read().await.clone();
     let effective_step = if is_range { step_secs } else { (end_ts - start_ts).max(1) };
     let tz: Option<chrono_tz::Tz> = params.tz.as_deref()
         .and_then(|s| s.parse().ok());
@@ -428,10 +430,10 @@ fn aggregate_events_to_toki_json(
 
 
 /// Parse toki time string: epoch seconds, YYYYMMDD, or YYYYMMDDhhmmss
-fn parse_toki_time(s: &str, is_end: bool) -> i64 {
+fn parse_toki_time(s: &str, is_end: bool) -> Result<i64, AppError> {
     // Try epoch seconds first
     if let Ok(ts) = s.parse::<i64>() {
-        return ts;
+        return Ok(ts);
     }
     // YYYYMMDD
     if s.len() == 8 {
@@ -441,16 +443,19 @@ fn parse_toki_time(s: &str, is_end: bool) -> i64 {
             } else {
                 d.and_hms_opt(0, 0, 0).unwrap()
             };
-            return time.and_utc().timestamp();
+            return Ok(time.and_utc().timestamp());
         }
     }
     // YYYYMMDDhhmmss
     if s.len() == 14 {
         if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y%m%d%H%M%S") {
-            return dt.and_utc().timestamp();
+            return Ok(dt.and_utc().timestamp());
         }
     }
-    0
+    Err(AppError {
+        status: StatusCode::BAD_REQUEST,
+        message: format!("invalid time format: '{s}'"),
+    })
 }
 
 /// Replace range vector durations [Xd/h/m/s/w/y] with [Ns] where N=range_secs.

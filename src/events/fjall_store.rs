@@ -5,13 +5,18 @@ use fjall::{Database as FjallDatabase, Keyspace, KeyspaceCreateOptions};
 
 use super::{EventStore, ServerEvent, UserFilter};
 
+/// Schema version for the server-side Fjall event store.
+/// Increment when ServerEvent serialization or keyspace layout changes.
+/// Mismatched version triggers automatic data reset.
+const EVENT_SCHEMA_VERSION: u32 = 2;
+
 /// Fjall-backed event store with msg_id dedup.
 ///
 /// Replicates the local daemon's dedup pattern (toki/src/db.rs):
 /// - `events` keyspace: sorted by [ts_ms(8 BE)][device_id\0msg_id]
-/// - `idx_msg` keyspace: [device_id\0msg_id] → events_key (dedup lookup)
+/// - `idx_msg` keyspace: [device_id\0provider\0msg_id] → events_key (dedup lookup)
 ///
-/// On upsert: if (device_id, msg_id) already exists, delete old event, insert new.
+/// On upsert: if (device_id, provider, msg_id) already exists, delete old event, insert new.
 /// Atomic via OwnedWriteBatch.
 ///
 /// All fields (`FjallDatabase`, `Keyspace`) are internally `Arc`-wrapped and Clone,
@@ -34,8 +39,25 @@ impl FjallEventStore {
             .context("open fjall event store")?;
 
         let opts = || KeyspaceCreateOptions::default();
+        let meta = db.keyspace("meta", opts).context("open meta keyspace")?;
         let events = db.keyspace("events", opts).context("open events keyspace")?;
         let idx_msg = db.keyspace("idx_msg", opts).context("open idx_msg keyspace")?;
+
+        // Check schema version — clear data if mismatched
+        let stored = meta.get("schema_version").ok().flatten()
+            .and_then(|b| String::from_utf8_lossy(&b).parse::<u32>().ok())
+            .unwrap_or(0);
+
+        if stored != 0 && stored != EVENT_SCHEMA_VERSION {
+            tracing::warn!("Event store schema changed ({stored} -> {EVENT_SCHEMA_VERSION}), clearing data");
+            drop(meta);
+            drop(events);
+            drop(idx_msg);
+            drop(db);
+            std::fs::remove_dir_all(path).ok();
+            return Self::open(path); // recursive call to reopen fresh
+        }
+        meta.insert("schema_version", EVENT_SCHEMA_VERSION.to_string().as_bytes())?;
 
         Ok(FjallEventStore { db, events, idx_msg })
     }
@@ -50,10 +72,12 @@ impl FjallEventStore {
         key
     }
 
-    /// Build the idx_msg key: [device_id\0msg_id]
-    fn idx_key(device_id: &str, msg_id: &str) -> Vec<u8> {
-        let mut key = Vec::with_capacity(device_id.len() + 1 + msg_id.len());
+    /// Build the idx_msg key: [device_id\0provider\0msg_id]
+    fn idx_key(device_id: &str, provider: &str, msg_id: &str) -> Vec<u8> {
+        let mut key = Vec::with_capacity(device_id.len() + 1 + provider.len() + 1 + msg_id.len());
         key.extend_from_slice(device_id.as_bytes());
+        key.push(0);
+        key.extend_from_slice(provider.as_bytes());
         key.push(0);
         key.extend_from_slice(msg_id.as_bytes());
         key
@@ -67,11 +91,11 @@ fn upsert_one(
     batch: &mut fjall::OwnedWriteBatch,
     event: &ServerEvent,
 ) {
-    let idx_key = FjallEventStore::idx_key(&event.device_id, &event.msg_id);
+    let idx_key = FjallEventStore::idx_key(&event.device_id, &event.provider, &event.msg_id);
     let new_event_key = FjallEventStore::event_key(event.ts_ms, &event.device_id, &event.msg_id);
     let value = bincode::serialize(event).expect("ServerEvent serialize");
 
-    // Check if previous event exists for this (device_id, msg_id)
+    // Check if previous event exists for this (device_id, provider, msg_id)
     if let Ok(Some(prev_key)) = idx_msg_ks.get(&idx_key) {
         // Delete old event from events keyspace
         batch.remove(events_ks, prev_key.to_vec());
@@ -166,6 +190,52 @@ impl EventStore for FjallEventStore {
 
         tokio::task::spawn_blocking(move || {
             Ok(scan_events(&events_ks, since_ms, until_ms, &filter))
+        })
+        .await
+        .context("spawn_blocking panicked")?
+    }
+
+    async fn cleanup_old_dedup(&self, device_id: &str, cutoff_ms: i64) -> Result<()> {
+        let db = self.db.clone();
+        let idx_msg_ks = self.idx_msg.clone();
+        let device_id = device_id.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let prefix = {
+                let mut p = device_id.as_bytes().to_vec();
+                p.push(0);
+                p
+            };
+
+            let mut batch = db.batch();
+            let mut count = 0u64;
+
+            for guard in idx_msg_ks.prefix(&prefix) {
+                let kv = match guard.into_inner() {
+                    Ok(kv) => kv,
+                    Err(_) => continue,
+                };
+                // Value is the event key: [ts_ms(8 bytes)][rest]
+                if kv.1.len() >= 8 {
+                    let ts = i64::from_be_bytes(
+                        kv.1[..8].try_into().unwrap_or([0; 8])
+                    );
+                    if ts < cutoff_ms {
+                        // Only remove the idx_msg entry — events data is preserved
+                        // for historical queries. Without idx_msg, old events just
+                        // won't be dedup'd if the same msg_id arrives again (unlikely
+                        // after 24h).
+                        batch.remove(&idx_msg_ks, kv.0.to_vec());
+                        count += 1;
+                    }
+                }
+            }
+
+            if count > 0 {
+                batch.commit().context("fjall cleanup_old_dedup commit")?;
+                tracing::info!("cleaned up {count} old idx_msg entries for device {device_id}");
+            }
+            Ok(())
         })
         .await
         .context("spawn_blocking panicked")?

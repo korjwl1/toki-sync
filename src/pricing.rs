@@ -28,6 +28,7 @@ impl ModelPricing {
 }
 
 /// Cached pricing table. Exact model name match only.
+#[derive(Clone)]
 pub struct PricingTable {
     prices: HashMap<String, ModelPricing>,
 }

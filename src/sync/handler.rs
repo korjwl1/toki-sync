@@ -273,6 +273,12 @@ async fn handle_sync_batch(
     let max_ts = batch.items.iter().map(|i| i.ts_ms).max().unwrap_or(0);
     db.advance_cursor(device_id, provider, max_ts).await?;
 
+    // Clean up old dedup index entries (older than cursor - 24h)
+    let cutoff_ms = (max_ts - 24 * 3600 * 1000).max(0);
+    if let Err(e) = events.cleanup_old_dedup(device_id, cutoff_ms).await {
+        tracing::warn!("idx_msg cleanup failed for device {device_id}: {e}");
+    }
+
     Ok(max_ts)
 }
 

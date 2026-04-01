@@ -62,4 +62,8 @@ pub trait EventStore: Send + Sync + 'static {
 
     /// Delete all events for a specific device (used on schema mismatch reset).
     async fn delete_device_events(&self, device_id: &str) -> Result<()>;
+
+    /// Clean up old dedup index entries for a device.
+    /// Removes idx_msg entries whose event timestamp is older than cutoff_ms.
+    async fn cleanup_old_dedup(&self, device_id: &str, cutoff_ms: i64) -> Result<()>;
 }
