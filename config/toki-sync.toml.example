@@ -6,22 +6,23 @@
 # bind = "0.0.0.0"
 tcp_port = 9090
 http_port = 9091
+# external_url = "https://myserver.duckdns.org"  # For JWT issuer + OIDC redirects
 
 [auth]
 jwt_secret = "${JWT_SECRET}"
 # access_token_ttl_secs = 3600       # 1 hour
 # refresh_token_ttl_secs = 7776000   # 90 days
-# brute_force_max_attempts = 5
-# brute_force_window_secs = 300      # 5 minutes
-# brute_force_lockout_secs = 900     # 15 minutes
 # registration_mode = "closed"       # "open" | "approval" | "closed"
 
 [storage]
-db_path = "/data/toki_sync.db"
+sqlite_path = "/data/toki_sync.db"
 
-[backend]
-vm_url = "http://victoriametrics:8428"
+[events]
+# backend = "fjall"                  # Default: embedded, no external dependencies
+# fjall_path = "/data/events.fjall"
+# backend = "clickhouse"             # Optional: external ClickHouse
+# clickhouse_url = "http://clickhouse:8123"
 
 [log]
 level = "info"
-json = true
+# json = true                        # JSON log format (for log aggregators)
