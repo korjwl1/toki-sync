@@ -1,6 +1,6 @@
 services:
   toki-sync-server:
-    image: ghcr.io/korjwl1/toki-sync-server:${TOKI_VERSION:-latest}
+    image: korjwl11/toki-sync:${TOKI_VERSION:-latest}
     build:
       context: .
       dockerfile: Dockerfile
