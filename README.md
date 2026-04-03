@@ -5,12 +5,15 @@
 <h1 align="center">toki-sync</h1>
 
 <p align="center">
-  <b>Multi-device token usage sync server</b><br>
-  Collects AI tool usage from all your machines, stores events in an embedded event store (Fjall), serves a unified dashboard.
+  <b>Self-hosted multi-device token usage sync server for <a href="https://github.com/korjwl1/toki">toki</a></b><br>
+  Collects AI tool usage from all your machines, stores events locally, serves a unified dashboard.
 </p>
 
 <p align="center">
-  Part of the <a href="https://github.com/korjwl1/toki">toki</a> ecosystem.
+  <a href="https://hub.docker.com/r/korjwl11/toki-sync"><img src="https://img.shields.io/docker/v/korjwl11/toki-sync?sort=semver&label=Docker%20Hub" alt="Docker Hub" /></a>
+  <a href="https://hub.docker.com/r/korjwl11/toki-sync"><img src="https://img.shields.io/docker/pulls/korjwl11/toki-sync" alt="Docker Pulls" /></a>
+  <a href="https://hub.docker.com/r/korjwl11/toki-sync"><img src="https://img.shields.io/docker/image-size/korjwl11/toki-sync?sort=semver" alt="Docker Image Size" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-FSL--1.1--Apache--2.0-blue" alt="License" /></a>
 </p>
 
 <p align="center">
@@ -21,52 +24,80 @@
 
 ## Quick Start
 
-```bash
-git clone https://github.com/korjwl1/toki-sync.git
-cd toki-sync
-cp .env.example .env
-cp config/toki-sync.toml.example config/toki-sync.toml
+No `git clone` needed. Create a `docker-compose.yml` and `.env`, then start.
+
+**1. Create `docker-compose.yml`**
+
+```yaml
+services:
+  toki-sync:
+    image: korjwl11/toki-sync:latest
+    container_name: toki-sync
+    restart: unless-stopped
+    ports:
+      - "9090:9090"   # sync protocol (TCP)
+      - "9091:9091"   # web dashboard + API (HTTP)
+    environment:
+      TOKI_ADMIN_PASSWORD: ${TOKI_ADMIN_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET}
+    volumes:
+      - toki-data:/data
+
+volumes:
+  toki-data:
 ```
 
-Edit `.env`:
+**2. Create `.env`**
 
 ```bash
-TOKI_ADMIN_PASSWORD=your-strong-password
-JWT_SECRET=$(openssl rand -base64 32)
-TOKI_EXTERNAL_URL=https://myserver.duckdns.org
-DUCKDNS_TOKEN=your-duckdns-token
+TOKI_ADMIN_PASSWORD=change-me-to-a-strong-password
+JWT_SECRET=change-me-run-openssl-rand-base64-32
 ```
 
-Deploy and connect:
+**3. Start and connect**
 
 ```bash
-docker compose --profile caddy up -d
+docker compose up -d
 
 # On any machine with toki installed (opens browser for authentication)
-toki settings sync enable --server myserver.duckdns.org
+toki settings sync enable --server <your-server-ip-or-domain>
 ```
 
-Done. Token usage now syncs automatically.
+Done. Token usage now syncs automatically across all your devices.
 
-To disconnect later:
+> **Want automatic TLS?** See the [Caddy + DuckDNS deployment guide](docs/deploy-caddy-duckdns.md) for HTTPS with a free domain and auto-renewed certificates.
+
+---
+
+## Docker Image
+
+| | |
+|---|---|
+| **Image** | [`korjwl11/toki-sync`](https://hub.docker.com/r/korjwl11/toki-sync) |
+| **Tags** | `latest`, `2.0.0` |
+| **Platforms** | `linux/amd64`, `linux/arm64` |
+
+### Standalone (default)
+
+Uses **Fjall** (embedded event store) + **SQLite** (metadata). Zero external dependencies -- just the single container above.
+
+### With ClickHouse (optional)
+
+For high-volume deployments, add the `--profile clickhouse` flag:
 
 ```bash
-toki settings sync disable              # Prompts to delete remote data
-toki settings sync disable --delete     # Delete this device's data from server
-toki settings sync disable --keep       # Keep remote data, only disable locally
+docker compose --profile clickhouse up -d
 ```
 
-> First time with DuckDNS? The [Caddy + DuckDNS guide](docs/deploy-caddy-duckdns.md) walks you through every step from signup to verification.
+This starts a ClickHouse container alongside toki-sync for scalable event storage. See the full [`docker-compose.yml`](docker-compose.yml) for details.
 
 ---
 
 ## Who is this for?
 
-- **Using AI tools on multiple machines?** See all your token usage in one place — visible in the web dashboard or [Toki Monitor](https://github.com/korjwl1/toki-monitor).
-
-- **Want a team usage dashboard?** Aggregate token usage across team members with team-scoped queries and role-based access control.
-
-- **Need a self-hosted solution?** One `docker compose up` gives you a complete sync server with automatic TLS, no cloud dependencies, no telemetry.
+- **Multiple machines?** See all your AI token usage in one place -- web dashboard or [Toki Monitor](https://github.com/korjwl1/toki-monitor).
+- **Team dashboard?** Aggregate usage across team members with role-based access.
+- **Self-hosted?** Your data stays on your server. No telemetry, no cloud.
 
 ---
 
@@ -80,45 +111,42 @@ toki daemon  toki daemon  toki daemon
                       toki-sync server
                       |-- TCP :9090 (sync protocol)
                       |-- HTTP :9091 (auth + dashboard)
-                      +-- SQLite / PostgreSQL (metadata)
-                      +-- EventStore: Fjall (embedded) or ClickHouse (optional)
+                      +-- SQLite (metadata)
+                      +-- Fjall (events) or ClickHouse (optional)
 ```
 
 - **toki daemons** maintain persistent TLS connections, batch events (1,000/batch), zstd-compress, and send with ACK-based flow control
-- **toki-sync server** authenticates users, stores metadata in SQLite/PostgreSQL, writes events to the EventStore (Fjall by default, ClickHouse optional)
-- **EventStore** handles deduplication via msg_id (Fjall: idx_msg unique index, ClickHouse: ReplacingMergeTree)
-- **PromQL proxy** (optional, requires VictoriaMetrics) injects per-user labels for data isolation
+- **toki-sync server** authenticates users, stores metadata in SQLite, writes events to the event store
+- **Deduplication** via `msg_id` ensures exactly-once delivery across reconnections
 
 ---
 
 ## Features
 
-- **Multi-device sync** — TCP binary protocol with zstd compression, ACK flow control, delta-sync on reconnect
-- **Device code authentication** — browser-based device code flow, OIDC (Google, GitHub, etc.), and password login
-- **PromQL proxy** (optional) — per-user label injection for data isolation; compatible with toki CLI `--remote` and Toki Monitor. Requires external VictoriaMetrics
-- **Web dashboard** — chart panels, time range picker, device list, team views
-- **Teams / organizations** — aggregate queries across team members
-- **Dual database backend** — SQLite (default, zero-config) or PostgreSQL (for scale)
-- **Docker deployment** — Caddy profile for automatic TLS, or bring your own reverse proxy
-- **Brute force protection** — configurable attempt limits, lockout windows, IP-based tracking
-- **Refresh token rotation** — secure token refresh with one-time-use rotation
+- **Multi-device sync** -- TCP binary protocol, zstd compression, ACK flow control, delta-sync on reconnect
+- **Device code auth** -- browser-based device code flow, OIDC (Google, GitHub, etc.), password login
+- **Web dashboard** -- charts, time range picker, device list, team views
+- **Teams** -- aggregate queries across team members with role-based access
+- **Dual storage** -- SQLite (zero-config) or PostgreSQL; Fjall (embedded) or ClickHouse (scale)
+- **PromQL proxy** (optional) -- per-user label injection for VictoriaMetrics compatibility
+- **Security** -- TLS everywhere, brute force protection, refresh token rotation
 
 ---
 
 ## Privacy & Security
 
-- **No prompt access** — only token counts and metadata (model, session ID, project name) are transmitted. Never prompts or responses.
-- **TLS everywhere** — all sync traffic is encrypted. Caddy handles certificates automatically via Let's Encrypt.
-- **Per-user data isolation** — each user can only query their own data. PromQL proxy (optional) injects user labels for VictoriaMetrics compatibility.
-- **Self-hosted** — your data stays on your server. No telemetry, no cloud dependencies.
+- **No prompt access** -- only token counts and metadata (model, session ID, project name). Never prompts or responses.
+- **TLS everywhere** -- all sync traffic encrypted. Caddy handles Let's Encrypt certificates automatically.
+- **Per-user data isolation** -- each user can only query their own data.
+- **Self-hosted** -- no telemetry, no cloud dependencies.
 
 ---
 
-## Deployment
+## Deployment Guides
 
 | Scenario | Guide | Description |
 |----------|-------|-------------|
-| Caddy + DuckDNS | [Guide](docs/deploy-caddy-duckdns.md) | One-click TLS with free domain (recommended) |
+| Caddy + DuckDNS | [Guide](docs/deploy-caddy-duckdns.md) | Automatic TLS with free domain (recommended) |
 | Existing proxy | [Guide](docs/deploy-reverse-proxy.md) | nginx, Traefik, etc. |
 | Self-signed TLS | [Guide](docs/deploy-self-signed.md) | IP-only servers, no domain |
 | Local / LAN | [Guide](docs/deploy-local.md) | Development and testing |
@@ -131,27 +159,19 @@ See also: [Backup & Restore](docs/backup.md) | [Troubleshooting](docs/troublesho
 
 | Document | Description |
 |----------|-------------|
-| **[Architecture & Design](docs/DESIGN.md)** | Sync protocol, cursor management, security model, scaling guide |
-| **[Configuration Reference](docs/CONFIGURATION.md)** | All TOML sections, fields, defaults, environment variables |
-| **[HTTP API Reference](docs/API.md)** | All endpoints, request/response examples, authentication |
+| [Architecture & Design](docs/DESIGN.md) | Sync protocol, cursor management, security model, scaling |
+| [Configuration Reference](docs/CONFIGURATION.md) | All TOML options, defaults, environment variables |
+| [HTTP API Reference](docs/API.md) | All endpoints, request/response examples, authentication |
 
 ---
 
-## Tech Stack
+## Disconnecting
 
-| Purpose | Choice | Rationale |
-|---------|--------|-----------|
-| HTTP framework | axum 0.7 | Async, tower middleware ecosystem |
-| Async runtime | tokio | Full-featured async I/O |
-| Database | sqlx 0.8 (SQLite + PostgreSQL) | Compile-time query checking, dual backend |
-| Event store | Fjall (embedded) / ClickHouse (optional) | Zero-dependency default, scalable option |
-| Auth | jsonwebtoken 9 + bcrypt | JWT access/refresh tokens, secure password hashing |
-| OIDC | reqwest + manual discovery | Standard OIDC flow without heavy framework |
-| Sync protocol | toki-sync-protocol (shared crate) | Wire-compatible types, bincode serialization |
-| Compression | zstd 0.13 | Fast batch compression for sync protocol |
-| Serialization | bincode (sync), serde_json (API), toml (config) | Binary for performance, JSON for interop |
-| Logging | tracing + tracing-subscriber | Structured logging with JSON output option |
-| Config | toml 0.8 with `${ENV}` expansion | Simple, human-readable server configuration |
+```bash
+toki settings sync disable              # Prompts to delete remote data
+toki settings sync disable --delete     # Delete this device's data from server
+toki settings sync disable --keep       # Keep remote data, only disable locally
+```
 
 ---
 
