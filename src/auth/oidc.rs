@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 /// Cached OIDC provider discovery document.
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct OidcDiscovery {
     pub authorization_endpoint: String,
     pub token_endpoint: String,
@@ -20,6 +21,7 @@ pub struct OidcDiscovery {
 
 /// A single JSON Web Key from the JWKS endpoint.
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct JwkKey {
     #[serde(default)]
     pub kty: String,
@@ -44,6 +46,7 @@ pub struct JwksResponse {
 
 /// Token response from the OIDC provider's token endpoint.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct TokenResponse {
     pub access_token: String,
     #[serde(default)]

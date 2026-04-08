@@ -194,9 +194,9 @@ pub async fn admin_delete_device(
 ) -> Result<StatusCode, AppError> {
     require_admin(&headers, &state.jwt, &*state.db).await?;
 
-    // Delete the device's time-series data from VictoriaMetrics before removing from DB
+    // Delete the device's event data from EventStore before removing from DB
     if let Err(e) = state.events.delete_device_events(&device_id).await {
-        tracing::warn!("failed to delete VM series for device {device_id}: {e}");
+        tracing::warn!("failed to delete events for device {device_id}: {e}");
     }
 
     let deleted = state.db.delete_device(&device_id).await.map_err(AppError::internal)?;

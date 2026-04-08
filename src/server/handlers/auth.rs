@@ -11,8 +11,14 @@ use super::super::http::{AppError, AppState, extract_client_ip, extract_jwt, get
 
 // ─── /health ────────────────────────────────────────────────────────────────
 
-pub async fn health() -> impl IntoResponse {
-    Json(serde_json::json!({ "status": "ok" }))
+pub async fn health(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    state.db.health_check().await.map_err(|e| AppError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        message: format!("database unhealthy: {e}"),
+    })?;
+    Ok(Json(serde_json::json!({ "status": "ok" })))
 }
 
 // ─── /auth-method ───────────────────────────────────────────────────────────
@@ -468,8 +474,13 @@ fn generate_user_code() -> String {
 
 /// POST /device/code — initiate device authorization
 pub async fn device_code_request(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let ip = extract_client_ip(&headers, &addr, state.trust_proxy);
+    state.brute.check(&ip, "__device_code__").map_err(AppError::locked_out)?;
+    state.brute.record_success(&ip, "__device_code__");
     let device_code = uuid::Uuid::new_v4().to_string();
     let user_code = generate_user_code();
     let expires_at = chrono::Utc::now().timestamp() + 300; // 5 minutes
@@ -560,14 +571,10 @@ pub async fn device_token_poll(
 
     // Register device if device_key was provided (new flow: device creation at token exchange)
     if let Some(ref device_key) = body.device_key {
-        if !device_key.is_empty() && !user_id.is_empty() {
-            let device_name = body.device_name.as_deref().unwrap_or("unknown");
-            // Truncate to 64 chars
-            let device_name = if device_name.len() > 64 {
-                &device_name[..device_name.char_indices().nth(64).map_or(device_name.len(), |(i, _)| i)]
-            } else {
-                device_name
-            };
+        if !device_key.is_empty() && !user_id.is_empty() && uuid::Uuid::parse_str(device_key).is_ok() {
+            let device_name = super::super::http::truncate_device_name(
+                body.device_name.as_deref().unwrap_or("unknown"),
+            );
             // Find or create — idempotent in case of retry
             let existing = state.db.find_device_by_key_and_user(device_key, &user_id).await;
             if let Ok(None) = existing {

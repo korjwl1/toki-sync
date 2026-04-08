@@ -90,6 +90,9 @@ pub trait DatabaseRepo: Send + Sync {
     async fn set_user_active(&self, user_id: &str, active: bool) -> Result<bool>;
     async fn count_active_admins_except(&self, username: &str) -> Result<i64>;
 
+    // Health
+    async fn health_check(&self) -> Result<()>;
+
     // Cleanup
     async fn cleanup_expired_tokens(&self) -> Result<u64>;
 }

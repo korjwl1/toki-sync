@@ -121,6 +121,14 @@ fn scan_events(
     until_ms: i64,
     filter: &UserFilter,
 ) -> Vec<ServerEvent> {
+    use std::collections::HashSet;
+
+    // Pre-build HashSet for Multiple filter (O(1) lookup instead of O(n))
+    let uid_set: Option<HashSet<&str>> = match filter {
+        UserFilter::Multiple(uids) => Some(uids.iter().map(|s| s.as_str()).collect()),
+        _ => None,
+    };
+
     let start_key = since_ms.to_be_bytes().to_vec();
     let mut results = Vec::new();
 
@@ -148,8 +156,8 @@ fn scan_events(
             UserFilter::Single(uid) => {
                 if event.user_id != *uid { continue; }
             }
-            UserFilter::Multiple(uids) => {
-                if !uids.contains(&event.user_id) { continue; }
+            UserFilter::Multiple(_) => {
+                if !uid_set.as_ref().unwrap().contains(event.user_id.as_str()) { continue; }
             }
             UserFilter::All => {}
         }

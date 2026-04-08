@@ -2,7 +2,6 @@ mod auth;
 mod config;
 mod db;
 mod events;
-mod metrics;
 mod pricing;
 mod server;
 mod sync;
@@ -14,7 +13,6 @@ use std::sync::Arc;
 use crate::auth::{BruteForceGuard, JwtManager};
 use crate::config::Config;
 use crate::db::{DatabaseRepo, open_database};
-use crate::metrics::VictoriaMetrics;
 use crate::server::{build_router, http::{AppState, DynamicSettings}, tcp::run_tcp_server};
 
 #[tokio::main]
@@ -113,13 +111,6 @@ async fn main() -> Result<()> {
     tracing::info!("Event store: {} ({})", config.events.backend,
         if config.events.backend == "fjall" { &config.events.fjall_path } else { &config.events.clickhouse_url });
 
-    // VM is optional: only for PromQL proxy endpoints (Grafana compatibility)
-    let vm: Option<Arc<VictoriaMetrics>> = if !config.backend.vm_url.is_empty() {
-        Some(Arc::new(VictoriaMetrics::new(&config.backend.vm_url)))
-    } else {
-        None
-    };
-
     let oidc_state_store = Arc::new(crate::auth::oidc::OidcStateStore::new(600)); // 10 min TTL
 
     if !config.auth.oidc_issuer.is_empty() {
@@ -152,10 +143,10 @@ async fn main() -> Result<()> {
         let cache_path = crate::pricing::default_cache_path();
         crate::pricing::fetch_pricing(&cache_path)
     };
-    tracing::info!("Pricing table loaded ({} models)", if pricing.is_empty() { 0 } else { 1 }); // TODO: expose count
+    tracing::info!("Pricing table loaded ({} models)", pricing.len());
 
     let state = AppState {
-        db, jwt, brute, vm, events: event_store.clone(),
+        db, jwt, brute, events: event_store.clone(),
         access_token_ttl_secs: config.auth.access_token_ttl_secs,
         oidc_state_store,
         oidc_discovery_cache: Arc::new(tokio::sync::RwLock::new(None)),
@@ -187,6 +178,27 @@ async fn main() -> Result<()> {
                     }
                     Ok(_) => tracing::warn!("Pricing refresh returned empty table, keeping old"),
                     Err(e) => tracing::warn!("Pricing refresh failed: {e}"),
+                }
+            }
+        });
+    }
+
+    // -- Periodic cleanup (every 6 hours) ────────────────────────────────────
+    {
+        let db = state.db.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(6 * 3600));
+            interval.tick().await; // skip first immediate tick (cleanup already ran on startup)
+            loop {
+                interval.tick().await;
+                if let Ok(n) = db.cleanup_expired_tokens().await {
+                    if n > 0 { tracing::info!("periodic cleanup: {n} expired/revoked refresh tokens"); }
+                }
+                if let Ok(n) = db.cleanup_expired_device_codes().await {
+                    if n > 0 { tracing::info!("periodic cleanup: {n} expired device codes"); }
+                }
+                if let Ok(n) = db.cleanup_old_pending_registrations(7 * 86400).await {
+                    if n > 0 { tracing::info!("periodic cleanup: {n} old pending registrations"); }
                 }
             }
         });

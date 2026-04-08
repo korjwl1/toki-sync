@@ -11,6 +11,7 @@ use crate::events::{EventStore, ServerEvent};
 use super::protocol::*;
 
 const MAX_DECOMPRESSED_SIZE: usize = 64 * 1024 * 1024; // 64 MiB
+const MAX_BATCH_SIZE: usize = 50_000;
 
 /// Handle a single TCP client connection.
 pub async fn handle_connection(
@@ -62,13 +63,18 @@ pub async fn handle_connection(
     let provider = auth.provider.clone();
 
     // Find or create device using the stable device_key UUID
-    // Truncate device_name to 64 chars (hostname can be long)
-    let device_name = if auth.device_name.len() > 64 {
-        auth.device_name.chars().take(64).collect::<String>()
-    } else {
-        auth.device_name.clone()
-    };
-    let device_id = find_or_create_device(&*db, &user_id, &device_name, &auth.device_key).await?;
+    let device_name = crate::server::http::truncate_device_name(&auth.device_name);
+    // Validate device_key is a well-formed UUID (prevents Fjall key injection via null bytes)
+    if uuid::Uuid::parse_str(&auth.device_key).is_err() {
+        let err = AuthErrPayload {
+            reason: format!("invalid device_key: expected UUID format"),
+            reset_required: false,
+        };
+        write_frame(&mut writer, MsgType::AuthErr, &bincode::serialize(&err)?).await?;
+        return Ok(());
+    }
+
+    let device_id = find_or_create_device(&*db, &user_id, device_name, &auth.device_key).await?;
 
     // Schema version guard — delete this device's events and reset cursor
     if auth.schema_version != SCHEMA_VERSION {
@@ -207,6 +213,10 @@ async fn handle_sync_batch(
         return Ok(current);
     }
 
+    if batch.items.len() > MAX_BATCH_SIZE {
+        anyhow::bail!("batch too large: {} items (max {MAX_BATCH_SIZE})", batch.items.len());
+    }
+
     // Convert SyncItems to ServerEvents (resolve dict IDs to strings)
     let server_events: Vec<ServerEvent> = batch.items.iter().map(|item| {
         let model = batch.dict.get(&item.event.model_id).cloned().unwrap_or_else(|| {
@@ -278,10 +288,14 @@ async fn handle_sync_batch(
     let max_ts = batch.items.iter().map(|i| i.ts_ms).max().unwrap_or(0);
     db.advance_cursor(device_id, provider, max_ts).await?;
 
-    // Clean up old dedup index entries (older than cursor - 24h)
-    let cutoff_ms = (max_ts - 24 * 3600 * 1000).max(0);
-    if let Err(e) = events.cleanup_old_dedup(device_id, cutoff_ms).await {
-        tracing::warn!("idx_msg cleanup failed for device {device_id}: {e}");
+    // Clean up old dedup index entries (older than cursor - 24h).
+    // Only run when cutoff is positive (device has >24h of data) to avoid
+    // scanning on every batch for new devices.
+    let cutoff_ms = max_ts - 24 * 3600 * 1000;
+    if cutoff_ms > 0 {
+        if let Err(e) = events.cleanup_old_dedup(device_id, cutoff_ms).await {
+            tracing::warn!("idx_msg cleanup failed for device {device_id}: {e}");
+        }
     }
 
     Ok(max_ts)

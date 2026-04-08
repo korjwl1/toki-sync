@@ -42,6 +42,10 @@ impl PricingTable {
         self.prices.is_empty()
     }
 
+    pub fn len(&self) -> usize {
+        self.prices.len()
+    }
+
     pub fn get(&self, model: &str) -> Option<&ModelPricing> {
         self.prices.get(model)
     }
@@ -200,14 +204,6 @@ pub fn fetch_pricing(cache_path: &Path) -> PricingTable {
             tracing::warn!("Pricing: network error ({})", e);
             fallback(cached)
         }
-    }
-}
-
-/// Load pricing from cache file only (no network).
-pub fn load_cached_pricing(cache_path: &Path) -> PricingTable {
-    match load_cache(cache_path) {
-        Some(cache) => PricingTable::new(cache.prices),
-        None => PricingTable::new(HashMap::new()),
     }
 }
 

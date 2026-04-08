@@ -84,6 +84,7 @@ pub struct PendingRegistration {
     pub requested_at: i64,
 }
 
+#[allow(dead_code)]
 pub struct DeviceCode {
     pub device_code: String,
     pub user_code: String,

@@ -35,8 +35,7 @@ pub struct ServerConfig {
     /// Example: "https://sync.example.com"
     #[serde(default)]
     pub external_url: String,
-    /// Maximum number of concurrent VM write operations across all TCP connections.
-    /// Limits bulk-batch thundering-herd pressure on VictoriaMetrics.
+    /// Maximum number of concurrent EventStore write operations across all TCP connections.
     #[serde(default = "default_max_concurrent_writes")]
     pub max_concurrent_writes: usize,
     /// Trust X-Forwarded-For header (set to true when behind a reverse proxy).
@@ -115,14 +114,6 @@ fn default_refresh_ttl() -> u64 { 86400 * 90 }  // 90d
 fn default_brute_max_attempts() -> u32 { 5 }
 fn default_brute_window() -> u64 { 300 }         // 5m
 fn default_brute_lockout() -> u64 { 900 }        // 15m
-
-#[derive(Debug, Deserialize, Clone, Default)]
-pub struct BackendConfig {
-    #[serde(default = "default_vm_url")]
-    pub vm_url: String,
-}
-
-pub fn default_vm_url() -> String { "http://victoriametrics:8428".to_string() }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct StorageConfig {
@@ -229,8 +220,6 @@ pub struct Config {
     pub server: ServerConfig,
     pub auth: AuthConfig,
     #[serde(default)]
-    pub backend: BackendConfig,
-    #[serde(default)]
     pub storage: StorageConfig,
     #[serde(default)]
     pub events: EventsConfig,
@@ -272,7 +261,6 @@ impl Config {
                     oidc_client_secret: String::new(),
                     oidc_redirect_uri: String::new(),
                 },
-                backend: BackendConfig::default(),
                 storage: StorageConfig::default(),
                 events: EventsConfig::default(),
                 log: LogConfig::default(),

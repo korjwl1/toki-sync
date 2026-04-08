@@ -13,7 +13,6 @@ use std::time::{Duration, Instant};
 use crate::auth::{BruteForceGuard, JwtManager};
 use crate::auth::oidc::{OidcDiscovery, OidcStateStore};
 use crate::db::DatabaseRepo;
-use crate::metrics::vm::VictoriaMetrics;
 
 use super::handlers::{admin, auth, dashboard, me, metrics, teams};
 
@@ -67,7 +66,6 @@ pub struct AppState {
     pub db: Arc<dyn DatabaseRepo>,
     pub jwt: Arc<JwtManager>,
     pub brute: Arc<BruteForceGuard>,
-    pub vm: Option<Arc<VictoriaMetrics>>,
     pub events: Arc<dyn crate::events::EventStore>,
     pub access_token_ttl_secs: u64,
     pub oidc_state_store: Arc<OidcStateStore>,
@@ -136,9 +134,6 @@ pub fn build_router(state: AppState) -> Router {
         // OIDC (Phase 3)
         .route("/auth/oidc/authorize", get(auth::oidc_authorize))
         .route("/auth/callback", get(auth::oidc_callback))
-        // PromQL proxy (requires JWT)
-        .route("/api/v1/query", get(metrics::promql_query))
-        .route("/api/v1/query_range", get(metrics::promql_query_range))
         // Toki query: same interface as local daemon REPORT protocol
         .route("/api/v1/toki/query", get(metrics::toki_query))
         // User self-service
@@ -169,8 +164,6 @@ pub fn build_router(state: AppState) -> Router {
         .route("/admin/teams/:team_id", delete(teams::admin_delete_team))
         .route("/admin/teams/:team_id/members", get(teams::admin_list_team_members).post(teams::admin_add_team_member))
         .route("/admin/teams/:team_id/members/:user_id", delete(teams::admin_remove_team_member))
-        // Team usage aggregation
-        .route("/api/v1/teams/:team_id/query_range", get(teams::team_query_range))
         .with_state(state)
 }
 
@@ -191,6 +184,16 @@ pub fn validate_username(username: &str) -> Result<(), AppError> {
         });
     }
     Ok(())
+}
+
+/// Truncate a device name to at most 64 characters (char-safe).
+pub fn truncate_device_name(name: &str) -> &str {
+    if name.len() <= 64 {
+        name
+    } else {
+        let end = name.char_indices().nth(64).map_or(name.len(), |(i, _)| i);
+        &name[..end]
+    }
 }
 
 // ─── Client IP extraction ───────────────────────────────────────────────────

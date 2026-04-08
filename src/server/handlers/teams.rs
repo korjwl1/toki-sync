@@ -1,14 +1,11 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
     Json,
 };
 use serde::Deserialize;
 
 use super::super::http::{AppError, AppState, extract_jwt, require_admin};
-use super::metrics::{escape_label_value, inject_label_filter, QueryRangeParams};
-use crate::metrics::backend::MetricsBackend;
 
 // ─── Admin: team management ─────────────────────────────────────────────────
 
@@ -180,57 +177,5 @@ pub async fn me_teams(
     }).collect();
 
     Ok(Json(serde_json::json!({ "teams": team_list })))
-}
-
-// ─── Team usage aggregation (PromQL proxy) ──────────────────────────────────
-
-pub async fn team_query_range(
-    headers: HeaderMap,
-    State(state): State<AppState>,
-    Path(team_id): Path<String>,
-    Query(params): Query<QueryRangeParams>,
-) -> Result<Response, AppError> {
-    // Allow admin or team member
-    let claims = extract_jwt(&headers, &state.jwt)?;
-    let user_id = claims.sub;
-    let is_admin = state.db.user_is_admin(&user_id).await.map_err(AppError::internal)?;
-    if !is_admin {
-        let role = state.db.get_team_member_role(&team_id, &user_id).await
-            .map_err(AppError::internal)?;
-        if role.is_none() {
-            return Err(AppError::forbidden("must be team member or admin"));
-        }
-    }
-
-    // Get all user_ids in the team
-    let members = state.db.list_team_members(&team_id).await.map_err(AppError::internal)?;
-    if members.is_empty() {
-        return Err(AppError::not_found("team not found or has no members"));
-    }
-
-    // Build regex label matcher: user=~"user1|user2|user3"
-    let user_regex = members.iter()
-        .map(|m| escape_label_value(&m.user_id))
-        .collect::<Vec<_>>()
-        .join("|");
-    let injection = format!("user=~\"{user_regex}\"");
-
-    // Inject the team user filter into the query (shared with inject_user_label)
-    let injected = inject_label_filter(&params.query, &injection);
-
-    let vm = state.vm.as_ref().ok_or_else(|| AppError {
-        status: axum::http::StatusCode::NOT_IMPLEMENTED,
-        message: "PromQL proxy requires VictoriaMetrics backend (not configured)".into(),
-    })?;
-    let step = params.step.as_deref().unwrap_or("60s");
-    let result = vm.query_range(&injected, params.start, params.end, step)
-        .await
-        .map_err(AppError::bad_gateway)?;
-
-    Ok((
-        StatusCode::OK,
-        [("Content-Type", "application/json")],
-        result,
-    ).into_response())
 }
 

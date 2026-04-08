@@ -983,6 +983,14 @@ impl DatabaseRepo for PostgresRepo {
         Ok(result.rows_affected())
     }
 
+    async fn health_check(&self) -> Result<()> {
+        sqlx::query("SELECT 1")
+            .execute(&self.pool)
+            .await
+            .context("postgres health check")?;
+        Ok(())
+    }
+
     async fn cleanup_expired_tokens(&self) -> Result<u64> {
         let now = chrono::Utc::now().timestamp();
         let result = sqlx::query("DELETE FROM refresh_tokens WHERE expires_at < $1 OR revoked != 0")
