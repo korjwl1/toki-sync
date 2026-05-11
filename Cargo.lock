@@ -2580,7 +2580,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "toki-sync"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2618,6 +2618,7 @@ dependencies = [
 [[package]]
 name = "toki-sync-protocol"
 version = "0.1.0"
+source = "git+https://github.com/korjwl1/toki-sync-protocol.git?tag=v1.0.0#a02809b2b7277462d4c28b4d773a920a2b41b8ef"
 dependencies = [
  "serde",
 ]
