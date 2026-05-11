@@ -5,8 +5,8 @@
 <h1 align="center">toki-sync</h1>
 
 <p align="center">
-  <b>여러 디바이스의 토큰 사용량을 동기화하는 셀프호스트 서버. <a href="https://github.com/korjwl1/toki">toki</a> 생태계용</b><br>
-  모든 기기의 AI 도구 사용량을 수집하고, 로컬에 이벤트를 저장하며, 통합 대시보드를 제공합니다.
+  <b>Claude Code와 Codex CLI 사용량을 여러 디바이스에서 집계하는 셀프호스트 서버</b><br>
+  모든 기기의 AI CLI 사용량을 <a href="https://github.com/korjwl1/toki">toki</a>로 수집하고, 로컬에 이벤트를 저장하며, 통합 대시보드를 제공합니다.
 </p>
 
 <p align="center">

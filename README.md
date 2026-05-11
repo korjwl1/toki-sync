@@ -5,8 +5,8 @@
 <h1 align="center">toki-sync</h1>
 
 <p align="center">
-  <b>Self-hosted multi-device token usage sync server for <a href="https://github.com/korjwl1/toki">toki</a></b><br>
-  Collects AI tool usage from all your machines, stores events locally, serves a unified dashboard.
+  <b>Self-hosted multi-device Claude Code / Codex usage aggregation server</b><br>
+  Collects AI CLI usage from all your machines into <a href="https://github.com/korjwl1/toki">toki</a>, stores events locally, serves a unified dashboard.
 </p>
 
 <p align="center">
