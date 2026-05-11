@@ -1,12 +1,14 @@
-# toki-sync Architecture & Design
+# toki-sync architecture and design
 
 ## Overview
 
-toki-sync is a multi-device token usage sync server for the [toki](https://github.com/korjwl1/toki) ecosystem. It solves the problem of fragmented usage data: developers using AI tools across multiple machines (macOS desktop, Linux server, CI runners) have no unified view of their token consumption.
+toki-sync is a multi-device token usage sync server for the [toki](https://github.com/korjwl1/toki) ecosystem. It solves the problem of fragmented usage data: developers using AI tools across multiple machines have no unified view of their token consumption.
 
-toki-sync collects delta events from toki daemons over persistent TCP connections, stores them in an EventStore (Fjall embedded by default, or ClickHouse for scale), and serves a web dashboard and optional PromQL queries through an authenticated HTTP proxy. A single server instance handles personal use through enterprise teams, with SQLite for small deployments and PostgreSQL for scale.
+The server collects delta events from toki daemons over persistent TCP connections and stores them in an EventStore. The default backend is embedded Fjall; ClickHouse is available for scale. A web dashboard and an optional PromQL proxy serve queries through an authenticated HTTP layer.
 
-The server is stateless by design. Auth and device metadata live in the database, event data lives in the EventStore (Fjall or ClickHouse), and the server itself is a protocol translator and auth gateway. This makes horizontal scaling straightforward: put N instances behind a load balancer.
+A single server instance handles personal use through enterprise teams. SQLite covers small deployments; PostgreSQL handles scale.
+
+The server is stateless by design. Auth and device metadata live in the database, event data lives in the EventStore, and the server itself is a protocol translator and auth gateway. Horizontal scaling is straightforward: put N instances behind a load balancer.
 
 ## Architecture
 
@@ -61,7 +63,7 @@ graph TD
     Proxy -.->|"PromQL + user label<br/>(optional)"| VM
 ```
 
-### Thread/Task Model
+### Thread and task model
 
 The server is fully async on tokio. There are no blocking threads or `spawn_blocking` calls — bincode deserialization is fast enough to run on the async executor, and EventStore writes are I/O-bound.
 
@@ -72,9 +74,9 @@ The server is fully async on tokio. There are no blocking threads or `spawn_bloc
 | Read timeout (server) | 120s | Drops idle connections that miss PING/PONG |
 | Read timeout (client) | 90s | Detects dead server before server timeout fires |
 
-## Sync Protocol
+## Sync protocol
 
-### Why TCP + bincode
+### Why TCP and bincode
 
 Both endpoints are our own Rust binaries. HTTP and gRPC add overhead that provides no benefit when there is no browser, no third-party client, and no need for human-readable wire format:
 
@@ -88,9 +90,9 @@ Both endpoints are our own Rust binaries. HTTP and gRPC add overhead that provid
 
 The protocol is intentionally simple: a persistent connection with typed frames. No multiplexing, no streams, no headers.
 
-### Frame Format
+### Frame format
 
-```
+```text
 ┌──────────────────┬──────────────────┬─────────────────────────┐
 │ Message Type     │ Payload Length   │ Payload                 │
 │ u32 LE (4 bytes) │ u32 LE (4 bytes) │ N bytes (bincode/zstd)  │
@@ -99,7 +101,7 @@ The protocol is intentionally simple: a persistent connection with typed frames.
 
 Payload length is capped at `MAX_PAYLOAD_SIZE` (16 MiB). Any frame exceeding this is rejected and the connection is closed immediately. After zstd decompression, output is capped at 64 MiB to guard against zstd bombs.
 
-### Message Types
+### Message types
 
 | Type | Code | Direction | Payload |
 |------|------|-----------|---------|
@@ -115,7 +117,7 @@ Payload length is capped at `MAX_PAYLOAD_SIZE` (16 MiB). Any frame exceeding thi
 | PING | 0x30 | client -> server | (empty) |
 | PONG | 0x31 | server -> client | (empty) |
 
-### Message Flow
+### Message flow
 
 ```mermaid
 sequenceDiagram
@@ -153,7 +155,7 @@ sequenceDiagram
     S-->>C: SYNC_ACK { last_ts_ms }
 ```
 
-### Why ACK-Based Flow Control
+### Why ACK-based flow control
 
 Each SYNC_BATCH must be acknowledged before the next is sent. This provides natural backpressure:
 
@@ -162,7 +164,7 @@ Each SYNC_BATCH must be acknowledged before the next is sent. This provides natu
 - No rate limit messages, no token bucket, no configuration needed
 - The client's local fjall DB acts as a persistent queue: if the server is down, events accumulate locally and sync on reconnect
 
-### Why Zstd at 100+ Items
+### Why zstd at 100+ items
 
 Compression is applied only to batches with 100 or more items:
 
@@ -174,7 +176,7 @@ Compression is applied only to batches with 100 or more items:
 
 Initial bulk sync (full history) benefits significantly. Steady-state incremental sync (1-10 events) skips compression entirely. The message type field (SYNC_BATCH vs SyncBatchZstd) tells the server whether to decompress.
 
-### Dedup Strategy
+### Dedup strategy
 
 The EventStore deduplicates events using `msg_id`, a unique identifier generated by the client for each event.
 
@@ -186,7 +188,7 @@ Why msg_id-based dedup:
 - The `last_ts` cursor provides the primary sync mechanism; msg_id dedup is the safety net for edge cases
 - No cardinality explosion (unlike adding msg_id as a time-series label)
 
-### SyncBatch Structure
+### SyncBatch structure
 
 ```rust
 struct SyncBatchPayload {
@@ -205,13 +207,13 @@ The client sends dict IDs (compact u32 references) along with a dict map that re
 
 **Why dict IDs + dict map instead of decoded strings**: toki's local DB stores events with dictionary-compressed fields (model, session_id, project). Sending the compact representation with a per-batch mapping avoids redundant string allocation on the client and reduces wire size — the dict map contains each unique string once, while items reference them by ID.
 
-## Cursor Management
+## Cursor management
 
-### Composite Key: (device_id, provider)
+### Composite key: `(device_id, provider)`
 
 The server maintains one cursor per `(device_id, provider)` combination. toki uses separate DB files per provider (`claude_code.fjall`, `codex.fjall`), and each has independent event timelines.
 
-```
+```text
 device "macbook" x "claude_code" -> last_ts: 1743000000000
 device "macbook" x "codex"       -> last_ts: 1742900000000
 device "linux"   x "claude_code" -> last_ts: 1743100000000
@@ -219,7 +221,7 @@ device "linux"   x "claude_code" -> last_ts: 1743100000000
 
 Adding a new provider starts its cursor at 0, triggering a full sync for that provider without affecting others.
 
-### Server Cursor as Single Source of Truth
+### Server cursor as single source of truth
 
 The client never persists its own cursor. On every connection (including reconnects), the client asks the server for `LAST_TS` and computes the delta from its local DB. This eliminates an entire class of consistency bugs:
 
@@ -227,11 +229,11 @@ The client never persists its own cursor. On every connection (including reconne
 - No cursor file corruption or staleness after crash
 - Reconnection after any failure reduces to: `GET_LAST_TS` -> query local DB for events after that timestamp -> send batches
 
-### Write Ordering: EventStore Write Before Cursor Update
+### Write ordering: EventStore write before cursor update
 
 The server MUST execute in this order:
 
-```
+```text
 1. Write batch to EventStore (Fjall / ClickHouse)
 2. Update cursor in SQLite/PG
 3. Send SYNC_ACK to client
@@ -239,7 +241,7 @@ The server MUST execute in this order:
 
 Reversing steps 1 and 2 (cursor update before EventStore write) causes **permanent data loss**: the cursor advances past events that were never written. On reconnect, the client sees the advanced cursor and skips those events.
 
-### Reconnection Scenarios
+### Reconnection scenarios
 
 | Scenario | Server State | On Reconnect |
 |----------|-------------|--------------|
@@ -250,9 +252,9 @@ Reversing steps 1 and 2 (cursor update before EventStore write) causes **permane
 
 All four scenarios result in zero data loss. The worst case is redundant retransmission, which msg_id-based dedup resolves silently.
 
-## Authentication & Security
+## Authentication and security
 
-### JWT Access/Refresh with Rotation
+### JWT access/refresh with rotation
 
 ```mermaid
 sequenceDiagram
@@ -277,7 +279,7 @@ sequenceDiagram
 
 **Why password change revokes all refresh tokens**: When a user changes their password (via `/me/password` or `/admin/users/:id/password`), all existing refresh tokens for that user are deleted. This ensures that a compromised session cannot persist after a password reset.
 
-### Brute Force Guard
+### Brute force guard
 
 Login attempts are tracked by `(IP, username)` composite key:
 
@@ -289,7 +291,7 @@ Login attempts are tracked by `(IP, username)` composite key:
 
 The guard uses a sweep-based cleanup: expired entries are removed periodically rather than on every request. A hard cap on total tracked entries prevents memory exhaustion from distributed attacks.
 
-### PromQL Label Injection (optional, requires VictoriaMetrics)
+### PromQL label injection (optional, requires VictoriaMetrics)
 
 When VictoriaMetrics is configured via `[backend].vm_url`, the server provides a PromQL proxy. VictoriaMetrics runs on an internal network with no authentication. All external queries pass through the toki-sync HTTP proxy, which:
 
@@ -302,9 +304,9 @@ This is an optional feature for backward compatibility with PromQL-based tooling
 
 **Injection defense**: Label values are escaped (`\` -> `\\`, `"` -> `\"`) before insertion into the query. The proxy either parses the PromQL AST and adds the matcher programmatically, or applies strict escaping before URL-encoding.
 
-### OIDC Flow
+### OIDC flow
 
-```
+```text
 1. GET /auth/oidc/authorize
    -> Redirect to OIDC provider (Google, GitHub, Okta)
    -> Include state + nonce parameters
@@ -321,9 +323,9 @@ This is an optional feature for backward compatibility with PromQL-based tooling
 
 OIDC configuration is discovered automatically from the `oidc_issuer` URL via `/.well-known/openid-configuration`.
 
-## Database Design
+## Database design
 
-### Why Dual Backend
+### Why dual backend
 
 | | SQLite | PostgreSQL |
 |---|---|---|
@@ -335,7 +337,7 @@ OIDC configuration is discovered automatically from the `oidc_issuer` URL via `/
 
 SQLite uses WAL mode (`PRAGMA journal_mode=WAL`) to handle concurrent reads from HTTP handlers and writes from sync handlers without lock contention.
 
-### Repository Trait Abstraction
+### Repository trait abstraction
 
 ```rust
 #[async_trait]
@@ -359,7 +361,7 @@ Same behavior, same tests, different driver. No application code changes when sw
 
 ### Schema
 
-```
+```text
 users
   id          TEXT PRIMARY KEY
   username    TEXT UNIQUE NOT NULL
@@ -408,15 +410,15 @@ team_members
   PRIMARY KEY (team_id, user_id)
 ```
 
-### Migration Strategy
+### Migration strategy
 
 Migrations use `ALTER TABLE` for SQLite and `IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS` for PostgreSQL. Schema version is tracked in a `meta` table. On startup, the server applies any pending migrations sequentially.
 
 Schema mismatch between client and server (detected via `schema_version` in AUTH) triggers a clean re-sync: the server deletes the device's event data and resets its cursor, and the client performs a full re-upload.
 
-## EventStore Integration
+## EventStore integration
 
-### Why Fjall (Default)
+### Why Fjall (default)
 
 | Requirement | Fjall Capability |
 |-------------|-----------------|
@@ -425,7 +427,7 @@ Schema mismatch between client and server (detected via `schema_version` in AUTH
 | Built-in dedup | `idx_msg` unique index on `msg_id` for ACK-lost retransmission |
 | Simple operations | Data is a directory on disk; backup = copy directory |
 
-### Why ClickHouse (Optional)
+### Why ClickHouse (optional)
 
 | Requirement | ClickHouse Capability |
 |-------------|----------------------|
@@ -436,7 +438,7 @@ Schema mismatch between client and server (detected via `schema_version` in AUTH
 
 Expected data volume for heavy personal use: ~207 events/min peak (3-4/sec). Even 16x this load (~3,300/min) is trivial for either backend.
 
-### Event Fields
+### Event fields
 
 | Field | Source | Purpose |
 |-------|--------|---------|
@@ -450,7 +452,7 @@ Expected data volume for heavy personal use: ~207 events/min peak (3-4/sec). Eve
 | `ts_ms` | SyncItem timestamp | Event timestamp |
 | `input_tokens`, `output_tokens`, etc. | SyncItem token counts | Usage metrics |
 
-## Overload Protection
+## Overload protection
 
 | Guard | Limit | Protects Against |
 |-------|-------|------------------|
@@ -470,7 +472,7 @@ Expected data volume for heavy personal use: ~207 events/min peak (3-4/sec). Eve
 - **16 MiB payload**: A 1,000-event batch is ~200 KB uncompressed. 16 MiB allows for pathologically large batches while preventing multi-GB allocation attacks.
 - **64 MiB decompression**: 4x the payload limit. A legitimate zstd-compressed 16 MiB payload decompresses to at most a few MB. 64 MiB catches bombs while allowing generous headroom.
 
-## Crash Resilience
+## Crash resilience
 
 | Failure | Recovery |
 |---------|----------|
@@ -485,9 +487,11 @@ Expected data volume for heavy personal use: ~207 events/min peak (3-4/sec). Eve
 
 The fjall DB on the client side is the ultimate safety net: events are never deleted from the local DB based on sync status. Even if the server loses all data, a client reconnect triggers a full re-sync from local history.
 
-## Design Decisions & Tradeoffs
+## Design decisions and tradeoffs
 
-### Dict IDs + Dict Map vs Decoded Strings
+This section explains *why* each major choice was made — refer to it when an alternative seems obvious or when proposing a change.
+
+### Dict IDs and dict map vs decoded strings
 
 | | Dict IDs + map | Pre-decoded strings |
 |---|---|---|
@@ -498,7 +502,7 @@ The fjall DB on the client side is the ultimate safety net: events are never del
 
 The dict map is per-batch, containing only the IDs used in that batch. A typical batch of 1,000 events might reference 3-5 models, 20-50 sessions, and 10-30 projects, producing a dict map of ~80 entries vs 1,000 x 4 = 4,000 string fields.
 
-### SYNC_ACK last_ts_ms vs Count
+### SYNC_ACK `last_ts_ms` vs count
 
 SYNC_ACK echoes the server's cursor position (`last_ts_ms`) rather than a count of accepted events. This follows the Kafka/PostgreSQL cursor pattern:
 
@@ -507,7 +511,7 @@ SYNC_ACK echoes the server's cursor position (`last_ts_ms`) rather than a count 
 - On reconnect, `GET_LAST_TS` returns this same value, creating a seamless resume point
 - A count-based ACK would require the client to maintain its own cursor and reconcile with the server
 
-### FlushNotify: Condvar vs Trace Client vs Polling
+### FlushNotify: Condvar vs trace client vs polling
 
 The sync thread needs to know when new events are committed to the local DB. Three options were evaluated:
 
@@ -522,7 +526,7 @@ The sync thread needs to know when new events are committed to the local DB. Thr
 
 Trace client reuse was structurally ruled out: `emit_event()` fires before `db_tx.send(WriteEvent)`, so the broadcast occurs before the DB commit. The sync thread would wake up and find no data in the DB. FlushNotify uses a `Condvar` + `AtomicBool` dirty flag that the DB writer sets after `flush_pending()` completes, guaranteeing post-commit notification with natural coalescing.
 
-### Timer-Based Wake Detection vs OS-Native
+### Timer-based wake detection vs OS-native
 
 Sleep/wake detection for reconnecting dead TCP connections:
 
@@ -534,7 +538,7 @@ Sleep/wake detection for reconnecting dead TCP connections:
 
 The current implementation detects wake via PING/PONG timeout. A 60-second delay after wake is acceptable for a dashboard/monitoring use case. OS-native wake notifications are a planned future improvement.
 
-### Device Code Authentication
+### Device code authentication
 
 The CLI uses the device code flow for authentication instead of passing credentials on the command line:
 
@@ -549,17 +553,19 @@ This eliminates the need for `--username` and `--password` flags, improving secu
 
 For headless environments (no browser), the CLI prints the verification URL and user code for the user to enter manually on another device.
 
-### Always-On Sync Thread with SyncToggle
+### Always-on sync thread with SyncToggle
 
-The sync thread is spawned at daemon startup if sync is configured. Settings hot-reload allows enabling/disabling sync without daemon restart. This avoids:
+The toki client daemon spawns one sync thread per provider at startup. Each thread parks on a `SyncToggle` (a `Condvar` + `AtomicBool`) when sync is disabled and wakes up when the toggle flips. The daemon watches a sentinel file (`settings.toml`'s touch marker); when settings change, it flips toggles on the affected providers without restarting the daemon.
 
-- Runtime thread management complexity
-- Race conditions between "sync just enabled" and "sync thread not yet ready"
-- Configuration reload edge cases
+This trades a small amount of permanent overhead (one parked thread per provider) for three properties:
 
-When sync is disabled, the `flush_notify` field is `None`, and no sync-related code executes. Zero overhead.
+- No runtime thread management — threads exist for the daemon's lifetime.
+- No race between "sync just enabled" and "sync thread not yet ready".
+- No configuration reload edge cases — settings changes only flip an atomic.
 
-### Registration Modes
+The relevant client-side code lives in `toki/src/lib.rs` (`sync_toggles`, `flush_notifies`, `watch_settings_file`).
+
+### Registration modes
 
 The server supports three registration modes via `registration_mode`:
 
@@ -569,7 +575,7 @@ The server supports three registration modes via `registration_mode`:
 | `"approval"` | Registration creates a pending account; admin must approve via `/admin/pending/:id/approve` |
 | `"closed"` | Only admins can create users via `/admin/users` |
 
-### Additional Server Configuration
+### Additional server configuration
 
 | Setting | Description |
 |---------|-------------|
@@ -577,7 +583,7 @@ The server supports three registration modes via `registration_mode`:
 | `max_query_scope` | Limits the maximum time range for PromQL queries (e.g., `"365d"`). Prevents expensive queries spanning too much data |
 | `max_concurrent_writes` | Limits parallel EventStore batch writes (default: 10) |
 
-## Scaling Guide
+## Scaling guide
 
 | Scale | Devices | Infra | Database | EventStore | Notes |
 |-------|---------|-------|----------|------------|-------|

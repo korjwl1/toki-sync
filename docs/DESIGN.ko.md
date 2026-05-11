@@ -1,14 +1,16 @@
-# toki-sync Architecture & Design
+# toki-sync 아키텍처와 설계
 
-## Overview
+## 개요
 
-toki-sync는 [toki](https://github.com/korjwl1/toki) 생태계를 위한 멀티 디바이스 토큰 사용량 동기화 서버입니다. 여러 기기(macOS 데스크톱, Linux 서버, CI 러너 등)에서 AI 도구를 사용할 때 사용량 데이터가 분산되는 문제를 해결합니다.
+toki-sync는 [toki](https://github.com/korjwl1/toki) 생태계용 멀티 디바이스 토큰 사용량 동기화 서버입니다. 여러 기기에서 AI 도구를 쓸 때 사용량 데이터가 분산되는 문제를 해결합니다.
 
-toki-sync는 toki 데몬으로부터 persistent TCP 연결을 통해 델타 이벤트를 수집하고, EventStore(기본: Fjall 내장, 선택: ClickHouse)에 저장하며, 웹 대시보드와 선택적 PromQL 쿼리를 인증된 HTTP 프록시를 통해 제공합니다. 단일 서버 인스턴스로 개인 사용부터 엔터프라이즈 팀까지 처리하며, 소규모에는 SQLite를, 대규모에는 PostgreSQL을 사용합니다.
+서버는 toki 데몬으로부터 지속 TCP 연결로 델타 이벤트를 수집해 EventStore에 저장합니다. 기본 백엔드는 내장 Fjall이며, 규모가 커지면 ClickHouse를 사용할 수 있습니다. 웹 대시보드와 선택적 PromQL 프록시가 인증된 HTTP 레이어에서 쿼리를 제공합니다.
 
-서버는 의도적으로 stateless로 설계되었습니다. 인증과 디바이스 메타데이터는 데이터베이스에, 이벤트 데이터는 EventStore(Fjall 또는 ClickHouse)에 저장되며, 서버 자체는 프로토콜 변환기이자 인증 게이트웨이 역할만 합니다. 따라서 수평 확장이 단순합니다: 로드밸런서 뒤에 N개 인스턴스를 배치하면 됩니다.
+단일 서버 인스턴스로 개인 사용부터 엔터프라이즈 팀까지 처리합니다. 소규모에는 SQLite, 대규모에는 PostgreSQL을 사용합니다.
 
-## Architecture
+서버는 의도적으로 stateless로 설계되었습니다. 인증과 디바이스 메타데이터는 데이터베이스에, 이벤트 데이터는 EventStore에 저장되며, 서버 자체는 프로토콜 변환기이자 인증 게이트웨이 역할만 합니다. 수평 확장이 단순합니다 — 로드밸런서 뒤에 N개 인스턴스를 배치하면 됩니다.
+
+## 아키텍처
 
 ```mermaid
 graph TD
@@ -72,7 +74,7 @@ graph TD
 | 서버 읽기 타임아웃 | 120초 | PING/PONG을 놓친 유휴 연결 드롭 |
 | 클라이언트 읽기 타임아웃 | 90초 | 서버 타임아웃 이전에 dead 서버 감지 |
 
-## Sync Protocol
+## Sync protocol
 
 ### TCP + bincode를 선택한 이유
 
@@ -90,7 +92,7 @@ graph TD
 
 ### 프레임 포맷
 
-```
+```text
 ┌──────────────────┬──────────────────┬─────────────────────────┐
 │ Message Type     │ Payload Length   │ Payload                 │
 │ u32 LE (4바이트) │ u32 LE (4바이트) │ N바이트 (bincode/zstd)  │
@@ -205,13 +207,13 @@ struct SyncItem {
 
 **dict ID + dict map을 디코딩된 문자열 대신 사용하는 이유**: toki의 로컬 DB는 딕셔너리 압축된 필드(model, session_id, project)로 이벤트를 저장합니다. compact 표현과 배치별 매핑을 함께 전송하면 클라이언트에서의 불필요한 문자열 할당을 피하고 와이어 크기를 줄입니다 — dict map은 각 고유 문자열을 한 번만 포함하고, item들은 ID로 참조합니다.
 
-## Cursor Management
+## 커서 관리
 
 ### 복합 키: (device_id, provider)
 
 서버는 `(device_id, provider)` 조합마다 하나의 커서를 유지합니다. toki는 provider별로 별도 DB 파일(`claude_code.fjall`, `codex.fjall`)을 사용하며, 각각 독립적인 이벤트 타임라인을 가집니다.
 
-```
+```text
 device "macbook" x "claude_code" -> last_ts: 1743000000000
 device "macbook" x "codex"       -> last_ts: 1742900000000
 device "linux"   x "claude_code" -> last_ts: 1743100000000
@@ -231,7 +233,7 @@ device "linux"   x "claude_code" -> last_ts: 1743100000000
 
 서버는 반드시 다음 순서로 실행해야 합니다:
 
-```
+```text
 1. EventStore(Fjall / ClickHouse)에 배치 쓰기
 2. SQLite/PG에 커서 업데이트
 3. 클라이언트에 SYNC_ACK 전송
@@ -250,7 +252,7 @@ device "linux"   x "claude_code" -> last_ts: 1743100000000
 
 네 가지 시나리오 모두 데이터 손실이 없습니다. 최악의 경우는 중복 재전송이며, msg_id 기반 dedup이 이를 조용히 해결합니다.
 
-## Authentication & Security
+## 인증과 보안
 
 ### JWT Access/Refresh with Rotation
 
@@ -300,11 +302,11 @@ sequenceDiagram
 
 이것은 PromQL 기반 도구(toki CLI `--remote`, Toki Monitor 서버 모드)와의 하위 호환성을 위한 선택적 기능입니다. 핵심 동기화 기능은 VictoriaMetrics를 필요로 하지 않습니다.
 
-**인젝션 방어**: label 값은 쿼리에 삽입하기 전에 이스케이프(`\` -> `\\`, `"` -> `\"`)됩니다. `user="alice"} or {user="`와 같은 순진한 문자열 연결은 격리를 우회합니다. 프록시는 PromQL AST를 파싱하여 프로그래밍 방식으로 matcher를 추가하거나, URL 인코딩 전에 엄격한 이스케이프를 적용합니다.
+**인젝션 방어**: label 값은 쿼리에 삽입하기 전에 이스케이프(`\` -> `\\`, `"` -> `\"`)됩니다. 프록시는 PromQL AST를 파싱하여 프로그래밍 방식으로 matcher를 추가하거나, URL 인코딩 전에 엄격한 이스케이프를 적용합니다.
 
 ### OIDC 플로우
 
-```
+```text
 1. GET /auth/oidc/authorize
    -> OIDC 프로바이더(Google, GitHub, Okta)로 리다이렉트
    -> state + nonce 파라미터 포함
@@ -321,7 +323,7 @@ sequenceDiagram
 
 OIDC 설정은 `oidc_issuer` URL에서 `/.well-known/openid-configuration`을 통해 자동으로 검색됩니다.
 
-## Database Design
+## 데이터베이스 설계
 
 ### 듀얼 백엔드를 선택한 이유
 
@@ -359,7 +361,7 @@ sqlite_path = "./data/toki_sync.db"
 
 ### 스키마
 
-```
+```text
 users
   id          TEXT PRIMARY KEY
   username    TEXT UNIQUE NOT NULL
@@ -405,7 +407,7 @@ team_members
 
 클라이언트와 서버 간 스키마 불일치(AUTH의 `schema_version`으로 감지)는 클린 재동기화를 트리거합니다: 서버가 해당 디바이스의 이벤트 데이터를 삭제하고 커서를 리셋하면, 클라이언트가 전체 재업로드를 수행합니다.
 
-## EventStore Integration
+## EventStore 통합
 
 ### Fjall을 선택한 이유 (기본)
 
@@ -441,7 +443,7 @@ team_members
 | `ts_ms` | SyncItem 타임스탬프 | 이벤트 타임스탬프 |
 | `input_tokens`, `output_tokens` 등 | SyncItem 토큰 수 | 사용량 메트릭 |
 
-## Overload Protection
+## 과부하 보호
 
 | 가드 | 제한 | 방어 대상 |
 |------|------|-----------|
@@ -476,9 +478,11 @@ team_members
 
 클라이언트 측 fjall DB가 궁극적인 안전망입니다: sync 상태에 기반하여 로컬 DB에서 이벤트가 삭제되지 않습니다. 서버가 모든 데이터를 잃어도 클라이언트 재연결이 로컬 이력에서 전체 재동기화를 트리거합니다.
 
-## Design Decisions & Tradeoffs
+## 설계 결정과 트레이드오프
 
-### Dict ID + Dict Map vs 디코딩된 문자열
+이 섹션은 주요 선택의 *이유*를 설명합니다. 대안이 자명해 보이거나 변경을 제안할 때 먼저 참고하세요.
+
+### Dict ID + dict map vs 디코딩된 문자열
 
 | | Dict ID + map | 사전 디코딩된 문자열 |
 |---|---|---|
@@ -525,17 +529,19 @@ dead TCP 연결 재연결을 위한 수면/wake 감지:
 
 현재 구현은 PING/PONG 타임아웃으로 wake를 감지합니다. wake 후 60초 지연은 대시보드/모니터링 용도에서 수용 가능합니다. OS 네이티브 wake 알림은 향후 개선 사항으로 계획되어 있습니다.
 
-### Always-On Sync Thread with SyncToggle
+### Always-on sync thread + SyncToggle
 
-sync thread는 sync가 설정되어 있으면 데몬 시작 시 생성됩니다. hot-add 기능은 없습니다 (sync 활성화는 데몬 재시작이 필요). 이로써 다음을 피합니다:
+toki 클라이언트 데몬은 시작 시 provider마다 sync thread를 하나씩 생성합니다. 각 스레드는 sync가 비활성화된 동안 `SyncToggle`(`Condvar` + `AtomicBool`)에서 park합니다. 데몬은 설정 sentinel 파일을 감시하다가, 변경이 감지되면 해당 provider의 토글을 뒤집어 데몬 재시작 없이 sync를 켜고 끕니다.
 
-- 런타임 스레드 관리 복잡성
-- "sync 방금 활성화"와 "sync thread 아직 미준비" 간의 race condition
-- 설정 리로드 edge case
+이 방식은 provider당 한 개의 park된 스레드라는 작은 상시 오버헤드와 다음 세 가지 속성을 맞바꿉니다.
 
-sync가 비활성화되면 `flush_notify` 필드가 `None`이며, sync 관련 코드가 실행되지 않습니다. 오버헤드 제로입니다.
+- 런타임 스레드 관리가 없습니다 — 스레드는 데몬 수명 동안 그대로 유지됩니다.
+- "sync 방금 활성화"와 "sync thread 아직 미준비" 사이의 race condition이 없습니다.
+- 설정 reload edge case가 없습니다 — 설정 변경은 atomic만 뒤집습니다.
 
-## Scaling Guide
+클라이언트 측 구현은 `toki/src/lib.rs`(`sync_toggles`, `flush_notifies`, `watch_settings_file`)에 있습니다.
+
+## 스케일링 가이드
 
 | 규모 | 디바이스 | 인프라 | 데이터베이스 | EventStore | 비고 |
 |------|----------|--------|-------------|------------|------|

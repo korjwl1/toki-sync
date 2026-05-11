@@ -6,7 +6,7 @@
 
 JWT 인증이 필요한 엔드포인트는 `Authorization` 헤더가 필요합니다:
 
-```
+```http
 Authorization: Bearer <access_token>
 ```
 
@@ -50,9 +50,9 @@ Authorization: Bearer <access_token>
 
 | 필드 | 타입 | 필수 | 설명 |
 |------|------|------|------|
-| `username` | string | O | 계정 사용자명 |
-| `password` | string | O | 계정 비밀번호 |
-| `device_id` | string | X | 디바이스 식별자 (디바이스별 관리를 위해 리프레시 토큰에 포함) |
+| `username` | string | 필수 | 계정 사용자명 |
+| `password` | string | 필수 | 계정 비밀번호 |
+| `device_id` | string | - | 디바이스 식별자 (디바이스별 관리를 위해 리프레시 토큰에 포함) |
 
 **응답** `200 OK`
 
@@ -90,8 +90,8 @@ Authorization: Bearer <access_token>
 
 | 필드 | 타입 | 필수 | 제약 |
 |------|------|------|------|
-| `username` | string | O | 3-32자, 영숫자 + `_`, `-`, `.` |
-| `password` | string | O | 8-128자 |
+| `username` | string | 필수 | 3-32자, 영숫자 + `_`, `-`, `.` |
+| `password` | string | 필수 | 8-128자 |
 
 **응답** `201 Created`
 
@@ -128,8 +128,8 @@ Authorization: Bearer <access_token>
 
 | 필드 | 타입 | 필수 | 설명 |
 |------|------|------|------|
-| `refresh_token` | string | O | 현재 리프레시 토큰 |
-| `device_id` | string | X | 디바이스 식별자 |
+| `refresh_token` | string | 필수 | 현재 리프레시 토큰 |
+| `device_id` | string | - | 디바이스 식별자 |
 
 **응답** `200 OK`
 
@@ -199,39 +199,25 @@ Authorization: Bearer <access_token>
 
 Device code flow는 CLI 도구가 명령줄에 인증 정보를 전달하지 않고 브라우저를 통해 인증할 수 있게 합니다.
 
-### `POST /auth/device/code`
+### `POST /device/code`
 
 CLI 인증을 위한 device code를 요청합니다.
-
-**요청 본문**
-
-```json
-{
-  "device_name": "macbook-pro"
-}
-```
 
 **응답** `200 OK`
 
 ```json
 {
-  "device_code": "GMMhmHCXhWEzkobqIHGG_EnNYYNjPzoysSr99Uy_zNM",
+  "device_code": "550e8400-e29b-41d4-a716-446655440000",
   "user_code": "WDJB-MJHT",
-  "verification_uri": "https://sync.example.com/device",
-  "expires_in": 900,
+  "verification_url": "https://sync.example.com/login/device",
+  "expires_in": 300,
   "interval": 5
 }
 ```
 
 ---
 
-### `GET /device`
-
-사용자가 `user_code`를 입력하고 인증하는 브라우저 페이지입니다.
-
----
-
-### `POST /auth/device/token`
+### `POST /device/token`
 
 Device code 완료를 위해 폴링합니다. CLI는 지정된 `interval`마다 이 엔드포인트를 폴링합니다.
 
@@ -239,9 +225,17 @@ Device code 완료를 위해 폴링합니다. CLI는 지정된 `interval`마다 
 
 ```json
 {
-  "device_code": "GMMhmHCXhWEzkobqIHGG_EnNYYNjPzoysSr99Uy_zNM"
+  "device_code": "550e8400-e29b-41d4-a716-446655440000",
+  "device_key": "optional-stable-uuid",
+  "device_name": "optional-hostname"
 }
 ```
+
+| 필드 | 타입 | 필수 | 설명 |
+|------|------|------|------|
+| `device_code` | string | 필수 | `/device/code`가 반환한 코드 |
+| `device_key` | string | - | 클라이언트의 안정적인 UUID. 제공 시 승인 시점에 디바이스로 등록됨 |
+| `device_name` | string | - | 사람이 읽을 수 있는 디바이스 이름 (64자로 절단) |
 
 **응답** `200 OK` (인증 완료)
 
@@ -254,25 +248,20 @@ Device code 완료를 위해 폴링합니다. CLI는 지정된 `interval`마다 
 }
 ```
 
-**응답** `428 Precondition Required` (인증 대기 중)
-
-```json
-{ "error": "authorization_pending" }
-```
-
 **에러**
 
-| 상태 | 메시지 | 설명 |
-|------|--------|------|
-| `428` | `authorization_pending` | 사용자가 아직 인증하지 않음, 계속 폴링 |
-| `400` | `expired_token` | Device code가 만료됨 |
-| `400` | `access_denied` | 사용자가 인증을 거부함 |
+| 상태 | 본문 | 설명 |
+|------|------|------|
+| `400` | `{ "error": "authorization_pending" }` | 사용자가 아직 승인하지 않음, 계속 폴링 |
+| `400` | `{ "error": "slow_down", "interval": 10 }` | 클라이언트가 5초보다 빠르게 폴링 중 |
+| `400` | `{ "error": "expired_token" }` | 알 수 없거나 이미 소비된 device code |
+| `410` | `{ "error": "expired_token" }` | Device code 만료 |
 
 ---
 
-### `POST /auth/device/verify`
+### `POST /device/approve`
 
-사용자가 브라우저에서 코드를 제출할 때 호출되는 서버 측 엔드포인트. 인증된 세션이 필요합니다 (사용자가 로그인되어 있어야 함).
+대기 중인 device code를 승인합니다. 로그인된 세션에서 사용자가 `user_code`를 제출한 뒤 브라우저가 호출합니다. JWT 필수.
 
 **요청 본문**
 
@@ -282,11 +271,15 @@ Device code 완료를 위해 폴링합니다. CLI는 지정된 `interval`마다 
 }
 ```
 
-**응답** `200 OK`
+**응답** `204 No Content`.
 
-```json
-{ "verified": true }
-```
+**에러**
+
+| 상태 | 메시지 | 설명 |
+|------|--------|------|
+| `404` | `invalid or expired code` | 알 수 없는 user_code |
+| `409` | `code already approved` | 이미 소비된 코드 |
+| `410` | `code expired` | 코드 만료 |
 
 ---
 
@@ -302,7 +295,7 @@ OIDC 로그인 플로우를 시작합니다. 사용자를 ID 프로바이더로 
 
 | 파라미터 | 필수 | 설명 |
 |----------|------|------|
-| `redirect_uri` | X | 인증 후 클라이언트 리다이렉트 URI (CLI 플로우: localhost만 허용) |
+| `redirect_uri` | - | 인증 후 클라이언트 리다이렉트 URI (CLI 플로우: localhost만 허용) |
 
 **응답** `307 Temporary Redirect` — ID 프로바이더의 인가 엔드포인트로 리다이렉트.
 
@@ -322,66 +315,67 @@ OIDC 콜백 핸들러. 인가 코드를 토큰으로 교환하고 사용자를 �
 
 **응답**
 - **CLI 플로우** (localhost `redirect_uri`): `307 Redirect` → `redirect_uri?access_token=...&refresh_token=...&token_type=Bearer&expires_in=...`
-- **브라우저 플로우** (`redirect_uri` 없음): `307 Redirect` → `/dashboard#access_token=...&refresh_token=...&expires_in=...`
+- **브라우저 플로우** (`redirect_uri` 없음): `307 Redirect` → `/admin#access_token=...&refresh_token=...&expires_in=...`
 
 ---
 
-## PromQL 프록시 (JWT 필수, 선택 -- VictoriaMetrics 필요)
+## 쿼리 (JWT 필수)
 
-PromQL 쿼리를 외부 VictoriaMetrics 인스턴스에 프록시하며, 사용자별 label injection으로 데이터 격리를 보장합니다. 각 사용자는 자신의 데이터만 조회할 수 있습니다.
+쿼리는 EventStore에서 직접 제공됩니다. 로컬 toki 데몬의 REPORT 프로토콜과 동일한 인터페이스 — toki 가상 쿼리(`usage{}`, `events{}`, `cost{}`)와 데몬의 JSON 출력 형식을 사용합니다.
 
-이 엔드포인트는 `toki-sync.toml`에서 `[backend].vm_url`이 설정된 경우에만 사용 가능합니다. VictoriaMetrics 없이는 이 엔드포인트가 오류를 반환합니다.
+### `GET /api/v1/toki/query`
 
-### `GET /api/v1/query`
-
-즉시 PromQL 쿼리.
+instant(스탯)와 range(차트) 쿼리를 모두 처리하는 단일 엔드포인트. `step`이 주어지면 결과가 버킷팅되고, 없으면 전체 `[start, end)` 범위에 대한 단일 집계 결과가 반환됩니다.
 
 **쿼리 파라미터**
 
 | 파라미터 | 필수 | 설명 |
 |----------|------|------|
-| `query` | O | PromQL 표현식 |
-| `time` | X | 평가 타임스탬프 (RFC3339 또는 Unix 타임스탬프) |
+| `query` | 필수 | Toki 가상 쿼리: `usage{}`, `events{}`, `cost{}`. `by (model)` 또는 `by (project)`로 그룹핑 |
+| `start` | - | epoch 초, `YYYYMMDD`, `YYYYMMDDhhmmss` 형식. 기본값 `0` |
+| `end` | - | `start`와 같은 형식. 기본값은 현재 시각 |
+| `step` | - | 버킷 크기 (예: `3600`, `1h`, `1d`, `1w`). instant 쿼리는 생략 |
+| `scope` | - | `self`(기본), `team:<team_id>`, `all`. 서버의 `max_query_scope`에 의해 제한 |
+| `tz` | - | 버킷 포매팅용 IANA 타임존 (예: `Asia/Seoul`). 기본 UTC |
+| `start_of_week` | - | `step=1w`일 때 주 시작 요일 (`mon`-`sun`). 기본 `mon` |
 
-**응답** `200 OK` -- VictoriaMetrics 응답 형식 (VM 설정 시):
+range 쿼리는 요청당 2000개 버킷으로 상한이 걸립니다 — 해당 범위에서 이를 초과하는 step은 서버가 거부합니다.
+
+**응답** `200 OK`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "resultType": "vector",
-    "result": [
+  "providers": {
+    "claude_code": [
       {
-        "metric": { "__name__": "toki_tokens_total", "model": "claude-opus-4-6" },
-        "value": [1711929600, "12345"]
+        "period": "2026-03-28T00:00:00|claude-opus-4-6",
+        "usage_per_models": [
+          {
+            "model": "claude-opus-4-6",
+            "input_tokens": 12345,
+            "output_tokens": 6789,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "total_tokens": 19134,
+            "events": 42,
+            "cost_usd": 0.18
+          }
+        ]
       }
     ]
   }
 }
 ```
 
-**응답** `503 Service Unavailable` (VM 미설정 시):
+`period`는 `<ISO 타임스탬프>|<그룹 키>`입니다. Codex 프로바이더 항목은 캐시 필드 자리에 `cached_input_tokens`와 `reasoning_output_tokens`를 사용합니다. `cost_usd`는 `cost{}` 쿼리이거나 모델에 매칭되는 pricing 항목이 있을 때만 포함됩니다.
 
-```json
-{ "error": "PromQL proxy not available: VictoriaMetrics not configured" }
-```
+**에러**
 
----
-
-### `GET /api/v1/query_range`
-
-범위 PromQL 쿼리.
-
-**쿼리 파라미터**
-
-| 파라미터 | 필수 | 설명 |
-|----------|------|------|
-| `query` | O | PromQL 표현식 |
-| `start` | O | 시작 타임스탬프 |
-| `end` | O | 종료 타임스탬프 |
-| `step` | O | 쿼리 해상도 단계 (예: `60s`, `5m`, `1h`) |
-
-**응답** `200 OK` -- `resultType: "matrix"`인 VictoriaMetrics 응답 형식 (VM 설정 시).
+| 상태 | 설명 |
+|------|------|
+| `400` | 잘못된 시간 형식, 잘못된 scope, 범위 대비 step이 너무 작거나 step > range |
+| `403` | 서버가 해당 scope를 허용하지 않거나(`max_query_scope`) 팀 멤버가 아님 |
+| `502` | EventStore 백엔드 사용 불가 |
 
 ---
 
@@ -473,18 +467,6 @@ PromQL 쿼리를 외부 VictoriaMetrics 인스턴스에 프록시하며, 사용�
 
 ---
 
-## 팀 (JWT 필수)
-
-### `GET /api/v1/teams/:team_id/query_range`
-
-팀 멤버 전체에 대한 집계 PromQL 범위 쿼리. 서버가 팀의 모든 사용자에 대해 regex label matcher를 주입합니다. VictoriaMetrics 설정이 필요합니다.
-
-**쿼리 파라미터** -- `/api/v1/query_range`와 동일.
-
-**응답** `200 OK` -- VictoriaMetrics 응답 형식 (VM 설정 시).
-
----
-
 ## 관리자 엔드포인트 (JWT 필수, admin 역할)
 
 모든 관리자 엔드포인트는 `admin` 역할을 가진 사용자의 JWT가 필요합니다.
@@ -493,18 +475,20 @@ PromQL 쿼리를 외부 VictoriaMetrics 인스턴스에 프록시하며, 사용�
 
 | 메서드 | 경로 | 설명 |
 |--------|------|------|
-| `GET` | `/admin/settings` | 현재 서버 설정 조회 (registration_mode 등) |
-| `PATCH` | `/admin/settings` | 서버 설정 변경 |
+| `GET` | `/admin/settings` | 현재 서버 설정 조회 (registration_mode, OIDC 필드, max_query_scope) |
+| `PUT` | `/admin/settings/:key` | 키 단위로 설정 하나 변경 |
 
-#### `PATCH /admin/settings`
+허용된 `:key` 값: `registration_mode`, `oidc_issuer`, `oidc_client_id`, `oidc_client_secret`, `oidc_redirect_uri`, `max_query_scope`.
+
+#### `PUT /admin/settings/:key`
 
 **요청 본문**
 
 ```json
-{
-  "registration_mode": "approval"
-}
+{ "value": "approval" }
 ```
+
+**응답** `204 No Content`. 알 수 없는 키이거나 검증에 실패하면 `422` (`registration_mode`는 `open|approval|closed`, `max_query_scope`는 `self|team|all`).
 
 ---
 
@@ -513,8 +497,8 @@ PromQL 쿼리를 외부 VictoriaMetrics 인스턴스에 프록시하며, 사용�
 | 메서드 | 경로 | 설명 |
 |--------|------|------|
 | `GET` | `/admin/pending` | 승인 대기 중인 사용자 목록 (`registration_mode = "approval"` 시) |
-| `POST` | `/admin/pending/:user_id/approve` | 대기 중인 사용자 승인 |
-| `DELETE` | `/admin/pending/:user_id` | 대기 중인 사용자 거부 |
+| `POST` | `/admin/pending/:id/approve` | 대기 중인 등록 승인 |
+| `POST` | `/admin/pending/:id/reject` | 대기 중인 등록 거부 |
 
 ---
 
@@ -534,14 +518,6 @@ PromQL 쿼리를 외부 VictoriaMetrics 인스턴스에 프록시하며, 사용�
 
 ---
 
-### 활성 디바이스
-
-| 메서드 | 경로 | 설명 |
-|--------|------|------|
-| `GET` | `/admin/active` | 현재 연결된 디바이스 목록과 실시간 동기화 상태 |
-
----
-
 ### 사용자
 
 | 메서드 | 경로 | 설명 |
@@ -550,6 +526,7 @@ PromQL 쿼리를 외부 VictoriaMetrics 인스턴스에 프록시하며, 사용�
 | `POST` | `/admin/users` | 사용자 생성 |
 | `DELETE` | `/admin/users/:user_id` | 사용자 삭제 |
 | `PATCH` | `/admin/users/:user_id/password` | 사용자 비밀번호 변경 |
+| `PATCH` | `/admin/users/:user_id/active` | 사용자 활성/비활성 전환 (`{ "active": bool }`) |
 
 #### `POST /admin/users`
 
@@ -619,22 +596,22 @@ PromQL 쿼리를 외부 VictoriaMetrics 인스턴스에 프록시하며, 사용�
 
 | 메서드 | 경로 | 설명 |
 |--------|------|------|
-| `GET` | `/` | `/dashboard`로 리다이렉트 |
-| `GET` | `/dashboard` | 웹 대시보드 (HTML/JS SPA) |
+| `GET` | `/` | `/admin`으로 리다이렉트 |
+| `GET` | `/admin` | 관리자 대시보드 (HTML/JS SPA) |
 | `GET` | `/login` | 로그인 페이지 (HTML) |
 
 대시보드는 브라우저 `localStorage`에 저장된 JWT로 인증합니다. OIDC 로그인 후에는 URL 프래그먼트(`#access_token=...`)를 통해 토큰이 전달됩니다.
 
 ---
 
-## TCP 동기화 프로토콜 (포트 9090)
+## TCP 동기화 프로토콜 레퍼런스 (포트 9090)
 
-TCP 포트는 HTTP가 **아닙니다**. toki 데몬 연결을 위한 커스텀 바이너리 프로토콜(bincode 직렬화)을 사용합니다:
+포트 9090은 HTTP가 아닌 커스텀 바이너리 프로토콜(bincode 직렬화)을 사용합니다. 프로토콜은 `toki-sync-protocol` crate에 구현되어 있으며 직접 사용하기 위한 것이 아닙니다 — toki CLI(`toki settings sync enable`)로 연결하세요.
 
-1. 클라이언트가 TLS로 연결
-2. 클라이언트가 `AuthRequest` 전송 (사용자명 + JWT 또는 비밀번호)
-3. 서버가 `AuthResponse` 응답 (성공 + device_id)
-4. 클라이언트가 `SyncBatch` 배치 전송 (이벤트, 100개 이상 시 zstd 압축)
-5. 서버가 배치당 `SyncAck` 응답
+| 프레임 필드 | 크기 | 의미 |
+|---|---|---|
+| 메시지 타입 | 4바이트 (u32 LE) | 프레임 종류 (`AUTH`, `SYNC_BATCH` 등) |
+| 페이로드 길이 | 4바이트 (u32 LE) | 페이로드 바이트 수 |
+| 페이로드 | N바이트 | bincode로 인코딩된 메시지, 필요 시 zstd 압축 |
 
-이 프로토콜은 `toki-sync-protocol` 공유 crate에 구현되어 있으며 직접 사용하기 위한 것이 아닙니다. toki CLI(`toki settings sync enable`)로 연결하세요.
+전체 메시지 타입 표, 핸드셰이크 시퀀스, 설계 근거는 [DESIGN.ko.md — Sync Protocol](DESIGN.ko.md#sync-protocol)을 참고하세요.

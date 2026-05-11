@@ -1,8 +1,8 @@
-# toki-sync Configuration Reference
+# toki-sync configuration reference
 
 Server configuration lives in `config/toki-sync.toml`. Environment variables are expanded using `${VAR_NAME}` syntax — if the variable is unset, it expands to an empty string.
 
-## Example
+## Example config
 
 ```toml
 [server]
@@ -31,7 +31,7 @@ fjall_path = "/data/events.fjall"
 # clickhouse_url = "http://clickhouse:8123"
 
 [features]
-# max_query_scope = "365d"
+# max_query_scope = "self"   # "self" | "team" | "all"
 
 [log]
 level = "info"
@@ -40,40 +40,68 @@ json = true
 
 ---
 
-## `[server]`
+## Server section
+
+`[server]` section.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `bind` | string | `0.0.0.0` | Network interface to bind |
-| `http_port` | integer | `9091` | HTTP API port (REST, dashboard, PromQL proxy) |
+| `http_port` | integer | `9091` | HTTP API port (REST, dashboard, query endpoint) |
 | `tcp_port` | integer | `9090` | TCP sync protocol port (toki daemon connections) |
-| `external_url` | string | *(empty)* | Public URL used for JWT `iss` claim and OIDC redirect URI derivation. Example: `https://sync.example.com` |
-| `max_concurrent_writes` | integer | `10` | Maximum parallel event store batch writes. Limits thundering-herd pressure when many devices sync simultaneously |
-| `trust_proxy` | boolean | `false` | Trust `X-Forwarded-For` and `X-Real-IP` headers from a reverse proxy for client IP resolution (brute force tracking). Only enable when behind a trusted reverse proxy |
+| `external_url` | string | *(empty)* | Public URL for JWT `iss` and OIDC redirect URI. See below |
+| `max_concurrent_writes` | integer | `10` | Maximum parallel event store batch writes |
+| `trust_proxy` | boolean | `false` | Trust `X-Forwarded-For` / `X-Real-IP` headers. See below |
+
+#### `external_url`
+
+Used in the JWT `iss` claim and to derive the OIDC redirect URI. Example: `https://sync.example.com`.
+
+#### `max_concurrent_writes`
+
+Limits thundering-herd pressure when many devices sync simultaneously. The server queues additional batch writes once this limit is reached.
+
+#### `trust_proxy`
+
+When `true`, the server reads the client IP from proxy headers for brute force tracking. Only enable when toki-sync sits behind a trusted reverse proxy; otherwise clients can spoof their IP.
 
 ---
 
-## `[auth]`
+## Auth section
+
+`[auth]` section.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `jwt_secret` | string | — | **Required.** HS256 signing key for JWT tokens. Use `${JWT_SECRET}` to read from environment. Generate with `openssl rand -base64 32` |
+| `jwt_secret` | string | — | **Required.** HS256 signing key. See below |
 | `access_token_ttl_secs` | integer | `3600` | Access token lifetime in seconds (default: 1 hour) |
 | `refresh_token_ttl_secs` | integer | `7776000` | Refresh token lifetime in seconds (default: 90 days) |
-| `brute_force_max_attempts` | integer | `5` | Maximum failed login attempts before lockout |
-| `brute_force_window_secs` | integer | `300` | Time window for tracking failed attempts (default: 5 minutes) |
-| `brute_force_lockout_secs` | integer | `900` | Lockout duration after max attempts exceeded (default: 15 minutes) |
-| `registration_mode` | string | `"closed"` | Controls self-registration: `"open"` (anyone can register), `"approval"` (registration requires admin approval), `"closed"` (only admins can create users) |
-| `oidc_issuer` | string | *(empty)* | OIDC provider URL (e.g., `https://accounts.google.com`). Empty = OIDC disabled |
+| `brute_force_max_attempts` | integer | `5` | Failed login attempts before lockout |
+| `brute_force_window_secs` | integer | `300` | Tracking window (default: 5 minutes) |
+| `brute_force_lockout_secs` | integer | `900` | Lockout duration (default: 15 minutes) |
+| `registration_mode` | string | `"closed"` | Self-registration policy. See below |
+| `oidc_issuer` | string | *(empty)* | OIDC provider URL (e.g., `https://accounts.google.com`) |
 | `oidc_client_id` | string | *(empty)* | OIDC client ID from your identity provider |
 | `oidc_client_secret` | string | *(empty)* | OIDC client secret |
 | `oidc_redirect_uri` | string | *(empty)* | OIDC callback URL (e.g., `https://sync.example.com/auth/callback`) |
 
-### Brute Force Protection
+#### `jwt_secret`
 
-Brute force protection tracks failed login attempts per IP + username combination. When `brute_force_max_attempts` is exceeded within `brute_force_window_secs`, the IP+username pair is locked out for `brute_force_lockout_secs`. This applies to `/login`, `/register`, and `/token/refresh` endpoints.
+Use `${JWT_SECRET}` to read from the environment. Generate a strong value with `openssl rand -base64 32`.
 
-### OIDC Configuration
+#### `registration_mode`
+
+Three policies for self-registration via `POST /register`:
+
+- `"open"` — anyone can register.
+- `"approval"` — registration creates a pending account; an admin must approve via `/admin/pending/:id/approve`.
+- `"closed"` — only admins can create users via `/admin/users`.
+
+### Brute force protection
+
+Failed login attempts are tracked per IP + username pair. When `brute_force_max_attempts` is exceeded within `brute_force_window_secs`, the pair is locked out for `brute_force_lockout_secs`. The guard applies to `/login`, `/register`, and `/token/refresh`.
+
+### OIDC configuration
 
 To enable OIDC (Google, GitHub, etc.), set all four OIDC fields. The server performs standard OIDC discovery on startup and caches the result with a 1-hour TTL.
 
@@ -88,14 +116,24 @@ oidc_redirect_uri = "https://sync.example.com/auth/callback"
 
 ---
 
-## `[storage]`
+## Storage section
+
+`[storage]` section.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `backend` | string | `sqlite` | Database backend: `sqlite` or `postgres` |
 | `sqlite_path` | string | `./data/toki_sync.db` | SQLite database file path. Used when `backend = "sqlite"` |
-| `db_path` | string | *(empty)* | Legacy alias for `sqlite_path` (backward compatible). If set and `sqlite_path` is default, this value is used |
-| `postgres_url` | string | *(empty)* | PostgreSQL connection string. Used when `backend = "postgres"`. Example: `postgres://user:pass@host/dbname` |
+| `db_path` | string | *(empty)* | Legacy alias for `sqlite_path`. See below |
+| `postgres_url` | string | *(empty)* | PostgreSQL connection string. See below |
+
+#### `db_path`
+
+Older configs used `db_path` instead of `sqlite_path`. The two keys coexist for backward compatibility: if `db_path` is set and `sqlite_path` is still at its default, `db_path` is used. New configs should set `sqlite_path` only.
+
+#### `postgres_url`
+
+Used when `backend = "postgres"`. Example: `postgres://user:pass@host/dbname`.
 
 ### SQLite vs PostgreSQL
 
@@ -116,7 +154,9 @@ postgres_url = "postgres://toki:password@db:5432/toki_sync"
 
 ---
 
-## `[events]`
+## Events section
+
+`[events]` section.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -145,17 +185,9 @@ In Docker Compose, enable ClickHouse with `docker compose --profile clickhouse u
 
 ---
 
-## `[backend]` (optional, legacy)
+## Log section
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `vm_url` | string | *(empty)* | VictoriaMetrics HTTP endpoint. Only needed if using the optional PromQL proxy with an external VictoriaMetrics instance |
-
-This section is optional. It is only required for legacy PromQL proxy compatibility (e.g., `toki report query --remote` or Toki Monitor server mode). If not configured, the `/api/v1/query` and `/api/v1/query_range` endpoints will return an error indicating that VictoriaMetrics is not configured.
-
----
-
-## `[log]`
+`[log]` section.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -164,15 +196,17 @@ This section is optional. It is only required for legacy PromQL proxy compatibil
 
 ---
 
-## `[features]`
+## Features section
+
+`[features]` section.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `max_query_scope` | string | *(empty)* | Maximum time range for PromQL queries (e.g., `"365d"`, `"90d"`). Empty = unlimited. Prevents expensive queries spanning too much data |
+| `max_query_scope` | string | `"self"` | Maximum query scope non-admin users may request on `/api/v1/toki/query`. One of `self`, `team`, `all`. Admins always get `all` |
 
 ---
 
-## Environment Variables
+## Environment variables
 
 Environment variables are used in two ways:
 1. **In TOML**: `${VAR_NAME}` syntax for expanding values inside `toki-sync.toml`
@@ -205,7 +239,7 @@ TOKI_VERSION=0.1.0
 
 ---
 
-## Config Loading
+## Config loading
 
 The server loads configuration in this order:
 

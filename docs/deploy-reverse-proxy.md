@@ -1,6 +1,8 @@
-# Scenario B: Existing Reverse Proxy
+# Scenario B: existing reverse proxy
 
 For servers that already have nginx, Traefik, or another proxy handling TLS.
+
+> Different setup? See [Caddy + DuckDNS](deploy-caddy-duckdns.md) for a fresh server with auto TLS, [self-signed TLS](deploy-self-signed.md) for IP-only servers, or [local / LAN](deploy-local.md) for development.
 
 ---
 
@@ -12,7 +14,7 @@ For servers that already have nginx, Traefik, or another proxy handling TLS.
 
 ---
 
-## Step 1: Clone and configure
+## Step 1: clone and configure
 
 ```bash
 git clone https://github.com/korjwl1/toki-sync.git
@@ -33,7 +35,7 @@ TOKI_EXTERNAL_URL=https://yourserver.example.com
 
 ---
 
-## Step 2: Expose ports
+## Step 2: expose ports
 
 Add port mappings to `docker-compose.yml` under `toki-sync-server`:
 
@@ -50,7 +52,7 @@ services:
 
 ---
 
-## Step 3: Deploy
+## Step 3: deploy
 
 ```bash
 docker compose up -d
@@ -60,7 +62,7 @@ This starts only toki-sync-server with the embedded Fjall event store (no Caddy)
 
 ---
 
-## Step 4: Configure your proxy
+## Step 4: configure your proxy
 
 Forward two types of traffic to toki-sync:
 
@@ -131,7 +133,7 @@ tcp:
 
 ---
 
-## Step 5: Connect a device
+## Step 5: connect a device
 
 On any machine with [toki](https://github.com/korjwl1/toki) installed:
 

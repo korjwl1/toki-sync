@@ -2,6 +2,8 @@
 
 이미 nginx, Traefik 등으로 TLS를 처리하고 있는 서버에 적합합니다.
 
+> 다른 환경이면 [Caddy + DuckDNS](deploy-caddy-duckdns.ko.md) (새 서버에 자동 TLS), [자체 서명 TLS](deploy-self-signed.ko.md) (IP 전용 서버), [로컬 / LAN](deploy-local.ko.md) (개발용)을 참고하세요.
+
 ---
 
 ## 사전 요구사항

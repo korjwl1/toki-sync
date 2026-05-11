@@ -2,6 +2,8 @@
 
 Best for fresh servers without an existing reverse proxy. Caddy handles TLS certificates automatically via Let's Encrypt, and DuckDNS provides a free domain name pointing to your server.
 
+> Different setup? See [existing reverse proxy](deploy-reverse-proxy.md) if you already run nginx/Traefik, [self-signed TLS](deploy-self-signed.md) for IP-only servers, or [local / LAN](deploy-local.md) for development.
+
 ---
 
 ## Prerequisites
@@ -12,7 +14,7 @@ Best for fresh servers without an existing reverse proxy. Caddy handles TLS cert
 
 ---
 
-## Step 1: Get a DuckDNS domain
+## Step 1: get a DuckDNS domain
 
 1. Go to [https://www.duckdns.org](https://www.duckdns.org)
 2. Sign in with Google, GitHub, Twitter, or Reddit
@@ -42,7 +44,7 @@ docker run -d --name duckdns-updater --restart unless-stopped \
 
 ---
 
-## Step 2: Clone and configure
+## Step 2: clone and configure
 
 ```bash
 git clone https://github.com/korjwl1/toki-sync.git
@@ -70,7 +72,7 @@ DUCKDNS_TOKEN=a1b2c3d4-e5f6-7890-abcd-ef1234567890
 
 ---
 
-## Step 3: Deploy
+## Step 3: deploy
 
 ```bash
 docker compose --profile caddy up -d
@@ -85,7 +87,7 @@ This starts two containers:
 
 ---
 
-## Step 4: Verify
+## Step 4: verify
 
 ```bash
 # Check all containers are running
@@ -100,7 +102,7 @@ Open the dashboard in your browser: `https://myserver.duckdns.org/dashboard`
 
 ---
 
-## Step 5: Connect a device
+## Step 5: connect a device
 
 On any machine with [toki](https://github.com/korjwl1/toki) installed:
 

@@ -1,6 +1,8 @@
-# Scenario C: Self-signed TLS (IP-only)
+# Scenario C: self-signed TLS (IP-only)
 
 For servers without a domain name (e.g., home lab on a local IP). Caddy generates a self-signed certificate automatically.
+
+> Picking the wrong scenario? See [Caddy + DuckDNS](deploy-caddy-duckdns.md) for free domain + Let's Encrypt, [existing reverse proxy](deploy-reverse-proxy.md) if you already run nginx/Traefik, or [local / LAN](deploy-local.md) for development.
 
 ---
 
@@ -11,7 +13,7 @@ For servers without a domain name (e.g., home lab on a local IP). Caddy generate
 
 ---
 
-## Step 1: Clone and configure
+## Step 1: clone and configure
 
 ```bash
 git clone https://github.com/korjwl1/toki-sync.git
@@ -21,18 +23,31 @@ cp .env.example .env
 cp config/toki-sync.toml.example config/toki-sync.toml
 ```
 
-Edit `.env` — leave `DUCKDNS_TOKEN` empty:
+Edit `.env` — leave `DUCKDNS_TOKEN` and `TOKI_DOMAIN` unset so Caddy falls back to its self-signed default:
 
 ```bash
 TOKI_ADMIN_PASSWORD=your-strong-password
 JWT_SECRET=$(openssl rand -base64 32)
 TOKI_EXTERNAL_URL=https://192.168.1.100
-# DUCKDNS_TOKEN is not set — Caddy will use tls internal (self-signed)
+# DUCKDNS_TOKEN is not set
+# TOKI_DOMAIN is not set — Caddy uses tls internal (self-signed)
 ```
+
+The bundled `caddy/Caddyfile` already supports this mode. The relevant lines are:
+
+```caddyfile
+{$TOKI_DOMAIN:localhost} {
+    tls {$TLS_MODE:internal}
+
+    reverse_proxy toki-sync-server:9091
+}
+```
+
+When `TOKI_DOMAIN` is unset, the site address defaults to `localhost`, and `TLS_MODE` defaults to `internal` — Caddy generates and serves a self-signed certificate. No edits to the Caddyfile are needed.
 
 ---
 
-## Step 2: Deploy
+## Step 2: deploy
 
 **With Caddy** (self-signed mode):
 
@@ -40,15 +55,13 @@ TOKI_EXTERNAL_URL=https://192.168.1.100
 docker compose --profile caddy up -d
 ```
 
-> Note: Your Caddyfile must be configured to use `tls internal` when no DuckDNS token is provided. See `caddy/Caddyfile` for the template logic.
-
 **Without Caddy** (expose ports directly):
 
 ```bash
 docker compose up -d
 ```
 
-Add port mappings to `docker-compose.yml`:
+If you skip Caddy, add port mappings to `docker-compose.yml`:
 
 ```yaml
 services:
@@ -63,7 +76,7 @@ services:
 
 ---
 
-## Step 3: Connect a device
+## Step 3: connect a device
 
 Clients must use the `--insecure` flag to accept the self-signed certificate:
 

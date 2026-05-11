@@ -1,4 +1,4 @@
-# toki-sync HTTP API Reference
+# toki-sync HTTP API reference
 
 All HTTP endpoints are served on port 9091 (configurable via `[server].http_port`).
 
@@ -6,7 +6,7 @@ All HTTP endpoints are served on port 9091 (configurable via `[server].http_port
 
 JWT-authenticated endpoints require the `Authorization` header:
 
-```
+```http
 Authorization: Bearer <access_token>
 ```
 
@@ -20,7 +20,7 @@ All error responses follow this format:
 
 ---
 
-## Public Endpoints
+## Public endpoints
 
 ### `GET /health`
 
@@ -195,43 +195,29 @@ Returns server authentication configuration (registration mode, OIDC availabilit
 
 ---
 
-## Device Code Flow Endpoints
+## Device code flow endpoints
 
 The device code flow allows CLI tools to authenticate via browser without passing credentials on the command line.
 
-### `POST /auth/device/code`
+### `POST /device/code`
 
 Request a device code for CLI authentication.
-
-**Request Body**
-
-```json
-{
-  "device_name": "macbook-pro"
-}
-```
 
 **Response** `200 OK`
 
 ```json
 {
-  "device_code": "GMMhmHCXhWEzkobqIHGG_EnNYYNjPzoysSr99Uy_zNM",
+  "device_code": "550e8400-e29b-41d4-a716-446655440000",
   "user_code": "WDJB-MJHT",
-  "verification_uri": "https://sync.example.com/device",
-  "expires_in": 900,
+  "verification_url": "https://sync.example.com/login/device",
+  "expires_in": 300,
   "interval": 5
 }
 ```
 
 ---
 
-### `GET /device`
-
-Browser page where the user enters the `user_code` and authenticates.
-
----
-
-### `POST /auth/device/token`
+### `POST /device/token`
 
 Poll for device code completion. The CLI polls this endpoint at the specified `interval`.
 
@@ -239,9 +225,17 @@ Poll for device code completion. The CLI polls this endpoint at the specified `i
 
 ```json
 {
-  "device_code": "GMMhmHCXhWEzkobqIHGG_EnNYYNjPzoysSr99Uy_zNM"
+  "device_code": "550e8400-e29b-41d4-a716-446655440000",
+  "device_key": "optional-stable-uuid",
+  "device_name": "optional-hostname"
 }
 ```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `device_code` | string | Yes | Code returned by `/device/code` |
+| `device_key` | string | No | Stable client UUID. If supplied, the device is registered on approval |
+| `device_name` | string | No | Human-readable device name (truncated to 64 chars) |
 
 **Response** `200 OK` (authorization complete)
 
@@ -254,25 +248,20 @@ Poll for device code completion. The CLI polls this endpoint at the specified `i
 }
 ```
 
-**Response** `428 Precondition Required` (authorization pending)
-
-```json
-{ "error": "authorization_pending" }
-```
-
 **Errors**
 
-| Status | Message | Description |
-|--------|---------|-------------|
-| `428` | `authorization_pending` | User hasn't authorized yet, keep polling |
-| `400` | `expired_token` | Device code has expired |
-| `400` | `access_denied` | User denied authorization |
+| Status | Body | Description |
+|--------|------|-------------|
+| `400` | `{ "error": "authorization_pending" }` | User hasn't approved yet, keep polling |
+| `400` | `{ "error": "slow_down", "interval": 10 }` | Client is polling faster than 5s |
+| `400` | `{ "error": "expired_token" }` | Device code is unknown or already consumed |
+| `410` | `{ "error": "expired_token" }` | Device code has expired |
 
 ---
 
-### `POST /auth/device/verify`
+### `POST /device/approve`
 
-Server-side endpoint called when the user submits the code in the browser. Requires an authenticated session (the user must be logged in).
+Approve a pending device code. Called by the browser after the user submits the `user_code` from a logged-in session. Requires JWT.
 
 **Request Body**
 
@@ -282,15 +271,19 @@ Server-side endpoint called when the user submits the code in the browser. Requi
 }
 ```
 
-**Response** `200 OK`
+**Response** `204 No Content` on success.
 
-```json
-{ "verified": true }
-```
+**Errors**
+
+| Status | Message | Description |
+|--------|---------|-------------|
+| `404` | `invalid or expired code` | Unknown user_code |
+| `409` | `code already approved` | Code already consumed |
+| `410` | `code expired` | Code expired |
 
 ---
 
-## OIDC Endpoints
+## OIDC endpoints
 
 These endpoints are only available when OIDC is configured (all `oidc_*` fields set in config).
 
@@ -322,70 +315,71 @@ OIDC callback handler. Exchanges the authorization code for tokens and creates/f
 
 **Response**
 - **CLI flow** (localhost `redirect_uri`): `307 Redirect` to `redirect_uri?access_token=...&refresh_token=...&token_type=Bearer&expires_in=...`
-- **Browser flow** (no `redirect_uri`): `307 Redirect` to `/dashboard#access_token=...&refresh_token=...&expires_in=...`
+- **Browser flow** (no `redirect_uri`): `307 Redirect` to `/admin#access_token=...&refresh_token=...&expires_in=...`
 
 ---
 
-## PromQL Proxy (JWT required, optional -- requires VictoriaMetrics)
+## Query (JWT required)
 
-These endpoints proxy PromQL queries to an external VictoriaMetrics instance with per-user label injection for data isolation. Each user can only query their own data.
+Queries are served directly from the EventStore. The same interface as the local toki daemon's REPORT protocol — toki virtual queries (`usage{}`, `events{}`, `cost{}`) and the daemon's JSON output format.
 
-These endpoints are only available when `[backend].vm_url` is configured in `toki-sync.toml`. Without VictoriaMetrics, these endpoints return an error.
+### `GET /api/v1/toki/query`
 
-### `GET /api/v1/query`
-
-Instant PromQL query.
+Single endpoint covering both instant (stat) and range (chart) queries. When `step` is supplied, results are bucketed; without `step`, a single aggregated result for the full `[start, end)` range is returned.
 
 **Query Parameters**
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
-| `query` | Yes | PromQL expression |
-| `time` | No | Evaluation timestamp (RFC3339 or Unix timestamp) |
+| `query` | Yes | Toki virtual query: `usage{}`, `events{}`, or `cost{}`. Group-by via `by (model)` or `by (project)` |
+| `start` | No | Epoch seconds, `YYYYMMDD`, or `YYYYMMDDhhmmss`. Defaults to `0` |
+| `end` | No | Same formats as `start`. Defaults to now |
+| `step` | No | Bucket size (e.g., `3600`, `1h`, `1d`, `1w`). Omit for instant query |
+| `scope` | No | `self` (default), `team:<team_id>`, or `all`. Subject to server's `max_query_scope` |
+| `tz` | No | IANA timezone name for bucket formatting (e.g., `Asia/Seoul`). Defaults to UTC |
+| `start_of_week` | No | Week start for `step=1w` (`mon`-`sun`). Default `mon` |
 
-**Response** `200 OK` — VictoriaMetrics response format (when VM is configured):
+Range queries are capped at 2000 buckets per request — the server rejects steps that would exceed this for the given range.
+
+**Response** `200 OK`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "resultType": "vector",
-    "result": [
+  "providers": {
+    "claude_code": [
       {
-        "metric": { "__name__": "toki_tokens_total", "model": "claude-opus-4-6" },
-        "value": [1711929600, "12345"]
+        "period": "2026-03-28T00:00:00|claude-opus-4-6",
+        "usage_per_models": [
+          {
+            "model": "claude-opus-4-6",
+            "input_tokens": 12345,
+            "output_tokens": 6789,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "total_tokens": 19134,
+            "events": 42,
+            "cost_usd": 0.18
+          }
+        ]
       }
     ]
   }
 }
 ```
 
-**Response** `503 Service Unavailable` (when VM is not configured):
+`period` is `<ISO timestamp>|<group key>`. Codex provider entries use `cached_input_tokens` and `reasoning_output_tokens` in place of the cache fields. `cost_usd` is only present for `cost{}` queries or when a pricing entry matches the model.
 
-```json
-{ "error": "PromQL proxy not available: VictoriaMetrics not configured" }
-```
+**Errors**
 
----
-
-### `GET /api/v1/query_range`
-
-Range PromQL query.
-
-**Query Parameters**
-
-| Parameter | Required | Description |
-|-----------|----------|-------------|
-| `query` | Yes | PromQL expression |
-| `start` | Yes | Start timestamp |
-| `end` | Yes | End timestamp |
-| `step` | Yes | Query resolution step (e.g., `60s`, `5m`, `1h`) |
-
-**Response** `200 OK` — VictoriaMetrics response format with `resultType: "matrix"` (when VM is configured).
+| Status | Description |
+|--------|-------------|
+| `400` | Invalid time format, invalid scope, step too small for range, or step > range |
+| `403` | Scope not enabled by server (`max_query_scope`) or not a team member |
+| `502` | EventStore backend unavailable |
 
 ---
 
-## User Self-Service (JWT required)
+## User self-service (JWT required)
 
 ### `GET /me/devices`
 
@@ -473,19 +467,7 @@ List team memberships for the authenticated user.
 
 ---
 
-## Teams (JWT required)
-
-### `GET /api/v1/teams/:team_id/query_range`
-
-Aggregated PromQL range query across all team members. The server injects a regex label matcher for all users in the team. Requires VictoriaMetrics to be configured.
-
-**Query Parameters** -- same as `/api/v1/query_range`.
-
-**Response** `200 OK` -- VictoriaMetrics response format (when VM is configured).
-
----
-
-## Admin Endpoints (JWT required, admin role)
+## Admin endpoints (JWT required, admin role)
 
 All admin endpoints require a JWT from a user with the `admin` role.
 
@@ -493,18 +475,20 @@ All admin endpoints require a JWT from a user with the `admin` role.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/admin/settings` | Get current server settings (registration_mode, etc.) |
-| `PATCH` | `/admin/settings` | Update server settings |
+| `GET` | `/admin/settings` | Get current server settings (registration_mode, OIDC fields, max_query_scope) |
+| `PUT` | `/admin/settings/:key` | Update one setting by key |
 
-#### `PATCH /admin/settings`
+Allowed `:key` values: `registration_mode`, `oidc_issuer`, `oidc_client_id`, `oidc_client_secret`, `oidc_redirect_uri`, `max_query_scope`.
+
+#### `PUT /admin/settings/:key`
 
 **Request Body**
 
 ```json
-{
-  "registration_mode": "approval"
-}
+{ "value": "approval" }
 ```
+
+**Response** `204 No Content`. Returns `422` if the key is unknown or the value fails validation (`registration_mode` must be `open|approval|closed`; `max_query_scope` must be `self|team|all`).
 
 ---
 
@@ -513,8 +497,8 @@ All admin endpoints require a JWT from a user with the `admin` role.
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/admin/pending` | List users awaiting approval (when `registration_mode = "approval"`) |
-| `POST` | `/admin/pending/:user_id/approve` | Approve a pending user |
-| `DELETE` | `/admin/pending/:user_id` | Reject a pending user |
+| `POST` | `/admin/pending/:id/approve` | Approve a pending registration |
+| `POST` | `/admin/pending/:id/reject` | Reject a pending registration |
 
 ---
 
@@ -534,14 +518,6 @@ All admin endpoints require a JWT from a user with the `admin` role.
 
 ---
 
-### Active Devices
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/admin/active` | List currently connected devices with real-time sync status |
-
----
-
 ### Users
 
 | Method | Path | Description |
@@ -550,6 +526,7 @@ All admin endpoints require a JWT from a user with the `admin` role.
 | `POST` | `/admin/users` | Create a user |
 | `DELETE` | `/admin/users/:user_id` | Delete a user |
 | `PATCH` | `/admin/users/:user_id/password` | Change a user's password |
+| `PATCH` | `/admin/users/:user_id/active` | Activate or deactivate a user (`{ "active": bool }`) |
 
 #### `POST /admin/users`
 
@@ -619,22 +596,22 @@ All admin endpoints require a JWT from a user with the `admin` role.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/` | Redirects to `/dashboard` |
-| `GET` | `/dashboard` | Web dashboard (HTML/JS SPA) |
+| `GET` | `/` | Redirects to `/admin` |
+| `GET` | `/admin` | Admin dashboard (HTML/JS SPA) |
 | `GET` | `/login` | Login page (HTML) |
 
 The dashboard authenticates via JWT stored in browser `localStorage`. After OIDC login, tokens are passed via URL fragment (`#access_token=...`).
 
 ---
 
-## TCP Sync Protocol (Port 9090)
+## TCP sync protocol reference (port 9090)
 
-The TCP port is **not** HTTP. It uses a custom binary protocol (bincode serialization) for toki daemon connections:
+Port 9090 uses a custom binary protocol (bincode serialization), not HTTP. The protocol is implemented in the `toki-sync-protocol` crate and is not intended for direct use — connect via the toki CLI (`toki settings sync enable`).
 
-1. Client connects via TLS
-2. Client sends `AuthRequest` (username + JWT or password)
-3. Server responds with `AuthResponse` (success + device_id)
-4. Client sends batches of `SyncBatch` (events, zstd-compressed if >= 100 items)
-5. Server responds with `SyncAck` per batch
+| Frame field | Size | Meaning |
+|---|---|---|
+| Message type | 4 bytes (u32 LE) | Frame type (`AUTH`, `SYNC_BATCH`, etc.) |
+| Payload length | 4 bytes (u32 LE) | Payload byte count |
+| Payload | N bytes | bincode-encoded message, optionally zstd-compressed |
 
-This protocol is implemented in the `toki-sync-protocol` shared crate and is not intended for direct use. Use the toki CLI (`toki settings sync enable`) to connect.
+For the full message-type table, handshake sequence, and design rationale, see [DESIGN.md — Sync Protocol](DESIGN.md#sync-protocol).

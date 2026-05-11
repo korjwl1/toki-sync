@@ -22,7 +22,7 @@
 
 ---
 
-## Quick Start
+## Quick start
 
 No `git clone` needed. Create a `docker-compose.yml` and `.env`, then start.
 
@@ -30,9 +30,9 @@ No `git clone` needed. Create a `docker-compose.yml` and `.env`, then start.
 
 ```yaml
 services:
-  toki-sync:
+  toki-sync-server:
     image: korjwl11/toki-sync:latest
-    container_name: toki-sync
+    container_name: toki-sync-server
     restart: unless-stopped
     ports:
       - "9090:9090"   # sync protocol (TCP)
@@ -69,13 +69,13 @@ Done. Token usage now syncs automatically across all your devices.
 
 ---
 
-## Docker Image
+## Docker image
 
-| | |
+| Field | Value |
 |---|---|
-| **Image** | [`korjwl11/toki-sync`](https://hub.docker.com/r/korjwl11/toki-sync) |
-| **Tags** | `latest`, `2.0.0` |
-| **Platforms** | `linux/amd64`, `linux/arm64` |
+| Image | [`korjwl11/toki-sync`](https://hub.docker.com/r/korjwl11/toki-sync) |
+| Tags | `latest`, `2.0.0` |
+| Platforms | `linux/amd64`, `linux/arm64` |
 
 ### Standalone (default)
 
@@ -103,7 +103,7 @@ This starts a ClickHouse container alongside toki-sync for scalable event storag
 
 ## How it works
 
-```
+```text
 [Device A]  [Device B]  [Device C]
 toki daemon  toki daemon  toki daemon
      +-- TCP+TLS (bincode) --+
@@ -133,7 +133,7 @@ toki daemon  toki daemon  toki daemon
 
 ---
 
-## Privacy & Security
+## Privacy and security
 
 - **No prompt access** -- only token counts and metadata (model, session ID, project name). Never prompts or responses.
 - **TLS everywhere** -- all sync traffic encrypted. Caddy handles Let's Encrypt certificates automatically.
@@ -142,26 +142,20 @@ toki daemon  toki daemon  toki daemon
 
 ---
 
-## Deployment Guides
-
-| Scenario | Guide | Description |
-|----------|-------|-------------|
-| Caddy + DuckDNS | [Guide](docs/deploy-caddy-duckdns.md) | Automatic TLS with free domain (recommended) |
-| Existing proxy | [Guide](docs/deploy-reverse-proxy.md) | nginx, Traefik, etc. |
-| Self-signed TLS | [Guide](docs/deploy-self-signed.md) | IP-only servers, no domain |
-| Local / LAN | [Guide](docs/deploy-local.md) | Development and testing |
-
-See also: [Backup & Restore](docs/backup.md) | [Troubleshooting](docs/troubleshooting.md)
-
----
-
 ## Documentation
 
-| Document | Description |
-|----------|-------------|
-| [Architecture & Design](docs/DESIGN.md) | Sync protocol, cursor management, security model, scaling |
-| [Configuration Reference](docs/CONFIGURATION.md) | All TOML options, defaults, environment variables |
-| [HTTP API Reference](docs/API.md) | All endpoints, request/response examples, authentication |
+Start with the [deployment guide](docs/deployment.md) to pick a scenario, then refer to the documents below as needed.
+
+| Document | When to read |
+|---|---|
+| [Deployment guide](docs/deployment.md) | Pick a scenario (A/B/C/D) based on your infra |
+| [Architecture and design](docs/DESIGN.md) | Sync protocol, cursor management, security model, scaling |
+| [Configuration reference](docs/CONFIGURATION.md) | All TOML options, defaults, environment variables |
+| [HTTP API reference](docs/API.md) | All endpoints, request/response examples, authentication |
+| [Custom dashboards](docs/custom-dashboard.md) | Build a custom UI on top of the toki-sync query API |
+| [Backup and restore](docs/backup.md) | Volume layout, hot/cold backup, recovery |
+| [Troubleshooting](docs/troubleshooting.md) | Diagnose connection, TLS, dashboard, and sync issues |
+| [Contributing](CONTRIBUTING.md) | Dev setup, branch naming, commit conventions, DCO |
 
 ---
 

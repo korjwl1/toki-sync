@@ -1,17 +1,17 @@
-# Custom Dashboard Guide
+# Custom dashboards
 
-This guide explains how to build custom dashboards using the toki-sync API for visualizing token usage data.
+Build a custom UI on top of the toki-sync API to visualize token usage data.
 
 ## Overview
 
 toki-sync provides a query API with JWT authentication and scope-based access control. All queries go through toki-sync, which enforces user-level data isolation. When VictoriaMetrics is configured (optional), a PromQL proxy is also available that injects label filters into PromQL expressions before forwarding.
 
-There are two approaches for building dashboards:
+There are two approaches:
 
-- **Tier 1: Direct Connection** -- Frontend talks directly to toki-sync API
-- **Tier 2: Custom Backend** -- Your backend mediates between frontend and toki-sync (optionally with direct VictoriaMetrics access)
+- **Tier 1: direct connection** — frontend talks directly to the toki-sync API.
+- **Tier 2: custom backend** — your backend mediates between frontend and toki-sync, optionally with direct VictoriaMetrics access.
 
-## Tier 1: Direct Connection
+## Tier 1: direct connection
 
 Architecture: `Frontend -> toki-sync API`
 
@@ -21,101 +21,101 @@ This is the simplest approach. Your frontend authenticates with toki-sync and qu
 
 1. Obtain a JWT by posting credentials:
 
-```
-POST /login
-Content-Type: application/json
+   ```http
+   POST /login
+   Content-Type: application/json
 
-{"username": "alice", "password": "..."}
-```
+   {"username": "alice", "password": "..."}
+   ```
 
-Response includes `access_token` and `refresh_token`.
+   Response includes `access_token` and `refresh_token`.
 
 2. Include the JWT on all subsequent requests:
 
-```
-Authorization: Bearer <access_token>
-```
+   ```http
+   Authorization: Bearer <access_token>
+   ```
 
 3. Refresh expired tokens:
 
-```
-POST /token/refresh
-Content-Type: application/json
+   ```http
+   POST /token/refresh
+   Content-Type: application/json
 
-{"refresh_token": "<refresh_token>"}
-```
+   {"refresh_token": "<refresh_token>"}
+   ```
 
-### Query Endpoints
+### Query endpoints
 
 **Instant query:**
 
-```
+```http
 GET /api/v1/query?query=<promql>&time=<unix_ts>&scope=<scope>
 ```
 
 **Range query:**
 
-```
+```http
 GET /api/v1/query_range?query=<promql>&start=<unix_ts>&end=<unix_ts>&step=<duration>&scope=<scope>
 ```
 
-### Scope Parameter
+### Scope parameter
 
-The `scope` parameter controls whose data is visible:
+The `scope` parameter controls whose data is visible.
 
 | Scope | Description | Requirement |
-|-------|-------------|-------------|
-| `self` (default) | Only the authenticated user's data | Always allowed |
-| `team:<TEAM_ID>` | All members of the specified team | `max_query_scope` must be `team` or `all`; user must be a team member |
-| `all` | All users (organization-wide) | `max_query_scope` must be `all` |
+|---|---|---|
+| `self` (default) | The authenticated user's data | Always allowed |
+| `team:<TEAM_ID>` | All members of the team | See below |
+| `all` | All users (organization-wide) | `max_query_scope = "all"` |
 
-Admin users bypass all scope restrictions and always see all data regardless of the `scope` parameter or server configuration.
+`team:<TEAM_ID>` requires `max_query_scope` to be `"team"` or `"all"`, and the authenticated user must be a member of the team. Admin users bypass all scope restrictions and always see all data regardless of the `scope` parameter or server configuration.
 
-### Example PromQL Queries
+### Example PromQL queries
 
 **My total token usage:**
 
-```
+```http
 GET /api/v1/query?query=sum(toki_tokens_total)
 ```
 
 **My usage by model (time series):**
 
-```
+```http
 GET /api/v1/query_range?query=sum by (model)(increase(toki_tokens_total[1h]))&start=1711584000&end=1711670400&step=3600
 ```
 
 **Team leaderboard (tokens per user):**
 
-```
+```http
 GET /api/v1/query?query=sum by (user)(toki_tokens_total)&scope=team:TEAM_ID
 ```
 
 **Organization total usage:**
 
-```
+```http
 GET /api/v1/query?query=sum(toki_tokens_total)&scope=all
 ```
 
 **Usage over time (hourly rate):**
 
-```
+```http
 GET /api/v1/query_range?query=sum(increase(toki_tokens_total[1h]))&start=...&end=...&step=3600
 ```
 
 **Usage by provider:**
 
-```
+```http
 GET /api/v1/query_range?query=sum by (provider)(increase(toki_tokens_total[1h]))&start=...&end=...&step=3600
 ```
 
-## Tier 2: Custom Backend
+## Tier 2: custom backend
 
 Architecture: `Frontend -> Your Backend -> toki-sync (user/team info + event data)`
 
 Use this approach when you need fine-grained access control beyond `self`/`team`/`all`, or when you want to combine toki-sync data with other data sources.
 
-### How It Works
+### How it works
 
 1. Your backend authenticates users via toki-sync JWT (verify the token using the same JWT secret)
 2. Your backend fetches user/team info from toki-sync API:
@@ -125,17 +125,17 @@ Use this approach when you need fine-grained access control beyond `self`/`team`
 3. Your backend queries toki-sync API endpoints for event data
 4. Your backend applies its own permission logic before returning data to the frontend
 
-### Direct VictoriaMetrics Query (optional)
+### Direct VictoriaMetrics query (optional)
 
 If VictoriaMetrics is configured as the `[backend].vm_url`, you can also query it directly on your internal network:
 
-```
+```http
 GET http://victoriametrics:8428/api/v1/query_range?query=...&start=...&end=...&step=...
 ```
 
 When querying VictoriaMetrics directly, you are responsible for injecting `user="..."` or `user=~"..."` label filters to enforce access control. This is only available when VictoriaMetrics is deployed separately.
 
-## Available Labels
+## Available labels
 
 All toki metrics include these labels:
 
@@ -149,7 +149,7 @@ All toki metrics include these labels:
 | `project` | Project name | `my-app` |
 | `type` | Token type | `input`, `output`, `cache_create`, `cache_read` |
 
-## Token Types
+## Token types
 
 The `type` label distinguishes different token categories:
 
@@ -164,7 +164,7 @@ The `type` label distinguishes different token categories:
 sum(toki_tokens_total{type=~"input|output"})
 ```
 
-## Important Notes
+## Important notes
 
 - `scope=all` requires the server administrator to set `max_query_scope` to `all` in server settings
 - `scope=team:ID` requires `max_query_scope` to be `team` or `all`

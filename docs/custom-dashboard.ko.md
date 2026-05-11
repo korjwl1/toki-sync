@@ -1,15 +1,15 @@
-# Custom Dashboard Guide
+# 커스텀 대시보드
 
-toki-sync API를 사용하여 토큰 사용량 데이터를 시각화하는 커스텀 대시보드를 구축하는 방법을 설명합니다.
+toki-sync API 위에 자체 UI를 만들어 토큰 사용량을 시각화하는 방법을 설명합니다.
 
 ## 개요
 
-toki-sync는 JWT 인증과 스코프 기반 접근 제어가 포함된 쿼리 API를 제공합니다. 모든 쿼리는 toki-sync를 통해 전달되며 사용자 수준의 데이터 격리를 시행합니다. VictoriaMetrics가 설정된 경우(선택) PromQL 표현식에 레이블 필터를 주입하여 전달하는 PromQL 프록시도 사용 가능합니다.
+toki-sync는 JWT 인증과 스코프 기반 접근 제어가 포함된 쿼리 API를 제공합니다. 모든 쿼리는 toki-sync를 통해 전달되며 사용자 수준의 데이터 격리를 시행합니다. VictoriaMetrics가 설정된 경우(선택) PromQL 표현식에 라벨 필터를 주입하여 전달하는 PromQL 프록시도 사용 가능합니다.
 
-대시보드 구축에는 두 가지 방식이 있습니다:
+두 가지 방식이 있습니다.
 
-- **Tier 1: 직접 연결** -- 프론트엔드가 toki-sync API와 직접 통신
-- **Tier 2: 커스텀 백엔드** -- 자체 백엔드가 프론트엔드와 toki-sync 사이를 중개 (선택적으로 VictoriaMetrics 직접 접근)
+- **Tier 1: 직접 연결** — 프론트엔드가 toki-sync API와 직접 통신.
+- **Tier 2: 커스텀 백엔드** — 자체 백엔드가 프론트엔드와 toki-sync 사이를 중개 (선택적으로 VictoriaMetrics 직접 접근).
 
 ## Tier 1: 직접 연결
 
@@ -19,93 +19,93 @@ toki-sync는 JWT 인증과 스코프 기반 접근 제어가 포함된 쿼리 AP
 
 ### 인증
 
-1. 자격 증명을 POST하여 JWT를 획득합니다:
+1. 자격 증명을 POST하여 JWT를 획득합니다.
 
-```
-POST /login
-Content-Type: application/json
+   ```http
+   POST /login
+   Content-Type: application/json
 
-{"username": "alice", "password": "..."}
-```
+   {"username": "alice", "password": "..."}
+   ```
 
-응답에 `access_token`과 `refresh_token`이 포함됩니다.
+   응답에 `access_token`과 `refresh_token`이 포함됩니다.
 
-2. 이후 모든 요청에 JWT를 포함합니다:
+2. 이후 모든 요청에 JWT를 포함합니다.
 
-```
-Authorization: Bearer <access_token>
-```
+   ```http
+   Authorization: Bearer <access_token>
+   ```
 
-3. 만료된 토큰 갱신:
+3. 만료된 토큰 갱신.
 
-```
-POST /token/refresh
-Content-Type: application/json
+   ```http
+   POST /token/refresh
+   Content-Type: application/json
 
-{"refresh_token": "<refresh_token>"}
-```
+   {"refresh_token": "<refresh_token>"}
+   ```
 
 ### 쿼리 엔드포인트
 
 **즉시 쿼리:**
 
-```
+```http
 GET /api/v1/query?query=<promql>&time=<unix_ts>&scope=<scope>
 ```
 
 **범위 쿼리:**
 
-```
+```http
 GET /api/v1/query_range?query=<promql>&start=<unix_ts>&end=<unix_ts>&step=<duration>&scope=<scope>
 ```
 
 ### Scope 파라미터
 
-`scope` 파라미터는 누구의 데이터가 보이는지를 제어합니다:
+`scope` 파라미터는 누구의 데이터가 보이는지를 제어합니다.
 
 | Scope | 설명 | 요구사항 |
-|-------|------|----------|
-| `self` (기본값) | 인증된 사용자 본인의 데이터만 | 항상 허용 |
-| `team:<TEAM_ID>` | 지정된 팀의 모든 멤버 데이터 | `max_query_scope`가 `team` 또는 `all`이어야 하며, 사용자가 해당 팀의 멤버여야 함 |
-| `all` | 모든 사용자 (조직 전체) | `max_query_scope`가 `all`이어야 함 |
+|---|---|---|
+| `self` (기본값) | 인증된 사용자 본인 데이터 | 항상 허용 |
+| `team:<TEAM_ID>` | 지정된 팀의 모든 멤버 | 아래 참고 |
+| `all` | 모든 사용자 (조직 전체) | `max_query_scope = "all"` |
 
-관리자(Admin) 사용자는 모든 스코프 제한을 우회하며, `scope` 파라미터나 서버 설정에 관계없이 항상 모든 데이터를 볼 수 있습니다.
+`team:<TEAM_ID>`는 `max_query_scope`가 `"team"` 또는 `"all"`이어야 하며, 인증된 사용자가 해당 팀의 멤버여야 합니다. 관리자 사용자는 스코프 제한을 모두 우회하며 항상 전체 데이터를 볼 수 있습니다.
 
 ### PromQL 쿼리 예시
 
 **내 총 토큰 사용량:**
 
-```
+```http
 GET /api/v1/query?query=sum(toki_tokens_total)
 ```
 
 **모델별 내 사용량 (시계열):**
 
-```
+```http
 GET /api/v1/query_range?query=sum by (model)(increase(toki_tokens_total[1h]))&start=1711584000&end=1711670400&step=3600
 ```
 
 **팀 리더보드 (사용자별 토큰):**
 
-```
+```http
 GET /api/v1/query?query=sum by (user)(toki_tokens_total)&scope=team:TEAM_ID
 ```
 
 **조직 전체 사용량:**
 
-```
+```http
 GET /api/v1/query?query=sum(toki_tokens_total)&scope=all
 ```
 
 **시간별 사용량 (시간당 증가율):**
 
-```
+```http
 GET /api/v1/query_range?query=sum(increase(toki_tokens_total[1h]))&start=...&end=...&step=3600
 ```
 
 **프로바이더별 사용량:**
 
-```
+```http
 GET /api/v1/query_range?query=sum by (provider)(increase(toki_tokens_total[1h]))&start=...&end=...&step=3600
 ```
 
@@ -127,9 +127,9 @@ GET /api/v1/query_range?query=sum by (provider)(increase(toki_tokens_total[1h]))
 
 ### VictoriaMetrics 직접 쿼리 (선택)
 
-`[backend].vm_url`로 VictoriaMetrics가 설정된 경우, 내부 네트워크에서 직접 쿼리할 수도 있습니다:
+`[backend].vm_url`로 VictoriaMetrics가 설정된 경우, 내부 네트워크에서 직접 쿼리할 수도 있습니다.
 
-```
+```http
 GET http://victoriametrics:8428/api/v1/query_range?query=...&start=...&end=...&step=...
 ```
 

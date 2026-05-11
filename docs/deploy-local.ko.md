@@ -2,6 +2,8 @@
 
 개발이나 테스트용 localhost 배포입니다. 프로덕션에서는 권장하지 않습니다.
 
+> 다른 환경이면 [Caddy + DuckDNS](deploy-caddy-duckdns.ko.md) (프로덕션 자동 TLS), [기존 리버스 프록시](deploy-reverse-proxy.ko.md) (이미 운영 중), [자체 서명 TLS](deploy-self-signed.ko.md) (IP 전용 서버)을 참고하세요.
+
 ---
 
 ## 사전 요구사항

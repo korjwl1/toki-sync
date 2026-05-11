@@ -1,6 +1,8 @@
-# Scenario D: Local / LAN (No TLS)
+# Scenario D: local / LAN (no TLS)
 
 For development or testing on localhost. Not recommended for production.
+
+> Different setup? See [Caddy + DuckDNS](deploy-caddy-duckdns.md) for production with auto TLS, [existing reverse proxy](deploy-reverse-proxy.md) if you already run one, or [self-signed TLS](deploy-self-signed.md) for IP-only servers.
 
 ---
 
@@ -10,7 +12,7 @@ For development or testing on localhost. Not recommended for production.
 
 ---
 
-## Step 1: Clone and configure
+## Step 1: clone and configure
 
 ```bash
 git clone https://github.com/korjwl1/toki-sync.git
@@ -30,7 +32,7 @@ TOKI_EXTERNAL_URL=http://localhost:9091
 
 ---
 
-## Step 2: Expose ports
+## Step 2: expose ports
 
 Add port mappings to `docker-compose.yml` under `toki-sync-server`:
 
@@ -47,7 +49,7 @@ services:
 
 ---
 
-## Step 3: Deploy
+## Step 3: deploy
 
 ```bash
 docker compose up -d
@@ -55,7 +57,7 @@ docker compose up -d
 
 ---
 
-## Step 4: Connect
+## Step 4: connect
 
 ```bash
 toki settings sync enable --server localhost --no-tls

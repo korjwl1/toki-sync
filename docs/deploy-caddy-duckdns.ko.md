@@ -2,6 +2,8 @@
 
 기존 리버스 프록시가 없는 서버에 적합합니다. Caddy가 Let's Encrypt를 통해 TLS 인증서를 자동으로 관리하고, DuckDNS가 서버를 가리키는 무료 도메인 이름을 제공합니다.
 
+> 다른 환경이면 [기존 리버스 프록시](deploy-reverse-proxy.ko.md) (nginx/Traefik 운영 중), [자체 서명 TLS](deploy-self-signed.ko.md) (IP 전용 서버), [로컬 / LAN](deploy-local.ko.md) (개발용)을 참고하세요.
+
 ---
 
 ## 사전 요구사항

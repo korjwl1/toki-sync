@@ -2,7 +2,7 @@
 
 서버 설정은 `config/toki-sync.toml` 파일에 저장됩니다. `${VAR_NAME}` 문법으로 환경변수를 확장할 수 있습니다 — 변수가 설정되지 않으면 빈 문자열로 확장됩니다.
 
-## 예시
+## 예시 설정
 
 ```toml
 [server]
@@ -31,7 +31,7 @@ fjall_path = "/data/events.fjall"
 # clickhouse_url = "http://clickhouse:8123"
 
 [features]
-# max_query_scope = "365d"
+# max_query_scope = "self"   # "self" | "team" | "all"
 
 [log]
 level = "info"
@@ -40,38 +40,66 @@ json = true
 
 ---
 
-## `[server]`
+## Server 섹션
+
+`[server]` 섹션.
 
 | 키 | 타입 | 기본값 | 설명 |
 |----|------|--------|------|
 | `bind` | string | `0.0.0.0` | 바인드할 네트워크 인터페이스 |
-| `http_port` | integer | `9091` | HTTP API 포트 (REST, 대시보드, PromQL 프록시) |
+| `http_port` | integer | `9091` | HTTP API 포트 (REST, 대시보드, 쿼리 엔드포인트) |
 | `tcp_port` | integer | `9090` | TCP 동기화 프로토콜 포트 (toki 데몬 연결) |
-| `external_url` | string | *(빈값)* | JWT `iss` 클레임 및 OIDC 리다이렉트 URI 도출에 사용되는 공개 URL. 예: `https://sync.example.com` |
-| `max_concurrent_writes` | integer | `10` | 이벤트 스토어 동시 배치 쓰기 최대 수. 여러 디바이스가 동시에 동기화할 때 thundering-herd 압력을 제한합니다 |
-| `trust_proxy` | boolean | `false` | 리버스 프록시의 `X-Forwarded-For` 및 `X-Real-IP` 헤더를 신뢰하여 클라이언트 IP를 확인합니다 (무차별 대입 추적용). 신뢰할 수 있는 리버스 프록시 뒤에 있을 때만 활성화하세요 |
+| `external_url` | string | *(빈값)* | JWT `iss`와 OIDC 리다이렉트 URI에 사용되는 공개 URL. 아래 참고 |
+| `max_concurrent_writes` | integer | `10` | 이벤트 스토어 동시 배치 쓰기 최대 수 |
+| `trust_proxy` | boolean | `false` | `X-Forwarded-For` / `X-Real-IP` 헤더 신뢰 여부. 아래 참고 |
+
+#### `external_url`
+
+JWT `iss` 클레임과 OIDC 리다이렉트 URI 도출에 사용됩니다. 예: `https://sync.example.com`.
+
+#### `max_concurrent_writes`
+
+여러 디바이스가 동시에 동기화할 때 thundering-herd 압력을 제한합니다. 한도를 넘는 배치 쓰기는 큐잉됩니다.
+
+#### `trust_proxy`
+
+`true`일 때 서버가 프록시 헤더에서 클라이언트 IP를 읽어 무차별 대입 추적에 사용합니다. 신뢰할 수 있는 리버스 프록시 뒤에 있을 때만 활성화하세요. 그렇지 않으면 클라이언트가 IP를 위조할 수 있습니다.
 
 ---
 
-## `[auth]`
+## Auth 섹션
+
+`[auth]` 섹션.
 
 | 키 | 타입 | 기본값 | 설명 |
 |----|------|--------|------|
-| `jwt_secret` | string | — | **필수.** JWT 토큰 HS256 서명 키. `${JWT_SECRET}`으로 환경변수에서 읽을 수 있습니다. `openssl rand -base64 32`로 생성 |
-| `access_token_ttl_secs` | integer | `3600` | 액세스 토큰 수명 (초 단위, 기본: 1시간) |
-| `refresh_token_ttl_secs` | integer | `7776000` | 리프레시 토큰 수명 (초 단위, 기본: 90일) |
+| `jwt_secret` | string | — | **필수.** HS256 서명 키. 아래 참고 |
+| `access_token_ttl_secs` | integer | `3600` | 액세스 토큰 수명 (초, 기본: 1시간) |
+| `refresh_token_ttl_secs` | integer | `7776000` | 리프레시 토큰 수명 (초, 기본: 90일) |
 | `brute_force_max_attempts` | integer | `5` | 잠금 전 최대 로그인 실패 횟수 |
-| `brute_force_window_secs` | integer | `300` | 실패 횟수 추적 윈도우 (기본: 5분) |
-| `brute_force_lockout_secs` | integer | `900` | 최대 횟수 초과 후 잠금 기간 (기본: 15분) |
-| `registration_mode` | string | `"closed"` | 셀프 회원가입 제어: `"open"` (누구나 가입 가능), `"approval"` (가입 시 관리자 승인 필요), `"closed"` (관리자만 사용자 생성 가능) |
-| `oidc_issuer` | string | *(빈값)* | OIDC 프로바이더 URL (예: `https://accounts.google.com`). 빈값 = OIDC 비활성화 |
+| `brute_force_window_secs` | integer | `300` | 추적 윈도우 (기본: 5분) |
+| `brute_force_lockout_secs` | integer | `900` | 잠금 기간 (기본: 15분) |
+| `registration_mode` | string | `"closed"` | 셀프 가입 정책. 아래 참고 |
+| `oidc_issuer` | string | *(빈값)* | OIDC 프로바이더 URL (예: `https://accounts.google.com`) |
 | `oidc_client_id` | string | *(빈값)* | ID 프로바이더에서 발급한 OIDC 클라이언트 ID |
 | `oidc_client_secret` | string | *(빈값)* | OIDC 클라이언트 시크릿 |
 | `oidc_redirect_uri` | string | *(빈값)* | OIDC 콜백 URL (예: `https://sync.example.com/auth/callback`) |
 
+#### `jwt_secret`
+
+`${JWT_SECRET}`으로 환경변수에서 읽을 수 있습니다. `openssl rand -base64 32`로 강한 값을 생성하세요.
+
+#### `registration_mode`
+
+`POST /register`를 통한 셀프 가입의 세 가지 정책:
+
+- `"open"` — 누구나 가입 가능.
+- `"approval"` — 가입은 pending 상태로 생성되며, 관리자가 `/admin/pending/:id/approve`로 승인해야 합니다.
+- `"closed"` — 관리자만 `/admin/users`로 사용자 생성 가능.
+
 ### 무차별 대입 방지
 
-무차별 대입 방지는 IP + 사용자명 조합별로 로그인 실패 횟수를 추적합니다. `brute_force_window_secs` 내에 `brute_force_max_attempts`를 초과하면 해당 IP+사용자명 쌍이 `brute_force_lockout_secs` 동안 잠깁니다. `/login`, `/register`, `/token/refresh` 엔드포인트에 적용됩니다.
+로그인 실패는 IP + 사용자명 쌍 단위로 추적됩니다. `brute_force_window_secs` 내에 `brute_force_max_attempts`를 초과하면 해당 쌍이 `brute_force_lockout_secs` 동안 잠깁니다. `/login`, `/register`, `/token/refresh`에 적용됩니다.
 
 ### OIDC 설정
 
@@ -88,14 +116,24 @@ oidc_redirect_uri = "https://sync.example.com/auth/callback"
 
 ---
 
-## `[storage]`
+## Storage 섹션
+
+`[storage]` 섹션.
 
 | 키 | 타입 | 기본값 | 설명 |
 |----|------|--------|------|
 | `backend` | string | `sqlite` | 데이터베이스 백엔드: `sqlite` 또는 `postgres` |
-| `sqlite_path` | string | `./data/toki_sync.db` | SQLite 데이터베이스 파일 경로. `backend = "sqlite"`일 때 사용 |
-| `db_path` | string | *(빈값)* | `sqlite_path`의 레거시 별칭 (하위 호환). 설정되어 있고 `sqlite_path`가 기본값이면 이 값을 사용 |
-| `postgres_url` | string | *(빈값)* | PostgreSQL 연결 문자열. `backend = "postgres"`일 때 사용. 예: `postgres://user:pass@host/dbname` |
+| `sqlite_path` | string | `./data/toki_sync.db` | SQLite 파일 경로. `backend = "sqlite"`일 때 사용 |
+| `db_path` | string | *(빈값)* | `sqlite_path`의 레거시 별칭. 아래 참고 |
+| `postgres_url` | string | *(빈값)* | PostgreSQL 연결 문자열. 아래 참고 |
+
+#### `db_path`
+
+과거 설정은 `sqlite_path` 대신 `db_path`를 사용했습니다. 하위 호환을 위해 두 키가 공존합니다 — `db_path`가 설정되어 있고 `sqlite_path`가 기본값이면 `db_path`가 사용됩니다. 새 설정은 `sqlite_path`만 쓰세요.
+
+#### `postgres_url`
+
+`backend = "postgres"`일 때 사용. 예: `postgres://user:pass@host/dbname`.
 
 ### SQLite vs PostgreSQL
 
@@ -116,7 +154,9 @@ postgres_url = "postgres://toki:password@db:5432/toki_sync"
 
 ---
 
-## `[events]`
+## Events 섹션
+
+`[events]` 섹션.
 
 | 키 | 타입 | 기본값 | 설명 |
 |----|------|--------|------|
@@ -145,17 +185,9 @@ Docker Compose에서 ClickHouse를 사용하려면 `docker compose --profile cli
 
 ---
 
-## `[backend]` (선택, 레거시)
+## Log 섹션
 
-| 키 | 타입 | 기본값 | 설명 |
-|----|------|--------|------|
-| `vm_url` | string | *(빈값)* | VictoriaMetrics HTTP 엔드포인트. 외부 VictoriaMetrics 인스턴스와 선택적 PromQL 프록시를 사용할 때만 필요 |
-
-이 섹션은 선택 사항입니다. 레거시 PromQL 프록시 호환성(예: `toki report query --remote` 또는 Toki Monitor 서버 모드)에만 필요합니다. 설정하지 않으면 `/api/v1/query` 및 `/api/v1/query_range` 엔드포인트가 VictoriaMetrics가 설정되지 않았음을 나타내는 오류를 반환합니다.
-
----
-
-## `[log]`
+`[log]` 섹션.
 
 | 키 | 타입 | 기본값 | 설명 |
 |----|------|--------|------|
@@ -164,15 +196,17 @@ Docker Compose에서 ClickHouse를 사용하려면 `docker compose --profile cli
 
 ---
 
-## `[features]`
+## Features 섹션
+
+`[features]` 섹션.
 
 | 키 | 타입 | 기본값 | 설명 |
 |----|------|--------|------|
-| `max_query_scope` | string | *(빈값)* | PromQL 쿼리의 최대 시간 범위 (예: `"365d"`, `"90d"`). 빈값 = 무제한. 너무 많은 데이터를 조회하는 고비용 쿼리를 방지합니다 |
+| `max_query_scope` | string | `"self"` | 비관리자가 `/api/v1/toki/query`에서 요청할 수 있는 최대 scope. `self`, `team`, `all` 중 하나. 관리자는 항상 `all` |
 
 ---
 
-## 환경변수
+## 환경 변수
 
 환경변수는 두 가지 방식으로 사용됩니다:
 1. **TOML 내부**: `toki-sync.toml`에서 `${VAR_NAME}` 문법으로 값 확장
@@ -180,11 +214,11 @@ Docker Compose에서 ClickHouse를 사용하려면 `docker compose --profile cli
 
 | 변수 | 필수 | 설명 |
 |------|------|------|
-| `TOKI_ADMIN_PASSWORD` | O | 관리자 계정 비밀번호. 첫 서버 시작 시 자동 생성 |
-| `JWT_SECRET` | O | JWT 서명 키. 생성: `openssl rand -base64 32` |
-| `TOKI_EXTERNAL_URL` | O | 공개 URL (예: `https://yourserver.duckdns.org`). JWT `iss` 및 OIDC 리다이렉트에 사용 |
+| `TOKI_ADMIN_PASSWORD` | 필수 | 관리자 계정 비밀번호. 첫 서버 시작 시 자동 생성 |
+| `JWT_SECRET` | 필수 | JWT 서명 키. 생성: `openssl rand -base64 32` |
+| `TOKI_EXTERNAL_URL` | 필수 | 공개 URL (예: `https://yourserver.duckdns.org`). JWT `iss` 및 OIDC 리다이렉트에 사용 |
 | `DUCKDNS_TOKEN` | Caddy 프로필만 | Let's Encrypt DNS-01 챌린지용 DuckDNS API 토큰 |
-| `TOKI_VERSION` | X | Docker 이미지 태그 (기본: `latest`) |
+| `TOKI_VERSION` | - | Docker 이미지 태그 (기본: `latest`) |
 
 ### `.env` 예시
 
@@ -207,11 +241,11 @@ TOKI_VERSION=0.1.0
 
 ## 설정 로딩
 
-서버는 다음 순서로 설정을 로드합니다:
+서버는 다음 순서로 설정을 로드합니다.
 
-1. `config/toki-sync.toml` 읽기 (`--config` 플래그로 경로 지정 가능)
-2. `${VAR_NAME}` 플레이스홀더를 환경변수 값으로 확장
-3. TOML을 설정 구조체로 파싱
-4. 누락된 필드에 기본값 적용
+1. `config/toki-sync.toml` 읽기 (`--config` 플래그로 경로 지정 가능).
+2. `${VAR_NAME}` 플레이스홀더를 환경 변수 값으로 확장.
+3. TOML을 설정 구조체로 파싱.
+4. 누락된 필드에 기본값 적용.
 
-설정 파일이 없으면 환경변수에서 `JWT_SECRET`을 읽고 나머지는 내장 기본값을 사용합니다 (JWT_SECRET이 미설정이면 `change-me-in-production`으로 대체).
+설정 파일이 없으면 환경 변수에서 `JWT_SECRET`을 읽고 나머지는 내장 기본값을 사용합니다. `JWT_SECRET`이 비어 있으면 `change-me-in-production`으로 대체됩니다.

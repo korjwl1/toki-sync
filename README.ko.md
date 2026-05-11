@@ -5,7 +5,7 @@
 <h1 align="center">toki-sync</h1>
 
 <p align="center">
-  <b><a href="https://github.com/korjwl1/toki">toki</a>를 위한 셀프 호스팅 멀티 디바이스 토큰 사용량 동기화 서버</b><br>
+  <b>여러 디바이스의 토큰 사용량을 동기화하는 셀프호스트 서버. <a href="https://github.com/korjwl1/toki">toki</a> 생태계용</b><br>
   모든 기기의 AI 도구 사용량을 수집하고, 로컬에 이벤트를 저장하며, 통합 대시보드를 제공합니다.
 </p>
 
@@ -22,7 +22,7 @@
 
 ---
 
-## Quick Start
+## 빠른 시작
 
 `git clone` 불필요. `docker-compose.yml`과 `.env`만 만들면 됩니다.
 
@@ -30,9 +30,9 @@
 
 ```yaml
 services:
-  toki-sync:
+  toki-sync-server:
     image: korjwl11/toki-sync:latest
-    container_name: toki-sync
+    container_name: toki-sync-server
     restart: unless-stopped
     ports:
       - "9090:9090"   # 동기화 프로토콜 (TCP)
@@ -71,13 +71,13 @@ toki settings sync enable --server <서버-IP-또는-도메인>
 
 ## Docker 이미지
 
-| | |
+| 항목 | 값 |
 |---|---|
-| **이미지** | [`korjwl11/toki-sync`](https://hub.docker.com/r/korjwl11/toki-sync) |
-| **태그** | `latest`, `2.0.0` |
-| **플랫폼** | `linux/amd64`, `linux/arm64` |
+| 이미지 | [`korjwl11/toki-sync`](https://hub.docker.com/r/korjwl11/toki-sync) |
+| 태그 | `latest`, `2.0.0` |
+| 플랫폼 | `linux/amd64`, `linux/arm64` |
 
-### Standalone (기본)
+### 단독 실행 (기본)
 
 **Fjall** (내장 이벤트 스토어) + **SQLite** (메타데이터) 사용. 외부 의존성 없이 단일 컨테이너만으로 동작합니다.
 
@@ -103,7 +103,7 @@ toki-sync와 함께 ClickHouse 컨테이너를 시작하여 확장 가능한 이
 
 ## 작동 방식
 
-```
+```text
 [디바이스 A]  [디바이스 B]  [디바이스 C]
 toki daemon   toki daemon   toki daemon
      +-- TCP+TLS (bincode) --+
@@ -115,21 +115,21 @@ toki daemon   toki daemon   toki daemon
                       +-- Fjall (이벤트) 또는 ClickHouse (선택)
 ```
 
-- **toki 데몬**이 persistent TLS 연결을 유지하고, 이벤트를 배치(1,000/배치)로 zstd 압축 후 ACK 기반 흐름 제어로 전송
-- **toki-sync 서버**가 사용자를 인증하고, SQLite에 메타데이터를 저장하며, 이벤트 스토어에 기록
-- **중복 제거**를 `msg_id` 기반으로 처리하여 재연결 시에도 정확히 한 번 전달 보장
+- **toki 데몬**이 지속 TLS 연결을 유지하고, 이벤트를 배치(1,000/배치)로 zstd 압축 후 ACK 기반 흐름 제어로 전송합니다
+- **toki-sync 서버**가 사용자를 인증하고, SQLite에 메타데이터를 저장하며, 이벤트 스토어에 기록합니다
+- **중복 제거**는 `msg_id`로 처리하여 재연결 시에도 정확히 한 번 전달을 보장합니다
 
 ---
 
 ## 기능
 
-- **멀티 디바이스 동기화** -- TCP 바이너리 프로토콜, zstd 압축, ACK 흐름 제어, 재연결 시 delta-sync
-- **Device code 인증** -- 브라우저 기반 device code flow, OIDC (Google, GitHub 등), 비밀번호 로그인
+- **멀티 디바이스 동기화** -- TCP 바이너리 프로토콜, zstd 압축, ACK 흐름 제어, 재연결 시 증분 동기화 (delta sync)
+- **디바이스 코드 인증** -- 브라우저 기반 device code flow, OIDC (Google, GitHub 등), 비밀번호 로그인
 - **웹 대시보드** -- 차트, 시간 범위 선택, 디바이스 목록, 팀 뷰
 - **팀** -- 역할 기반 접근 제어로 팀 멤버 간 집계 쿼리
 - **듀얼 스토리지** -- SQLite (설정 불필요) 또는 PostgreSQL; Fjall (내장) 또는 ClickHouse (대규모)
-- **PromQL 프록시** (선택) -- VictoriaMetrics 호환을 위한 사용자별 label injection
-- **보안** -- TLS 전구간, 무차별 대입 방지, 리프레시 토큰 로테이션
+- **PromQL 프록시** (선택) -- VictoriaMetrics 호환을 위한 사용자별 라벨 주입
+- **보안** -- 모든 구간 TLS 적용, 무차별 대입 방지, 리프레시 토큰 로테이션
 
 ---
 
@@ -142,26 +142,20 @@ toki daemon   toki daemon   toki daemon
 
 ---
 
-## 배포 가이드
-
-| 시나리오 | 가이드 | 설명 |
-|----------|--------|------|
-| Caddy + DuckDNS | [가이드](docs/deploy-caddy-duckdns.ko.md) | 무료 도메인으로 자동 TLS (권장) |
-| 기존 프록시 | [가이드](docs/deploy-reverse-proxy.ko.md) | nginx, Traefik 등 |
-| 자체 서명 TLS | [가이드](docs/deploy-self-signed.ko.md) | IP 전용 서버, 도메인 없음 |
-| 로컬 / LAN | [가이드](docs/deploy-local.ko.md) | 개발 및 테스트 |
-
-참고: [백업 및 복원](docs/backup.ko.md) | [문제 해결](docs/troubleshooting.ko.md)
-
----
-
 ## 문서
 
-| 문서 | 설명 |
-|------|------|
-| [아키텍처 & 설계](docs/DESIGN.ko.md) | Sync 프로토콜, 커서 관리, 보안 모델, 스케일링 |
-| [설정 레퍼런스](docs/CONFIGURATION.ko.md) | 전체 TOML 옵션, 기본값, 환경변수 |
+[배포 가이드](docs/deployment.ko.md)에서 시나리오를 선택한 뒤, 필요할 때 아래 문서를 참고하세요.
+
+| 문서 | 언제 읽나 |
+|---|---|
+| [배포 가이드](docs/deployment.ko.md) | 인프라에 맞는 시나리오 (A/B/C/D) 선택 |
+| [아키텍처와 설계](docs/DESIGN.ko.md) | Sync 프로토콜, 커서 관리, 보안 모델, 스케일링 |
+| [설정 레퍼런스](docs/CONFIGURATION.ko.md) | 전체 TOML 옵션, 기본값, 환경 변수 |
 | [HTTP API 레퍼런스](docs/API.ko.md) | 전체 엔드포인트, 요청/응답 예시, 인증 |
+| [커스텀 대시보드](docs/custom-dashboard.ko.md) | toki-sync 쿼리 API 위에 자체 UI 구축 |
+| [백업과 복원](docs/backup.ko.md) | 볼륨 구조, 핫/콜드 백업, 복원 |
+| [문제 해결](docs/troubleshooting.ko.md) | 연결, TLS, 대시보드, 동기화 문제 진단 |
+| [기여 가이드](CONTRIBUTING.ko.md) | 개발 환경, 브랜치 이름, 커밋 규칙, DCO |
 
 ---
 
