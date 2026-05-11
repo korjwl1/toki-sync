@@ -1,2 +1,4 @@
-[patch.'https://github.com/korjwl1/toki-sync-protocol.git']
-toki-sync-protocol = { path = "../toki_sync_protocol" }
+# Uncomment to develop toki-sync-protocol locally as a sibling directory.
+# Default build resolves the dependency from the pinned git tag in Cargo.toml.
+# [patch.'https://github.com/korjwl1/toki-sync-protocol.git']
+# toki-sync-protocol = { path = "../toki_sync_protocol" }
