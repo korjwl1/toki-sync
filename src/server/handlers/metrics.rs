@@ -265,6 +265,7 @@ fn aggregate_events_to_toki_json(
         let bucket_sec = bucket_ms / 1000;
         let group_key = match group_by {
             "project" => &event.project,
+            "device_id" => &event.device_id,
             "model" | _ => &event.model,
         };
 
@@ -519,6 +520,14 @@ mod tests {
     fn test_parse_virtual_query_by_project() {
         let r = parse_toki_virtual_query("sum by (project) (increase(usage{}[1d]))");
         assert_eq!(r.group_by, "project");
+    }
+
+    #[test]
+    fn test_parse_virtual_query_device_id() {
+        let r = parse_toki_virtual_query("sum by (device_id) (increase(events{}[1d]))");
+        assert!(!r.is_cost);
+        assert!(r.is_events);
+        assert_eq!(r.group_by, "device_id");
     }
 }
 
