@@ -46,26 +46,29 @@ async fn resolve_user_filter(
     let max_scope = state.dynamic_settings.max_query_scope().await;
     let is_admin = state.db.user_is_admin(user_id).await.map_err(AppError::internal)?;
 
-    if is_admin {
-        return Ok(UserFilter::All);
-    }
-
+    // Admins bypass max_scope enforcement, but the *requested* scope still
+    // narrows the query. An admin asking for `scope=self` should see only
+    // their own devices — otherwise device_id grouping leaks every user's
+    // devices into the dashboard's filter menu.
     match parse_scope(requested_scope) {
         Scope::Self_ => Ok(UserFilter::Single(user_id.to_string())),
         Scope::Team(team_id) => {
-            if max_scope == "self" {
+            if !is_admin && max_scope == "self" {
                 return Err(AppError::forbidden("team scope not enabled"));
             }
-            let role = state.db.get_team_member_role(&team_id, user_id).await.map_err(AppError::internal)?;
-            if role.is_none() {
-                return Err(AppError::forbidden("not a member of this team"));
+            // Admins can pull any team's data; non-admins must be members.
+            if !is_admin {
+                let role = state.db.get_team_member_role(&team_id, user_id).await.map_err(AppError::internal)?;
+                if role.is_none() {
+                    return Err(AppError::forbidden("not a member of this team"));
+                }
             }
             let members = state.db.list_team_members(&team_id).await.map_err(AppError::internal)?;
             let user_ids: Vec<String> = members.iter().map(|m| m.user_id.clone()).collect();
             Ok(UserFilter::Multiple(user_ids))
         }
         Scope::All => {
-            if max_scope != "all" {
+            if !is_admin && max_scope != "all" {
                 return Err(AppError::forbidden("global scope not enabled"));
             }
             Ok(UserFilter::All)
@@ -289,17 +292,28 @@ fn aggregate_events_to_toki_json(
         }
     }
 
-    // Compute cost if needed
+    // Compute cost if needed. Pricing table is keyed by model name; when
+    // group_by is not "model" (e.g. "project" or "device_id") the lookup
+    // returns None and cost stays absent — the client should aggregate by
+    // model when it needs cost.
     if is_cost {
-        for ((_, model), bucket) in &mut buckets {
-            bucket.cost_usd = pricing.cost(model, bucket.input, bucket.output,
+        for ((_, group_key), bucket) in &mut buckets {
+            bucket.cost_usd = pricing.cost(group_key, bucket.input, bucket.output,
                 bucket.cache_create, bucket.cache_read);
         }
     }
 
-    // Build toki JSON
+    // Build toki JSON.
+    //
+    // `buckets` is keyed by `(timestamp, group_key)`. The local-CLI-compatible
+    // shape uses the field name `model` for the group key inside each entry
+    // regardless of what dimension we grouped on — keeping it consistent
+    // means the client doesn't need to switch on the group_by parameter.
+    // `period_key` MUST also include the group key, otherwise two events
+    // with the same timestamp and same model but different `device_id`
+    // collapse into one entry (the original bug this commit fixes).
     let mut periods: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
-    for ((bucket_sec, model), bucket) in &buckets {
+    for ((bucket_sec, group_key), bucket) in &buckets {
         let ts_str = if let Some(tz) = tz {
             chrono::DateTime::from_timestamp(*bucket_sec, 0)
                 .map(|dt| dt.with_timezone(tz).format("%Y-%m-%dT%H:%M:%S").to_string())
@@ -312,7 +326,7 @@ fn aggregate_events_to_toki_json(
 
         let is_codex = bucket.provider == "codex";
         let mut entry = serde_json::json!({
-            "model": model,
+            "model": group_key,
             "input_tokens": bucket.input,
             "output_tokens": bucket.output,
             "total_tokens": bucket.usage_total,
@@ -326,10 +340,10 @@ fn aggregate_events_to_toki_json(
             entry["cache_read_input_tokens"] = serde_json::json!(bucket.cache_read);
         }
 
-        if let Some(cost) = bucket.cost_usd.or_else(|| pricing.cost(model, bucket.input, bucket.output, bucket.cache_create, bucket.cache_read)) {
+        if let Some(cost) = bucket.cost_usd.or_else(|| pricing.cost(group_key, bucket.input, bucket.output, bucket.cache_create, bucket.cache_read)) {
             entry["cost_usd"] = serde_json::json!(cost);
         }
-        let period_key = format!("{}|{}", ts_str, model);
+        let period_key = format!("{}|{}", ts_str, group_key);
         periods.entry(period_key).or_default().push(entry);
     }
 
@@ -528,6 +542,99 @@ mod tests {
         assert!(!r.is_cost);
         assert!(r.is_events);
         assert_eq!(r.group_by, "device_id");
+    }
+
+    // MARK: - Aggregation integration tests
+    //
+    // These exercise `aggregate_events_to_toki_json` end-to-end so the
+    // bug fixed in this commit (period_key collision when two events
+    // shared a timestamp + model but differed on the group-by label)
+    // stays fixed.
+
+    fn make_event(device_id: &str, model: &str, project: &str, ts_ms: i64, input: u64) -> crate::events::ServerEvent {
+        crate::events::ServerEvent {
+            device_id: device_id.to_string(),
+            user_id: "u1".to_string(),
+            msg_id: format!("{device_id}-{model}-{ts_ms}-{input}"),
+            ts_ms,
+            provider: "claude_code".to_string(),
+            model: model.to_string(),
+            project: project.to_string(),
+            input_tokens: input,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            usage_total: input,
+        }
+    }
+
+    fn parse_periods(bytes: &[u8]) -> Vec<(String, Vec<serde_json::Value>)> {
+        let v: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        let providers = v["providers"].as_object().unwrap();
+        let arr = providers.values().next().unwrap().as_array().unwrap();
+        arr.iter()
+            .map(|p| (
+                p["period"].as_str().unwrap().to_string(),
+                p["usage_per_models"].as_array().unwrap().clone(),
+            ))
+            .collect()
+    }
+
+    #[test]
+    fn test_aggregate_groups_by_device_id_without_collision() {
+        // Two devices, identical timestamp + model. Pre-fix this produced
+        // ONE entry with the two devices' tokens merged under the model
+        // name; post-fix it produces TWO entries keyed by device_id.
+        let events = vec![
+            make_event("device-a", "claude-3-opus", "/proj", 1700000000_000, 100),
+            make_event("device-b", "claude-3-opus", "/proj", 1700000000_000, 250),
+        ];
+        let pricing = crate::pricing::PricingTable::new(std::collections::HashMap::new());
+        let out = aggregate_events_to_toki_json(
+            &events, 60, 1700000000_000, 1700000060_000,
+            false, false, "device_id", &pricing, None, None,
+        ).unwrap();
+
+        let periods = parse_periods(&out);
+        assert_eq!(periods.len(), 2, "device_id grouping must split entries by device, got {periods:?}");
+        let labels: std::collections::HashSet<String> = periods.iter()
+            .flat_map(|(_, entries)| entries.iter().map(|e| e["model"].as_str().unwrap().to_string()))
+            .collect();
+        assert!(labels.contains("device-a"));
+        assert!(labels.contains("device-b"));
+    }
+
+    #[test]
+    fn test_aggregate_groups_by_model_baseline() {
+        // Default group_by=model still works: two devices, two models →
+        // each model is its own entry, devices merged.
+        let events = vec![
+            make_event("device-a", "claude-3-opus", "/proj", 1700000000_000, 100),
+            make_event("device-b", "claude-3-opus", "/proj", 1700000000_000, 50),
+            make_event("device-a", "claude-3-haiku", "/proj", 1700000000_000, 30),
+        ];
+        let pricing = crate::pricing::PricingTable::new(std::collections::HashMap::new());
+        let out = aggregate_events_to_toki_json(
+            &events, 60, 1700000000_000, 1700000060_000,
+            false, false, "model", &pricing, None, None,
+        ).unwrap();
+        let periods = parse_periods(&out);
+        assert_eq!(periods.len(), 2, "two distinct models → two entries");
+    }
+
+    #[test]
+    fn test_aggregate_groups_by_project() {
+        let events = vec![
+            make_event("device-a", "claude-3-opus", "/proj-x", 1700000000_000, 100),
+            make_event("device-a", "claude-3-opus", "/proj-y", 1700000000_000, 50),
+        ];
+        let pricing = crate::pricing::PricingTable::new(std::collections::HashMap::new());
+        let out = aggregate_events_to_toki_json(
+            &events, 60, 1700000000_000, 1700000060_000,
+            false, false, "project", &pricing, None, None,
+        ).unwrap();
+        let periods = parse_periods(&out);
+        assert_eq!(periods.len(), 2, "two projects, same model → two entries");
     }
 }
 
