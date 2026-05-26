@@ -197,6 +197,40 @@ pub async fn toki_query(
 /// This is the correct approach: instead of relying on VM's sum_over_time
 /// (which has different window semantics), we fetch raw data points and
 /// bucket them identically to the local daemon's query engine.
+/// Supported `by (...)` labels in the toki virtual query language.
+///
+/// `From<&str>` falls back to `Model` for any unknown label rather than
+/// erroring — preserves the historical "silent fallback" behavior but
+/// makes the exhaustive switch in `aggregate_events_to_toki_json` a
+/// compile-time check: adding a future label means the compiler points
+/// at every place that needs an arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroupBy {
+    Model,
+    Project,
+    DeviceId,
+}
+
+impl GroupBy {
+    fn key<'a>(&self, event: &'a crate::events::ServerEvent) -> &'a String {
+        match self {
+            GroupBy::Model     => &event.model,
+            GroupBy::Project   => &event.project,
+            GroupBy::DeviceId  => &event.device_id,
+        }
+    }
+}
+
+impl From<&str> for GroupBy {
+    fn from(s: &str) -> Self {
+        match s {
+            "project"   => GroupBy::Project,
+            "device_id" => GroupBy::DeviceId,
+            _           => GroupBy::Model,
+        }
+    }
+}
+
 ///
 /// Aggregate ServerEvents into toki JSON format.
 /// Uses the exact same bucketing logic as the local daemon (query.rs).
@@ -253,6 +287,12 @@ fn aggregate_events_to_toki_json(
     }
 
     let mut buckets: BTreeMap<(i64, String), ModelBucket> = BTreeMap::new();
+    // Cap bucket cardinality so a `scope=all` + `by (device_id)` query
+    // against a fleet of N devices doesn't balloon `buckets` past memory.
+    // Steps are already capped at 2000 buckets time-wise; with N devices
+    // we'd have up to 2000 * N entries. 50_000 is enough headroom for
+    // typical fleets but stops a runaway aggregation cold.
+    const MAX_BUCKET_ENTRIES: usize = 50_000;
 
     for event in events {
         // 1. Scan range check (EventStore already filters, but double-check)
@@ -266,13 +306,16 @@ fn aggregate_events_to_toki_json(
         if bucket_ms + step_ms <= since_ms || bucket_ms >= until_ms { continue; }
 
         let bucket_sec = bucket_ms / 1000;
-        let group_key = match group_by {
-            "project" => &event.project,
-            "device_id" => &event.device_id,
-            "model" | _ => &event.model,
-        };
+        let group_key = GroupBy::from(group_by).key(event);
 
-        let entry = buckets.entry((bucket_sec, group_key.clone())).or_default();
+        let key = (bucket_sec, group_key.clone());
+        // Hard cap: refuse to allocate new entries past the limit. Existing
+        // buckets still accumulate so the answer for already-seen
+        // (bucket, group) pairs is correct; new combinations are dropped.
+        if buckets.len() >= MAX_BUCKET_ENTRIES && !buckets.contains_key(&key) {
+            continue;
+        }
+        let entry = buckets.entry(key).or_default();
 
         // Track provider from first event in bucket
         if entry.provider.is_empty() && !event.provider.is_empty() {
