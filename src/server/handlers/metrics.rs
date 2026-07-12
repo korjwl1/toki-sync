@@ -238,11 +238,12 @@ impl From<&str> for GroupBy {
 /// calendar boundary in `tz`, matching the local CLI's tz-aware day buckets
 /// (toki `query.rs` bucket_start_ms): the day index (days since the
 /// 1970-01-01 local-midnight anchor) is floored by `div_euclid(step_days)`.
-/// The week granularity (604800s) is the one exception — it aligns to the
-/// configured `start_of_week` local midnight rather than the epoch anchor, so a
-/// non-Monday start_of_week is honoured. Non-whole-day steps (hour/minute, 27h,
-/// …) and any step when no tz is given stay epoch/UTC-aligned. Weekly with no tz
-/// keeps the historical Unix-epoch (Thursday) day-of-week offset.
+/// The week granularity (604800s) is the one exception — with a `tz` it aligns
+/// to the configured `start_of_week` local midnight rather than the epoch anchor,
+/// so a non-Monday start_of_week is honoured. Non-whole-day steps (hour/minute,
+/// 27h, …) and any step when no tz is given stay epoch/UTC-aligned — including
+/// weekly with no tz, which is plain `(ts/step)*step` (the local CLI has no
+/// start_of_week to apply without a timezone).
 fn bucket_start_sec(
     ts_ms: i64,
     step_secs: i64,
@@ -283,14 +284,9 @@ fn bucket_start_sec(
         // Fall through to epoch alignment if any step above failed.
     }
 
-    // Weekly with no tz: preserve the historical start_of_week offset in UTC.
-    // Unix epoch (1970-01-01) is a Thursday (Mon=0 → 3).
-    if is_week && tz.is_none() {
-        let offset_ms = ((start_of_week.num_days_from_monday() as i64 - 3 + 7) % 7) * 86400 * 1000;
-        return ((ts_ms - offset_ms) / step_ms * step_ms + offset_ms) / 1000;
-    }
-
-    // Non-whole-day step, or no tz: epoch/UTC-aligned.
+    // Non-whole-day step, or any step without a tz (incl. weekly): epoch-aligned.
+    // The canonical rule does not apply start_of_week without a timezone, so
+    // no-tz weekly is plain epoch-aligned (matches toki bucket_start_ms).
     (ts_ms / step_ms) * step_ms / 1000
 }
 
@@ -835,6 +831,29 @@ mod tests {
         let expect = kst.from_local_datetime(&expect_date.and_hms_opt(0, 0, 0).unwrap()).unwrap().timestamp();
         assert_eq!(b, expect);
         assert!(b <= ts_ms / 1000 && ts_ms / 1000 < b + 172800 + 3600, "event within its 2-day window");
+    }
+
+    #[test]
+    fn test_bucket_start_sec_kst_cross_parity() {
+        // Locks server bucketing to the canonical local-CLI rule
+        // (toki bucket_start_ms, fix-toki 888ec2a test_bucket_start_ms_kst_cross_parity).
+        // Event: 2026-03-11T05:00:00Z (= KST 03-11 14:00 Wed). start_of_week=Monday.
+        let kst: chrono_tz::Tz = "Asia/Seoul".parse().unwrap();
+        let ts_ms = chrono::NaiveDate::from_ymd_opt(2026, 3, 11).unwrap()
+            .and_hms_opt(5, 0, 0).unwrap().and_utc().timestamp() * 1000;
+        let mon = chrono::Weekday::Mon;
+        let cases: [(&str, i64, Option<&chrono_tz::Tz>, i64); 7] = [
+            ("1d tz",    86400,   Some(&kst), 1773154800), // KST 03-11 00:00
+            ("2d tz",    172800,  Some(&kst), 1773068400), // KST 03-10 00:00
+            ("1w tz",    604800,  Some(&kst), 1772982000), // KST 03-09 00:00 (Mon)
+            ("30d tz",   2592000, Some(&kst), 1772895600), // KST 03-08 00:00
+            ("27h",      97200,   Some(&kst), 1773122400), // epoch-aligned
+            ("1d no-tz", 86400,   None,       1773187200), // UTC 03-11 00:00
+            ("1w no-tz", 604800,  None,       1772668800), // UTC 03-05 00:00 (pure epoch)
+        ];
+        for (label, step, tz, expect) in cases {
+            assert_eq!(bucket_start_sec(ts_ms, step, tz, mon), expect, "parity mismatch: {label}");
+        }
     }
 
     #[test]
