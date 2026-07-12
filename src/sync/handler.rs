@@ -21,6 +21,7 @@ pub async fn handle_connection(
     events: Arc<dyn EventStore>,
     batch_semaphore: Arc<Semaphore>,
     dedup_retention_secs: i64,
+    active_cache: crate::server::http::ActiveCache,
 ) -> Result<()> {
     let (r, w) = tokio::io::split(stream);
     let mut reader = tokio::io::BufReader::new(r);
@@ -62,6 +63,22 @@ pub async fn handle_connection(
 
     let user_id  = claims.sub.clone();
     let provider = auth.provider.clone();
+
+    // Reject deactivated (or deleted) accounts even while their access token is
+    // still within its TTL — same shared cache/semantics as the HTTP path.
+    match crate::server::http::is_user_active_cached(&active_cache, &*db, &user_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            let err = AuthErrPayload { reason: "account deactivated".to_string(), reset_required: false };
+            write_frame(&mut writer, MsgType::AuthErr, &bincode::serialize(&err)?).await?;
+            return Ok(());
+        }
+        Err(e) => {
+            let err = AuthErrPayload { reason: format!("active check failed: {e}"), reset_required: false };
+            write_frame(&mut writer, MsgType::AuthErr, &bincode::serialize(&err)?).await?;
+            return Ok(());
+        }
+    }
 
     // Find or create device using the stable device_key UUID
     let device_name = crate::server::http::truncate_device_name(&auth.device_name);
@@ -135,6 +152,21 @@ pub async fn handle_connection(
             }
 
             MsgType::SyncBatch | MsgType::SyncBatchZstd => {
+                // Re-check active status per batch so a mid-session deactivation
+                // stops further writes (cache TTL <= 60s, or instantly on evict),
+                // not just new connections.
+                match crate::server::http::is_user_active_cached(&active_cache, &*db, &user_id).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let err = SyncErrPayload { reason: "account deactivated".to_string() };
+                        write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?).await?;
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!("active check failed for device={device_id}: {e}");
+                        break;
+                    }
+                }
                 let raw = if msg_type == MsgType::SyncBatchZstd {
                     let decoder = zstd::stream::Decoder::new(payload.as_slice())
                         .map_err(|e| anyhow::anyhow!("zstd decoder init failed: {e}"))?;

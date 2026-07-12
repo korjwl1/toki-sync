@@ -88,8 +88,8 @@ pub struct AppState {
     pub pricing: Arc<tokio::sync::RwLock<crate::pricing::PricingTable>>,
     /// Short-TTL cache of user active status, keyed by user_id. Lets
     /// authenticated requests reject deactivated accounts without a DB hit per
-    /// request. See `ensure_user_active`.
-    pub active_cache: Arc<std::sync::Mutex<HashMap<String, (bool, Instant)>>>,
+    /// request. Shared with the TCP sync handler. See `is_user_active_cached`.
+    pub active_cache: ActiveCache,
 }
 
 pub async fn get_oidc_discovery(state: &AppState) -> Result<OidcDiscovery, AppError> {
@@ -236,33 +236,48 @@ pub fn extract_jwt(headers: &HeaderMap, jwt: &JwtManager) -> Result<crate::auth:
         .map_err(|_| AppError::unauthorized("invalid or expired token"))
 }
 
-/// Verify the account is still active, using a short-TTL in-memory cache to
-/// avoid a DB hit on every authenticated request. A deactivation takes effect
-/// within `ACTIVE_CACHE_TTL` (or immediately, when the admin handler invalidates
-/// the entry). Deleted users are treated as inactive.
-pub async fn ensure_user_active(state: &AppState, user_id: &str) -> Result<(), AppError> {
-    const ACTIVE_CACHE_TTL: Duration = Duration::from_secs(60);
+/// Short-TTL cache of user active status: user_id -> (active, checked_at).
+/// Shared by the HTTP auth path and the TCP sync handler so a deactivation is
+/// enforced on both without a DB hit per request/batch.
+pub type ActiveCache = Arc<std::sync::Mutex<HashMap<String, (bool, Instant)>>>;
 
+/// TTL after which a cached active-status entry is re-checked against the DB.
+pub const ACTIVE_CACHE_TTL: Duration = Duration::from_secs(60);
+
+/// Resolve whether a user is active, consulting `cache` first and the DB on a
+/// miss/expiry, then refreshing the cache. Deleted users are treated as
+/// inactive. Callers that want immediate effect evict the entry (see the admin
+/// deactivate/delete handlers). Returns an error only on DB failure.
+pub async fn is_user_active_cached(
+    cache: &ActiveCache,
+    db: &dyn DatabaseRepo,
+    user_id: &str,
+) -> anyhow::Result<bool> {
     // Fast path: a fresh cache entry answers without touching the DB.
     {
-        let cache = state.active_cache.lock().unwrap();
-        if let Some((active, at)) = cache.get(user_id) {
+        let c = cache.lock().unwrap();
+        if let Some((active, at)) = c.get(user_id) {
             if at.elapsed() < ACTIVE_CACHE_TTL {
-                return if *active {
-                    Ok(())
-                } else {
-                    Err(AppError::unauthorized("account deactivated"))
-                };
+                return Ok(*active);
             }
         }
     }
 
     // Slow path: consult the DB and refresh the cache.
-    let active = match state.db.get_user_by_id(user_id).await.map_err(AppError::internal)? {
+    let active = match db.get_user_by_id(user_id).await? {
         Some(u) => u.active,
         None => false,
     };
-    state.active_cache.lock().unwrap().insert(user_id.to_string(), (active, Instant::now()));
+    cache.lock().unwrap().insert(user_id.to_string(), (active, Instant::now()));
+    Ok(active)
+}
+
+/// Verify the account is still active (HTTP path), mapping the result to an
+/// `AppError`. See `is_user_active_cached` for the caching semantics.
+pub async fn ensure_user_active(state: &AppState, user_id: &str) -> Result<(), AppError> {
+    let active = is_user_active_cached(&state.active_cache, &*state.db, user_id)
+        .await
+        .map_err(AppError::internal)?;
     if active {
         Ok(())
     } else {
@@ -328,5 +343,45 @@ impl AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         (self.status, Json(serde_json::json!({ "error": self.message }))).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::sqlite::SqliteRepo;
+    use crate::db::models::NewUser;
+    use tempfile::NamedTempFile;
+
+    #[tokio::test]
+    async fn test_is_user_active_cached() {
+        let tmp = NamedTempFile::new().unwrap();
+        let db = SqliteRepo::open(tmp.path().to_str().unwrap()).await.unwrap();
+        db.create_user(&NewUser {
+            id: "u1".into(),
+            username: "u1".into(),
+            password_hash: "h".into(),
+            role: "user".into(),
+        }).await.unwrap();
+
+        let cache: ActiveCache = Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+        // Fresh lookup: active, and now cached.
+        assert!(is_user_active_cached(&cache, &db, "u1").await.unwrap());
+
+        // Deactivate in the DB but keep the cache entry: within TTL the cached
+        // (active) value is still returned.
+        db.set_user_active("u1", false).await.unwrap();
+        assert!(
+            is_user_active_cached(&cache, &db, "u1").await.unwrap(),
+            "cached entry should still read active within TTL"
+        );
+
+        // Evict (as the admin handlers do): re-query returns inactive.
+        cache.lock().unwrap().remove("u1");
+        assert!(!is_user_active_cached(&cache, &db, "u1").await.unwrap());
+
+        // Unknown/deleted user is treated as inactive.
+        assert!(!is_user_active_cached(&cache, &db, "ghost").await.unwrap());
     }
 }
