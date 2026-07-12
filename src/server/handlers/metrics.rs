@@ -5,7 +5,7 @@ use axum::{
 };
 use serde::Deserialize;
 
-use super::super::http::{AppError, AppState, extract_jwt};
+use super::super::http::{AppError, AppState, authenticate};
 use crate::events::{UserFilter, ServerEvent};
 
 /// Toki query params — same interface as local daemon REPORT protocol.
@@ -106,7 +106,7 @@ pub async fn toki_query(
     State(state): State<AppState>,
     Query(params): Query<TokiQueryParams>,
 ) -> Result<Response, AppError> {
-    let claims = extract_jwt(&headers, &state.jwt)?;
+    let claims = authenticate(&state, &headers).await?;
     let requested_scope = params.scope.as_deref().unwrap_or("self");
 
     let now = std::time::SystemTime::now()
@@ -124,7 +124,8 @@ pub async fn toki_query(
     let is_range = params.step.is_some();
 
     let step_secs: i64 = params.step.as_deref()
-        .map(|s| parse_duration_secs(s))
+        .map(parse_duration_secs)
+        .transpose()?
         .unwrap_or(3600);
 
     // ── Step validation: protect against memory exhaustion. ──
@@ -231,6 +232,61 @@ impl From<&str> for GroupBy {
     }
 }
 
+/// Compute the bucket-start (epoch seconds) an event falls into.
+///
+/// Day (86400s) and week (604800s) granularities floor to the *local* calendar
+/// boundary in `tz` — local midnight, or the `start_of_week` local midnight for
+/// weeks — so multi-device/dashboard results match the local CLI's tz-aware
+/// day/week buckets (toki `query.rs` bucket_start_ms). Sub-day steps, and any
+/// step when no tz is given, stay epoch/UTC-aligned. Weekly with no tz keeps the
+/// historical Unix-epoch (Thursday) day-of-week offset.
+fn bucket_start_sec(
+    ts_ms: i64,
+    step_secs: i64,
+    tz: Option<&chrono_tz::Tz>,
+    start_of_week: chrono::Weekday,
+) -> i64 {
+    let step_ms = step_secs * 1000;
+    let is_day = step_secs == 86400;
+    let is_week = step_secs == 604800;
+
+    // Tz-aware calendar flooring for day/week granularities.
+    if (is_day || is_week) && tz.is_some() {
+        use chrono::{Datelike, TimeZone};
+        let tz = tz.unwrap();
+        if let Some(local) = chrono::DateTime::from_timestamp_millis(ts_ms).map(|dt| dt.with_timezone(tz)) {
+            let date = local.date_naive();
+            let start_date = if is_week {
+                let back = (date.weekday().num_days_from_monday() as i64
+                    - start_of_week.num_days_from_monday() as i64 + 7) % 7;
+                date - chrono::Duration::days(back)
+            } else {
+                date
+            };
+            if let Some(midnight) = start_date.and_hms_opt(0, 0, 0) {
+                // On a DST spring-forward gap local midnight may not exist; take
+                // the earliest valid instant, falling back to the latest.
+                let resolved = tz.from_local_datetime(&midnight).earliest()
+                    .or_else(|| tz.from_local_datetime(&midnight).latest());
+                if let Some(dt) = resolved {
+                    return dt.timestamp();
+                }
+            }
+        }
+        // Fall through to epoch alignment if any step above failed.
+    }
+
+    // Weekly with no tz: preserve the historical start_of_week offset in UTC.
+    // Unix epoch (1970-01-01) is a Thursday (Mon=0 → 3).
+    if is_week && tz.is_none() {
+        let offset_ms = ((start_of_week.num_days_from_monday() as i64 - 3 + 7) % 7) * 86400 * 1000;
+        return ((ts_ms - offset_ms) / step_ms * step_ms + offset_ms) / 1000;
+    }
+
+    // Sub-day, day-without-tz, or any other step: epoch/UTC-aligned.
+    (ts_ms / step_ms) * step_ms / 1000
+}
+
 ///
 /// Aggregate ServerEvents into toki JSON format.
 /// Uses the exact same bucketing logic as the local daemon (query.rs).
@@ -257,27 +313,8 @@ fn aggregate_events_to_toki_json(
     use std::collections::BTreeMap;
 
     let step_ms = step_secs * 1000;
-
-    // For weekly steps (604800s), compute offset from Unix epoch to align
-    // buckets to the desired start_of_week. Unix epoch (1970-01-01) is Thursday.
-    // Default start_of_week is Monday.
-    let week_offset_ms: i64 = if step_secs == 604800 {
-        let sow = start_of_week.unwrap_or(chrono::Weekday::Mon);
-        // Days from Thursday (epoch weekday) to desired start_of_week
-        let epoch_day = 3i64; // Thursday = 3 (Mon=0)
-        let target_day = match sow {
-            chrono::Weekday::Mon => 0,
-            chrono::Weekday::Tue => 1,
-            chrono::Weekday::Wed => 2,
-            chrono::Weekday::Thu => 3,
-            chrono::Weekday::Fri => 4,
-            chrono::Weekday::Sat => 5,
-            chrono::Weekday::Sun => 6,
-        };
-        ((target_day - epoch_day + 7) % 7) * 86400 * 1000
-    } else {
-        0
-    };
+    // start_of_week defaults to Monday; only consulted for weekly steps.
+    let sow = start_of_week.unwrap_or(chrono::Weekday::Mon);
 
     #[derive(Default)]
     struct ModelBucket {
@@ -293,26 +330,35 @@ fn aggregate_events_to_toki_json(
     // we'd have up to 2000 * N entries. 50_000 is enough headroom for
     // typical fleets but stops a runaway aggregation cold.
     const MAX_BUCKET_ENTRIES: usize = 50_000;
+    // Parse the group-by dimension once — it's constant for the whole query.
+    let group_dim = GroupBy::from(group_by);
+    // Set when the bucket cap forces us to drop new (bucket, group) combinations
+    // so the response can flag partial data.
+    let mut truncated = false;
 
     for event in events {
         // 1. Scan range check (EventStore already filters, but double-check)
         if event.ts_ms < since_ms || event.ts_ms >= until_ms { continue; }
 
-        // 2. Bucket assignment (with week offset for weekly steps)
-        let adjusted = event.ts_ms - week_offset_ms;
-        let bucket_ms = (adjusted / step_ms) * step_ms + week_offset_ms;
+        // 2. Bucket assignment. Day/week granularities floor to the request
+        //    timezone's local calendar boundary (matching the local CLI's
+        //    tz-aware day/week buckets); sub-day steps stay epoch-aligned.
+        let bucket_sec = bucket_start_sec(event.ts_ms, step_secs, tz, sow);
+        let bucket_ms = bucket_sec * 1000;
 
-        // 3. Bucket filter (local daemon's overlap check)
+        // 3. Bucket filter (overlap check). step_ms is the nominal bucket width;
+        //    DST-length days differ by ±1h, which only nudges range-edge buckets.
         if bucket_ms + step_ms <= since_ms || bucket_ms >= until_ms { continue; }
 
-        let bucket_sec = bucket_ms / 1000;
-        let group_key = GroupBy::from(group_by).key(event);
+        let group_key = group_dim.key(event);
 
         let key = (bucket_sec, group_key.clone());
         // Hard cap: refuse to allocate new entries past the limit. Existing
         // buckets still accumulate so the answer for already-seen
-        // (bucket, group) pairs is correct; new combinations are dropped.
+        // (bucket, group) pairs is correct; new combinations are dropped and
+        // the response is flagged truncated.
         if buckets.len() >= MAX_BUCKET_ENTRIES && !buckets.contains_key(&key) {
+            truncated = true;
             continue;
         }
         let entry = buckets.entry(key).or_default();
@@ -346,7 +392,7 @@ fn aggregate_events_to_toki_json(
         }
     }
 
-    // Build toki JSON.
+    // Build toki JSON, grouped by provider.
     //
     // `buckets` is keyed by `(timestamp, group_key)`. The local-CLI-compatible
     // shape uses the field name `model` for the group key inside each entry
@@ -354,8 +400,13 @@ fn aggregate_events_to_toki_json(
     // means the client doesn't need to switch on the group_by parameter.
     // `period_key` MUST also include the group key, otherwise two events
     // with the same timestamp and same model but different `device_id`
-    // collapse into one entry (the original bug this commit fixes).
-    let mut periods: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
+    // collapse into one entry.
+    //
+    // A mixed-provider query (scope=all/team spanning claude_code + codex) emits
+    // each provider's periods under its own top-level key — mirroring the
+    // single-provider shape `{"providers": {"<provider>": [...]}}` — rather than
+    // collapsing every provider's data under the first one seen.
+    let mut per_provider: BTreeMap<String, BTreeMap<String, Vec<serde_json::Value>>> = BTreeMap::new();
     for ((bucket_sec, group_key), bucket) in &buckets {
         let ts_str = if let Some(tz) = tz {
             chrono::DateTime::from_timestamp(*bucket_sec, 0)
@@ -367,7 +418,8 @@ fn aggregate_events_to_toki_json(
                 .unwrap_or_default()
         };
 
-        let is_codex = bucket.provider == "codex";
+        let provider = if bucket.provider.is_empty() { "claude_code" } else { bucket.provider.as_str() };
+        let is_codex = provider == "codex";
         let mut entry = serde_json::json!({
             "model": group_key,
             "input_tokens": bucket.input,
@@ -383,28 +435,46 @@ fn aggregate_events_to_toki_json(
             entry["cache_read_input_tokens"] = serde_json::json!(bucket.cache_read);
         }
 
-        if let Some(cost) = bucket.cost_usd.or_else(|| pricing.cost(group_key, bucket.input, bucket.output, bucket.cache_create, bucket.cache_read)) {
-            entry["cost_usd"] = serde_json::json!(cost);
+        // Cost was precomputed above only when the query asked for it.
+        if is_cost {
+            if let Some(cost) = bucket.cost_usd {
+                entry["cost_usd"] = serde_json::json!(cost);
+            }
         }
         let period_key = format!("{}|{}", ts_str, group_key);
-        periods.entry(period_key).or_default().push(entry);
+        per_provider
+            .entry(provider.to_string())
+            .or_default()
+            .entry(period_key)
+            .or_default()
+            .push(entry);
     }
 
-    let data: Vec<serde_json::Value> = periods.into_iter().map(|(period, models)| {
-        serde_json::json!({
-            "period": period,
-            "usage_per_models": models,
-        })
-    }).collect();
+    let mut providers_json = serde_json::Map::new();
+    for (provider, periods) in per_provider {
+        let data: Vec<serde_json::Value> = periods.into_iter().map(|(period, models)| {
+            serde_json::json!({
+                "period": period,
+                "usage_per_models": models,
+            })
+        }).collect();
+        providers_json.insert(provider, serde_json::Value::Array(data));
+    }
 
-    let provider_name = events.iter()
-        .find(|e| !e.provider.is_empty())
-        .map(|e| e.provider.as_str())
-        .unwrap_or("claude_code");
+    // Preserve the historical shape: an empty result still carries a
+    // `claude_code` key so clients that index it directly don't choke.
+    if providers_json.is_empty() {
+        providers_json.insert("claude_code".to_string(), serde_json::Value::Array(Vec::new()));
+    }
 
-    let output = serde_json::json!({
-        "providers": { provider_name: data }
-    });
+    let mut output = serde_json::json!({ "providers": providers_json });
+    if truncated {
+        tracing::warn!(
+            "toki query result truncated at {MAX_BUCKET_ENTRIES} (bucket,group) entries; \
+             some combinations were dropped"
+        );
+        output["truncated"] = serde_json::json!(true);
+    }
 
     serde_json::to_vec(&output)
         .map_err(|e| AppError::internal(anyhow::anyhow!("json serialize: {e}")))
@@ -440,15 +510,28 @@ fn parse_toki_time(s: &str, is_end: bool) -> Result<i64, AppError> {
     })
 }
 
-/// Replace range vector durations [Xd/h/m/s/w/y] with [Ns] where N=range_secs.
 /// Parse duration string: "86400", "86400s", "24h", "1d", "1h30m" → seconds.
-fn parse_duration_secs(s: &str) -> i64 {
-    // Try plain number (seconds)
-    if let Ok(n) = s.parse::<i64>() { return n; }
-    if let Ok(n) = s.trim_end_matches('s').parse::<i64>() { return n; }
+///
+/// Returns a 400 error on unparseable input, unknown unit suffixes, trailing
+/// digits without a unit, or a non-positive result, rather than silently
+/// defaulting — a bad `step` should surface as an error, not a wrong bucket size.
+fn parse_duration_secs(s: &str) -> Result<i64, AppError> {
+    let invalid = || AppError {
+        status: StatusCode::BAD_REQUEST,
+        message: format!("invalid duration: '{s}'"),
+    };
+
+    // Try plain number (seconds), with or without a trailing 's'.
+    if let Ok(n) = s.parse::<i64>() {
+        return if n > 0 { Ok(n) } else { Err(invalid()) };
+    }
+    if let Ok(n) = s.trim_end_matches('s').parse::<i64>() {
+        return if n > 0 { Ok(n) } else { Err(invalid()) };
+    }
 
     let mut total = 0i64;
     let mut num_buf = String::new();
+    let mut saw_unit = false;
     for c in s.chars() {
         if c.is_ascii_digit() {
             num_buf.push(c);
@@ -462,11 +545,16 @@ fn parse_duration_secs(s: &str) -> i64 {
                 's' => total += n,
                 'w' => total += n * 604800,
                 'y' => total += n * 31536000,
-                _ => {}
+                _ => return Err(invalid()),
             }
+            saw_unit = true;
         }
     }
-    if total == 0 { 3600 } else { total }
+    // Trailing digits with no unit, no unit at all, or a non-positive total.
+    if !num_buf.is_empty() || !saw_unit || total <= 0 {
+        return Err(invalid());
+    }
+    Ok(total)
 }
 
 /// Parse weekday string (mon, tue, ...) to chrono::Weekday.
@@ -663,6 +751,84 @@ mod tests {
         ).unwrap();
         let periods = parse_periods(&out);
         assert_eq!(periods.len(), 2, "two distinct models → two entries");
+    }
+
+    #[test]
+    fn test_parse_duration_secs_valid() {
+        assert_eq!(parse_duration_secs("3600").unwrap(), 3600);
+        assert_eq!(parse_duration_secs("3600s").unwrap(), 3600);
+        assert_eq!(parse_duration_secs("24h").unwrap(), 86400);
+        assert_eq!(parse_duration_secs("1d").unwrap(), 86400);
+        assert_eq!(parse_duration_secs("1h30m").unwrap(), 5400);
+        assert_eq!(parse_duration_secs("1w").unwrap(), 604800);
+    }
+
+    #[test]
+    fn test_parse_duration_secs_invalid() {
+        // Previously these silently fell back to 3600; now they error.
+        assert!(parse_duration_secs("0").is_err());
+        assert!(parse_duration_secs("").is_err());
+        assert!(parse_duration_secs("abc").is_err());
+        assert!(parse_duration_secs("10x").is_err());   // unknown unit
+        assert!(parse_duration_secs("1h30").is_err());  // trailing digits, no unit
+        assert!(parse_duration_secs("-5").is_err());    // non-positive
+    }
+
+    #[test]
+    fn test_bucket_start_sec_day_is_local_midnight() {
+        // A UTC-evening event that is already the next day in KST must bucket to
+        // the local (KST) midnight of its local date, matching the local CLI's
+        // tz-aware day buckets — not the UTC midnight.
+        let kst: chrono_tz::Tz = "Asia/Seoul".parse().unwrap();
+        let ts_ms = chrono::NaiveDate::from_ymd_opt(2023, 11, 6).unwrap()
+            .and_hms_opt(20, 0, 0).unwrap().and_utc().timestamp() * 1000; // 2023-11-07 05:00 KST
+
+        let b = bucket_start_sec(ts_ms, 86400, Some(&kst), chrono::Weekday::Mon);
+        let local = chrono::DateTime::from_timestamp(b, 0).unwrap().with_timezone(&kst);
+        assert_eq!(local.format("%Y-%m-%d %H:%M:%S").to_string(), "2023-11-07 00:00:00");
+
+        // UTC-aligned bucketing would land it on the previous (Nov 6) day.
+        let b_utc = bucket_start_sec(ts_ms, 86400, None, chrono::Weekday::Mon);
+        assert_ne!(b, b_utc, "tz-aware day bucket must differ from UTC bucket here");
+    }
+
+    #[test]
+    fn test_bucket_start_sec_week_local_start_of_week() {
+        use chrono::Datelike;
+        // Weekly buckets floor to the start_of_week local midnight.
+        let kst: chrono_tz::Tz = "Asia/Seoul".parse().unwrap();
+        // 2023-11-08 is a Wednesday; Monday-start week begins 2023-11-06.
+        let ts_ms = chrono::NaiveDate::from_ymd_opt(2023, 11, 8).unwrap()
+            .and_hms_opt(3, 0, 0).unwrap().and_utc().timestamp() * 1000;
+
+        let b = bucket_start_sec(ts_ms, 604800, Some(&kst), chrono::Weekday::Mon);
+        let local = chrono::DateTime::from_timestamp(b, 0).unwrap().with_timezone(&kst);
+        assert_eq!(local.format("%Y-%m-%d %H:%M:%S").to_string(), "2023-11-06 00:00:00");
+        assert_eq!(local.weekday(), chrono::Weekday::Mon);
+    }
+
+    #[test]
+    fn test_aggregate_splits_by_provider() {
+        // A mixed-provider result must place each provider's data under its own
+        // key, not merge codex under claude_code.
+        let mut cc = make_event("device-a", "claude-3-opus", "/proj", 1700000000_000, 100);
+        cc.provider = "claude_code".to_string();
+        let mut cx = make_event("device-b", "gpt-5", "/proj", 1700000000_000, 200);
+        cx.provider = "codex".to_string();
+
+        let pricing = crate::pricing::PricingTable::new(std::collections::HashMap::new());
+        let out = aggregate_events_to_toki_json(
+            &[cc, cx], 60, 1700000000_000, 1700000060_000,
+            false, false, "model", &pricing, None, None,
+        ).unwrap();
+
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let providers = v["providers"].as_object().unwrap();
+        assert!(providers.contains_key("claude_code"), "missing claude_code key: {providers:?}");
+        assert!(providers.contains_key("codex"), "missing codex key: {providers:?}");
+        // codex entries carry codex-specific token field names
+        let codex_entry = &providers["codex"].as_array().unwrap()[0]["usage_per_models"][0];
+        assert!(codex_entry.get("reasoning_output_tokens").is_some());
     }
 
     #[test]
