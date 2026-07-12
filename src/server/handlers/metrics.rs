@@ -234,12 +234,15 @@ impl From<&str> for GroupBy {
 
 /// Compute the bucket-start (epoch seconds) an event falls into.
 ///
-/// Day (86400s) and week (604800s) granularities floor to the *local* calendar
-/// boundary in `tz` — local midnight, or the `start_of_week` local midnight for
-/// weeks — so multi-device/dashboard results match the local CLI's tz-aware
-/// day/week buckets (toki `query.rs` bucket_start_ms). Sub-day steps, and any
-/// step when no tz is given, stay epoch/UTC-aligned. Weekly with no tz keeps the
-/// historical Unix-epoch (Thursday) day-of-week offset.
+/// Whole-day-multiple steps (86400s × N, e.g. 1d/2d/30d) floor to the *local*
+/// calendar boundary in `tz`, matching the local CLI's tz-aware day buckets
+/// (toki `query.rs` bucket_start_ms): the day index (days since the
+/// 1970-01-01 local-midnight anchor) is floored by `div_euclid(step_days)`.
+/// The week granularity (604800s) is the one exception — it aligns to the
+/// configured `start_of_week` local midnight rather than the epoch anchor, so a
+/// non-Monday start_of_week is honoured. Non-whole-day steps (hour/minute, 27h,
+/// …) and any step when no tz is given stay epoch/UTC-aligned. Weekly with no tz
+/// keeps the historical Unix-epoch (Thursday) day-of-week offset.
 fn bucket_start_sec(
     ts_ms: i64,
     step_secs: i64,
@@ -247,21 +250,25 @@ fn bucket_start_sec(
     start_of_week: chrono::Weekday,
 ) -> i64 {
     let step_ms = step_secs * 1000;
-    let is_day = step_secs == 86400;
     let is_week = step_secs == 604800;
+    let whole_day_multiple = step_secs >= 86400 && step_secs % 86400 == 0;
 
-    // Tz-aware calendar flooring for day/week granularities.
-    if (is_day || is_week) && tz.is_some() {
-        use chrono::{Datelike, TimeZone};
-        let tz = tz.unwrap();
+    // Tz-aware calendar flooring for week and whole-day-multiple granularities.
+    if let (true, Some(tz)) = (is_week || whole_day_multiple, tz) {
+        use chrono::{Datelike, Duration, NaiveDate, TimeZone};
         if let Some(local) = chrono::DateTime::from_timestamp_millis(ts_ms).map(|dt| dt.with_timezone(tz)) {
             let date = local.date_naive();
             let start_date = if is_week {
+                // Align to start_of_week local midnight (honours the setting).
                 let back = (date.weekday().num_days_from_monday() as i64
                     - start_of_week.num_days_from_monday() as i64 + 7) % 7;
-                date - chrono::Duration::days(back)
+                date - Duration::days(back)
             } else {
-                date
+                // Floor the day index by step_days, anchored at 1970-01-01.
+                let step_days = step_secs / 86400;
+                let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+                let day_index = (date - epoch).num_days();
+                epoch + Duration::days(day_index.div_euclid(step_days) * step_days)
             };
             if let Some(midnight) = start_date.and_hms_opt(0, 0, 0) {
                 // On a DST spring-forward gap local midnight may not exist; take
@@ -283,7 +290,7 @@ fn bucket_start_sec(
         return ((ts_ms - offset_ms) / step_ms * step_ms + offset_ms) / 1000;
     }
 
-    // Sub-day, day-without-tz, or any other step: epoch/UTC-aligned.
+    // Non-whole-day step, or no tz: epoch/UTC-aligned.
     (ts_ms / step_ms) * step_ms / 1000
 }
 
@@ -805,6 +812,42 @@ mod tests {
         let local = chrono::DateTime::from_timestamp(b, 0).unwrap().with_timezone(&kst);
         assert_eq!(local.format("%Y-%m-%d %H:%M:%S").to_string(), "2023-11-06 00:00:00");
         assert_eq!(local.weekday(), chrono::Weekday::Mon);
+    }
+
+    #[test]
+    fn test_bucket_start_sec_2d_epoch_anchored_local() {
+        use chrono::{Datelike, Duration, NaiveDate, TimeZone};
+        // A whole-day multiple (2d) floors the local day index by 2, anchored at
+        // the 1970-01-01 local midnight — and the bucket start is local midnight.
+        let kst: chrono_tz::Tz = "Asia/Seoul".parse().unwrap();
+        let ts_ms = NaiveDate::from_ymd_opt(2023, 11, 9).unwrap()
+            .and_hms_opt(3, 0, 0).unwrap().and_utc().timestamp() * 1000;
+
+        let b = bucket_start_sec(ts_ms, 172800, Some(&kst), chrono::Weekday::Mon);
+        let local = chrono::DateTime::from_timestamp(b, 0).unwrap().with_timezone(&kst);
+        assert_eq!(local.time().to_string(), "00:00:00", "bucket must start at local midnight");
+
+        // Independently reproduce the epoch-anchored floored date.
+        let date = chrono::DateTime::from_timestamp_millis(ts_ms).unwrap().with_timezone(&kst).date_naive();
+        let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+        let di = (date - epoch).num_days();
+        let expect_date = epoch + Duration::days(di.div_euclid(2) * 2);
+        let expect = kst.from_local_datetime(&expect_date.and_hms_opt(0, 0, 0).unwrap()).unwrap().timestamp();
+        assert_eq!(b, expect);
+        assert!(b <= ts_ms / 1000 && ts_ms / 1000 < b + 172800 + 3600, "event within its 2-day window");
+    }
+
+    #[test]
+    fn test_bucket_start_sec_non_whole_day_falls_back_epoch() {
+        // 27h is not a whole-day multiple → epoch-aligned even with a tz.
+        let kst: chrono_tz::Tz = "Asia/Seoul".parse().unwrap();
+        let step_secs = 27 * 3600; // 97200
+        let ts_ms = chrono::NaiveDate::from_ymd_opt(2023, 11, 9).unwrap()
+            .and_hms_opt(3, 0, 0).unwrap().and_utc().timestamp() * 1000;
+
+        let b = bucket_start_sec(ts_ms, step_secs, Some(&kst), chrono::Weekday::Mon);
+        let expect = (ts_ms / (step_secs * 1000)) * (step_secs * 1000) / 1000;
+        assert_eq!(b, expect, "non-whole-day step must stay epoch-aligned");
     }
 
     #[test]
