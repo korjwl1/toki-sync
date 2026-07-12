@@ -97,6 +97,30 @@ pub trait DatabaseRepo: Send + Sync {
     async fn cleanup_expired_tokens(&self) -> Result<u64>;
 }
 
+/// Charset for randomly generated admin passwords (unambiguous alphanumeric).
+const ADMIN_PW_CHARS: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
+
+/// Resolve the initial admin password used when seeding an empty user table.
+///
+/// Uses `TOKI_ADMIN_PASSWORD` if set and non-empty; otherwise generates a random
+/// 16-char password. The returned bool is `true` when the password was randomly
+/// generated, so the caller can log it once. Never returns a fixed default.
+pub(crate) fn resolve_seed_admin_password() -> (String, bool) {
+    if let Ok(p) = std::env::var("TOKI_ADMIN_PASSWORD") {
+        if !p.is_empty() {
+            return (p, false);
+        }
+    }
+    let mut pw = String::with_capacity(16);
+    'outer: loop {
+        for b in uuid::Uuid::new_v4().into_bytes() {
+            pw.push(ADMIN_PW_CHARS[b as usize % ADMIN_PW_CHARS.len()] as char);
+            if pw.len() == 16 { break 'outer; }
+        }
+    }
+    (pw, true)
+}
+
 pub async fn open_database(config: &StorageConfig) -> Result<Arc<dyn DatabaseRepo>> {
     match config.backend.as_str() {
         "postgres" => {
