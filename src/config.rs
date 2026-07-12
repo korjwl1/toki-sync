@@ -199,10 +199,18 @@ pub struct EventsConfig {
     pub fjall_path: String,
     #[serde(default)]
     pub clickhouse_url: String,
+    /// How long to retain the Fjall dedup index (idx_msg) entries, in seconds.
+    /// A correction/late update arriving within this window is still deduped
+    /// against the existing event; entries older than this are pruned (the
+    /// events themselves are always kept). idx entries are tiny, so this is set
+    /// generously. Default: 30 days.
+    #[serde(default = "default_dedup_retention_secs")]
+    pub dedup_retention_secs: i64,
 }
 
 fn default_events_backend() -> String { "fjall".to_string() }
 fn default_events_fjall_path() -> String { "./data/events.fjall".to_string() }
+fn default_dedup_retention_secs() -> i64 { 30 * 24 * 3600 } // 30 days
 
 impl Default for EventsConfig {
     fn default() -> Self {
@@ -210,6 +218,7 @@ impl Default for EventsConfig {
             backend: default_events_backend(),
             fjall_path: default_events_fjall_path(),
             clickhouse_url: String::new(),
+            dedup_retention_secs: default_dedup_retention_secs(),
         }
     }
 }

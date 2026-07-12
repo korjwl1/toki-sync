@@ -157,6 +157,7 @@ async fn main() -> Result<()> {
         dynamic_settings,
         trust_proxy: config.server.trust_proxy,
         pricing: Arc::new(tokio::sync::RwLock::new(pricing)),
+        active_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     // -- Periodic pricing refresh (every 6 hours) ------------------------------
@@ -214,9 +215,10 @@ async fn main() -> Result<()> {
     let tcp_jwt = state.jwt.clone();
     let tcp_events = event_store.clone();
     let max_concurrent_writes = config.server.max_concurrent_writes;
+    let dedup_retention_secs = config.events.dedup_retention_secs;
 
     tokio::spawn(async move {
-        if let Err(e) = run_tcp_server(tcp_db, tcp_jwt, tcp_events, tcp_addr, max_concurrent_writes, shutdown_rx).await {
+        if let Err(e) = run_tcp_server(tcp_db, tcp_jwt, tcp_events, tcp_addr, max_concurrent_writes, dedup_retention_secs, shutdown_rx).await {
             tracing::error!("TCP server error: {e}");
         }
     });

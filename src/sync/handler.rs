@@ -20,6 +20,7 @@ pub async fn handle_connection(
     jwt: Arc<JwtManager>,
     events: Arc<dyn EventStore>,
     batch_semaphore: Arc<Semaphore>,
+    dedup_retention_secs: i64,
 ) -> Result<()> {
     let (r, w) = tokio::io::split(stream);
     let mut reader = tokio::io::BufReader::new(r);
@@ -150,7 +151,7 @@ pub async fn handle_connection(
                 let batch: SyncBatchPayload = bincode::deserialize(&raw)?;
                 // Ensure cursor exists for this batch's provider (may differ from auth provider)
                 db.ensure_cursor(&device_id, &batch.provider).await?;
-                match handle_sync_batch(&batch, &user_id, &device_id, &batch.provider, &*db, &*events, &batch_semaphore).await {
+                match handle_sync_batch(&batch, &user_id, &device_id, &batch.provider, &*db, &*events, &batch_semaphore, dedup_retention_secs).await {
                     Ok(last_ts) => {
                         let ack = SyncAckPayload { last_ts_ms: last_ts };
                         write_frame(&mut writer, MsgType::SyncAck, &bincode::serialize(&ack)?).await?;
@@ -207,6 +208,7 @@ async fn handle_sync_batch(
     db: &dyn DatabaseRepo,
     events: &dyn EventStore,
     batch_semaphore: &Semaphore,
+    dedup_retention_secs: i64,
 ) -> Result<i64> {
     if batch.items.is_empty() {
         let current = db.get_last_ts(device_id, provider).await?;
@@ -288,10 +290,13 @@ async fn handle_sync_batch(
     let max_ts = batch.items.iter().map(|i| i.ts_ms).max().unwrap_or(0);
     db.advance_cursor(device_id, provider, max_ts).await?;
 
-    // Clean up old dedup index entries (older than cursor - 24h).
-    // Only run when cutoff is positive (device has >24h of data) to avoid
-    // scanning on every batch for new devices.
-    let cutoff_ms = max_ts - 24 * 3600 * 1000;
+    // Clean up dedup index entries older than the retention window.
+    // Retention is generous (default 30 days) so a late correction/update for
+    // an old message still hits the idx and dedups instead of inserting a
+    // duplicate row. idx_msg entries are tiny compared to events. Only run when
+    // the cutoff is positive (device has more than one retention window of data)
+    // to avoid scanning on every batch for new devices.
+    let cutoff_ms = max_ts - dedup_retention_secs * 1000;
     if cutoff_ms > 0 {
         if let Err(e) = events.cleanup_old_dedup(device_id, cutoff_ms).await {
             tracing::warn!("idx_msg cleanup failed for device {device_id}: {e}");

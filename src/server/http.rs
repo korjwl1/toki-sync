@@ -86,6 +86,10 @@ pub struct AppState {
     pub trust_proxy: bool,
     /// Pricing table for cost{} query computation.
     pub pricing: Arc<tokio::sync::RwLock<crate::pricing::PricingTable>>,
+    /// Short-TTL cache of user active status, keyed by user_id. Lets
+    /// authenticated requests reject deactivated accounts without a DB hit per
+    /// request. See `ensure_user_active`.
+    pub active_cache: Arc<std::sync::Mutex<HashMap<String, (bool, Instant)>>>,
 }
 
 pub async fn get_oidc_discovery(state: &AppState) -> Result<OidcDiscovery, AppError> {
@@ -232,9 +236,51 @@ pub fn extract_jwt(headers: &HeaderMap, jwt: &JwtManager) -> Result<crate::auth:
         .map_err(|_| AppError::unauthorized("invalid or expired token"))
 }
 
-pub async fn require_admin(headers: &HeaderMap, jwt: &JwtManager, db: &dyn DatabaseRepo) -> Result<String, AppError> {
-    let claims = extract_jwt(headers, jwt)?;
-    let is_admin = db.user_is_admin(&claims.sub).await.map_err(AppError::internal)?;
+/// Verify the account is still active, using a short-TTL in-memory cache to
+/// avoid a DB hit on every authenticated request. A deactivation takes effect
+/// within `ACTIVE_CACHE_TTL` (or immediately, when the admin handler invalidates
+/// the entry). Deleted users are treated as inactive.
+pub async fn ensure_user_active(state: &AppState, user_id: &str) -> Result<(), AppError> {
+    const ACTIVE_CACHE_TTL: Duration = Duration::from_secs(60);
+
+    // Fast path: a fresh cache entry answers without touching the DB.
+    {
+        let cache = state.active_cache.lock().unwrap();
+        if let Some((active, at)) = cache.get(user_id) {
+            if at.elapsed() < ACTIVE_CACHE_TTL {
+                return if *active {
+                    Ok(())
+                } else {
+                    Err(AppError::unauthorized("account deactivated"))
+                };
+            }
+        }
+    }
+
+    // Slow path: consult the DB and refresh the cache.
+    let active = match state.db.get_user_by_id(user_id).await.map_err(AppError::internal)? {
+        Some(u) => u.active,
+        None => false,
+    };
+    state.active_cache.lock().unwrap().insert(user_id.to_string(), (active, Instant::now()));
+    if active {
+        Ok(())
+    } else {
+        Err(AppError::unauthorized("account deactivated"))
+    }
+}
+
+/// Extract and verify the JWT, then confirm the account is still active.
+/// Use this for authenticated endpoints instead of bare `extract_jwt`.
+pub async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<crate::auth::jwt::Claims, AppError> {
+    let claims = extract_jwt(headers, &state.jwt)?;
+    ensure_user_active(state, &claims.sub).await?;
+    Ok(claims)
+}
+
+pub async fn require_admin(headers: &HeaderMap, state: &AppState) -> Result<String, AppError> {
+    let claims = authenticate(state, headers).await?;
+    let is_admin = state.db.user_is_admin(&claims.sub).await.map_err(AppError::internal)?;
     if is_admin {
         Ok(claims.sub)
     } else {

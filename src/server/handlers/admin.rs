@@ -13,7 +13,7 @@ pub async fn admin_list_users(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_admin(&headers, &state.jwt, &*state.db).await?;
+    require_admin(&headers, &state).await?;
 
     let rows = state.db.list_users().await.map_err(AppError::internal)?;
 
@@ -36,7 +36,7 @@ pub async fn admin_create_user(
     State(state): State<AppState>,
     Json(body): Json<CreateUserRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
-    require_admin(&headers, &state.jwt, &*state.db).await?;
+    require_admin(&headers, &state).await?;
 
     validate_username(&body.username)?;
 
@@ -81,7 +81,7 @@ pub async fn admin_delete_user(
     State(state): State<AppState>,
     axum::extract::Path(user_id): axum::extract::Path<String>,
 ) -> Result<StatusCode, AppError> {
-    require_admin(&headers, &state.jwt, &*state.db).await?;
+    require_admin(&headers, &state).await?;
 
     // Protect built-in admin account from deletion
     if let Ok(Some(user)) = state.db.get_user_by_id(&user_id).await {
@@ -103,6 +103,8 @@ pub async fn admin_delete_user(
     if !deleted {
         return Err(AppError::not_found("user not found"));
     }
+    // Evict any cached active-status so the deleted user is locked out at once.
+    state.active_cache.lock().unwrap().remove(&user_id);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -117,7 +119,7 @@ pub async fn admin_change_user_password(
     axum::extract::Path(user_id): axum::extract::Path<String>,
     Json(body): Json<AdminChangePasswordRequest>,
 ) -> Result<StatusCode, AppError> {
-    require_admin(&headers, &state.jwt, &*state.db).await?;
+    require_admin(&headers, &state).await?;
 
     // Verify user exists
     let user = state.db.get_user_by_id(&user_id).await.map_err(AppError::internal)?;
@@ -147,7 +149,7 @@ pub async fn admin_list_devices(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_admin(&headers, &state.jwt, &*state.db).await?;
+    require_admin(&headers, &state).await?;
 
     let rows = state.db.list_all_devices().await.map_err(AppError::internal)?;
 
@@ -171,7 +173,7 @@ pub async fn admin_change_user_role(
     Path(user_id): Path<String>,
     Json(body): Json<AdminChangeRoleRequest>,
 ) -> Result<StatusCode, AppError> {
-    require_admin(&headers, &state.jwt, &*state.db).await?;
+    require_admin(&headers, &state).await?;
 
     if body.role != "user" && body.role != "admin" {
         return Err(AppError {
@@ -192,7 +194,7 @@ pub async fn admin_delete_device(
     State(state): State<AppState>,
     axum::extract::Path(device_id): axum::extract::Path<String>,
 ) -> Result<StatusCode, AppError> {
-    require_admin(&headers, &state.jwt, &*state.db).await?;
+    require_admin(&headers, &state).await?;
 
     // Delete the device's event data from EventStore before removing from DB
     if let Err(e) = state.events.delete_device_events(&device_id).await {
@@ -212,7 +214,7 @@ pub async fn admin_list_pending(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_admin(&headers, &state.jwt, &*state.db).await?;
+    require_admin(&headers, &state).await?;
 
     let rows = state.db.list_pending_registrations().await.map_err(AppError::internal)?;
 
@@ -228,7 +230,7 @@ pub async fn admin_approve_pending(
     State(state): State<AppState>,
     Path(pending_id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    require_admin(&headers, &state.jwt, &*state.db).await?;
+    require_admin(&headers, &state).await?;
 
     let approved = state.db.approve_registration(&pending_id).await.map_err(|e| {
         if e.to_string().contains("UNIQUE") {
@@ -248,7 +250,7 @@ pub async fn admin_reject_pending(
     State(state): State<AppState>,
     Path(pending_id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    require_admin(&headers, &state.jwt, &*state.db).await?;
+    require_admin(&headers, &state).await?;
 
     let rejected = state.db.reject_registration(&pending_id).await.map_err(AppError::internal)?;
     if !rejected {
@@ -263,7 +265,7 @@ pub async fn admin_server_info(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_admin(&headers, &state.jwt, &*state.db).await?;
+    require_admin(&headers, &state).await?;
 
     let ds = &state.dynamic_settings;
     let reg_mode = ds.registration_mode().await;
@@ -288,7 +290,7 @@ pub async fn admin_list_settings(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_admin(&headers, &state.jwt, &*state.db).await?;
+    require_admin(&headers, &state).await?;
 
     let ds = &state.dynamic_settings;
     Ok(Json(serde_json::json!({
@@ -321,7 +323,7 @@ pub async fn admin_update_setting(
     Path(key): Path<String>,
     Json(body): Json<UpdateSettingRequest>,
 ) -> Result<StatusCode, AppError> {
-    require_admin(&headers, &state.jwt, &*state.db).await?;
+    require_admin(&headers, &state).await?;
 
     if !ALLOWED_SETTINGS.contains(&key.as_str()) {
         return Err(AppError {
@@ -370,7 +372,7 @@ pub async fn admin_set_user_active(
     Path(user_id): Path<String>,
     Json(body): Json<SetActiveRequest>,
 ) -> Result<StatusCode, AppError> {
-    let admin_id = require_admin(&headers, &state.jwt, &*state.db).await?;
+    let admin_id = require_admin(&headers, &state).await?;
 
     // Cannot deactivate yourself
     if !body.active && user_id == admin_id {
@@ -401,6 +403,10 @@ pub async fn admin_set_user_active(
     if !updated {
         return Err(AppError::not_found("user not found"));
     }
+
+    // Drop the cached active-status so the change takes effect immediately
+    // rather than after the cache TTL elapses.
+    state.active_cache.lock().unwrap().remove(&user_id);
 
     // If deactivating, revoke all their refresh tokens
     if !body.active {

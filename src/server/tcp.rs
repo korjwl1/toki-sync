@@ -25,6 +25,7 @@ pub async fn run_tcp_server(
     events: Arc<dyn EventStore>,
     addr: SocketAddr,
     max_concurrent_writes: usize,
+    dedup_retention_secs: i64,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -66,7 +67,7 @@ pub async fn run_tcp_server(
 
                 handlers.spawn(async move {
                     tracing::debug!("TCP connection from {peer_addr}");
-                    if let Err(e) = handle_connection(stream, db, jwt, ev, batch_sem).await {
+                    if let Err(e) = handle_connection(stream, db, jwt, ev, batch_sem, dedup_retention_secs).await {
                         tracing::warn!("TCP connection error from {peer_addr}: {e}");
                     }
                     drop(permit);
