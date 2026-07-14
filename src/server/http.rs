@@ -86,6 +86,10 @@ pub struct AppState {
     pub trust_proxy: bool,
     /// Pricing table for cost{} query computation.
     pub pricing: Arc<tokio::sync::RwLock<crate::pricing::PricingTable>>,
+    /// Short-TTL cache of user active status, keyed by user_id. Lets
+    /// authenticated requests reject deactivated accounts without a DB hit per
+    /// request. Shared with the TCP sync handler. See `is_user_active_cached`.
+    pub active_cache: ActiveCache,
 }
 
 pub async fn get_oidc_discovery(state: &AppState) -> Result<OidcDiscovery, AppError> {
@@ -232,9 +236,124 @@ pub fn extract_jwt(headers: &HeaderMap, jwt: &JwtManager) -> Result<crate::auth:
         .map_err(|_| AppError::unauthorized("invalid or expired token"))
 }
 
-pub async fn require_admin(headers: &HeaderMap, jwt: &JwtManager, db: &dyn DatabaseRepo) -> Result<String, AppError> {
-    let claims = extract_jwt(headers, jwt)?;
-    let is_admin = db.user_is_admin(&claims.sub).await.map_err(AppError::internal)?;
+/// Short-TTL cache of user active status, shared by the HTTP auth path and the
+/// TCP sync handler so a deactivation is enforced on both without a DB hit per
+/// request/batch. See [`ActiveCacheInner`].
+pub type ActiveCache = Arc<ActiveCacheInner>;
+
+/// Backing store for [`ActiveCache`]: a `user_id -> (active, checked_at)` map
+/// plus a global generation counter bumped on every eviction.
+///
+/// The generation closes a TOCTOU window: an in-flight DB read may resolve a
+/// user as `active=true` and then, just as it goes to cache that, an admin
+/// evicts the user (deactivate/delete). Without the counter the stale `true`
+/// would be re-inserted and survive for a full TTL. Instead a read captures the
+/// generation before hitting the DB and only caches if it is unchanged; both the
+/// insert and the eviction take the map lock, so the check-and-insert is atomic
+/// with respect to `evict`.
+pub struct ActiveCacheInner {
+    map: std::sync::Mutex<HashMap<String, (bool, Instant)>>,
+    generation: std::sync::atomic::AtomicU64,
+}
+
+impl Default for ActiveCacheInner {
+    fn default() -> Self {
+        Self {
+            map: std::sync::Mutex::new(HashMap::new()),
+            generation: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+
+impl ActiveCacheInner {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fresh (within TTL) cached value, if any.
+    fn get_fresh(&self, user_id: &str) -> Option<bool> {
+        let map = self.map.lock().unwrap();
+        map.get(user_id).and_then(|(active, at)| {
+            (at.elapsed() < ACTIVE_CACHE_TTL).then_some(*active)
+        })
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Cache a freshly-read value, but only if no eviction happened since the
+    /// read began (`gen_at_read`). Prevents resurrecting an entry an admin just
+    /// invalidated.
+    fn insert_if_current(&self, user_id: &str, active: bool, gen_at_read: u64) {
+        let mut map = self.map.lock().unwrap();
+        if self.generation.load(std::sync::atomic::Ordering::Acquire) == gen_at_read {
+            map.insert(user_id.to_string(), (active, Instant::now()));
+        }
+    }
+
+    /// Evict a user's cached status and bump the generation so any in-flight DB
+    /// read won't re-cache a now-stale value. Callers that change active status
+    /// (deactivate/delete) must call this.
+    pub fn evict(&self, user_id: &str) {
+        let mut map = self.map.lock().unwrap();
+        map.remove(user_id);
+        self.generation.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+/// TTL after which a cached active-status entry is re-checked against the DB.
+pub const ACTIVE_CACHE_TTL: Duration = Duration::from_secs(60);
+
+/// Resolve whether a user is active, consulting `cache` first and the DB on a
+/// miss/expiry, then refreshing the cache. Deleted users are treated as
+/// inactive. Callers that want immediate effect evict the entry (see the admin
+/// deactivate/delete handlers). Returns an error only on DB failure.
+pub async fn is_user_active_cached(
+    cache: &ActiveCache,
+    db: &dyn DatabaseRepo,
+    user_id: &str,
+) -> anyhow::Result<bool> {
+    // Fast path: a fresh cache entry answers without touching the DB.
+    if let Some(active) = cache.get_fresh(user_id) {
+        return Ok(active);
+    }
+
+    // Slow path: capture the generation BEFORE the DB read so a concurrent
+    // evict during the read prevents us from caching a stale value.
+    let gen_at_read = cache.generation();
+    let active = match db.get_user_by_id(user_id).await? {
+        Some(u) => u.active,
+        None => false,
+    };
+    cache.insert_if_current(user_id, active, gen_at_read);
+    Ok(active)
+}
+
+/// Verify the account is still active (HTTP path), mapping the result to an
+/// `AppError`. See `is_user_active_cached` for the caching semantics.
+pub async fn ensure_user_active(state: &AppState, user_id: &str) -> Result<(), AppError> {
+    let active = is_user_active_cached(&state.active_cache, &*state.db, user_id)
+        .await
+        .map_err(AppError::internal)?;
+    if active {
+        Ok(())
+    } else {
+        Err(AppError::unauthorized("account deactivated"))
+    }
+}
+
+/// Extract and verify the JWT, then confirm the account is still active.
+/// Use this for authenticated endpoints instead of bare `extract_jwt`.
+pub async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<crate::auth::jwt::Claims, AppError> {
+    let claims = extract_jwt(headers, &state.jwt)?;
+    ensure_user_active(state, &claims.sub).await?;
+    Ok(claims)
+}
+
+pub async fn require_admin(headers: &HeaderMap, state: &AppState) -> Result<String, AppError> {
+    let claims = authenticate(state, headers).await?;
+    let is_admin = state.db.user_is_admin(&claims.sub).await.map_err(AppError::internal)?;
     if is_admin {
         Ok(claims.sub)
     } else {
@@ -282,5 +401,66 @@ impl AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         (self.status, Json(serde_json::json!({ "error": self.message }))).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::sqlite::SqliteRepo;
+    use crate::db::models::NewUser;
+    use tempfile::NamedTempFile;
+
+    #[tokio::test]
+    async fn test_is_user_active_cached() {
+        let tmp = NamedTempFile::new().unwrap();
+        let db = SqliteRepo::open(tmp.path().to_str().unwrap()).await.unwrap();
+        db.create_user(&NewUser {
+            id: "u1".into(),
+            username: "u1".into(),
+            password_hash: "h".into(),
+            role: "user".into(),
+        }).await.unwrap();
+
+        let cache: ActiveCache = Arc::new(ActiveCacheInner::new());
+
+        // Fresh lookup: active, and now cached.
+        assert!(is_user_active_cached(&cache, &db, "u1").await.unwrap());
+
+        // Deactivate in the DB but keep the cache entry: within TTL the cached
+        // (active) value is still returned.
+        db.set_user_active("u1", false).await.unwrap();
+        assert!(
+            is_user_active_cached(&cache, &db, "u1").await.unwrap(),
+            "cached entry should still read active within TTL"
+        );
+
+        // Evict (as the admin handlers do): re-query returns inactive.
+        cache.evict("u1");
+        assert!(!is_user_active_cached(&cache, &db, "u1").await.unwrap());
+
+        // Unknown/deleted user is treated as inactive.
+        assert!(!is_user_active_cached(&cache, &db, "ghost").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_active_cache_evict_generation_beats_inflight_read() {
+        // Simulate the TOCTOU: capture the generation (as the slow path does),
+        // then an admin evict lands before we cache the read. The stale value
+        // must NOT be inserted.
+        let cache = ActiveCacheInner::new();
+
+        let gen_before = cache.generation();
+        // Admin evicts (deactivate) mid-read.
+        cache.evict("u1");
+        // Our in-flight read resolved active=true; try to cache it.
+        cache.insert_if_current("u1", true, gen_before);
+
+        assert!(cache.get_fresh("u1").is_none(), "stale value must not be cached after an evict");
+
+        // A read with the current generation caches normally.
+        let gen_now = cache.generation();
+        cache.insert_if_current("u1", true, gen_now);
+        assert_eq!(cache.get_fresh("u1"), Some(true));
     }
 }

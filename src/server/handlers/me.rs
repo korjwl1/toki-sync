@@ -5,7 +5,7 @@ use axum::{
 };
 use serde::Deserialize;
 
-use super::super::http::{AppError, AppState, extract_jwt};
+use super::super::http::{AppError, AppState, authenticate};
 
 // --- /me/devices -----------------------------------------------------------
 
@@ -13,7 +13,7 @@ pub async fn me_devices(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let claims = extract_jwt(&headers, &state.jwt)?;
+    let claims = authenticate(&state, &headers).await?;
     let rows = state.db.list_user_devices(&claims.sub).await.map_err(AppError::internal)?;
 
     let devices: Vec<_> = rows.into_iter().map(|d| {
@@ -34,7 +34,7 @@ pub async fn me_rename_device(
     axum::extract::Path(device_id): axum::extract::Path<String>,
     Json(body): Json<RenameDeviceRequest>,
 ) -> Result<StatusCode, AppError> {
-    let claims = extract_jwt(&headers, &state.jwt)?;
+    let claims = authenticate(&state, &headers).await?;
 
     let name = body.name.trim().to_string();
     if name.is_empty() || name.len() > 64 {
@@ -56,7 +56,7 @@ pub async fn me_delete_device(
     State(state): State<AppState>,
     axum::extract::Path(device_id): axum::extract::Path<String>,
 ) -> Result<StatusCode, AppError> {
-    let claims = extract_jwt(&headers, &state.jwt)?;
+    let claims = authenticate(&state, &headers).await?;
 
     // Verify ownership first
     let belongs = state.db.device_belongs_to_user(&device_id, &claims.sub).await.map_err(AppError::internal)?;
@@ -64,12 +64,18 @@ pub async fn me_delete_device(
         return Err(AppError::not_found("device not found"));
     }
 
-    // Ownership confirmed -- safe to delete VM data
+    // Ownership confirmed -- purge event data, delete the row, then purge again
+    // to catch any straggler batch that landed between the first purge and the
+    // row deletion from a still-open sync session.
     if let Err(e) = state.events.delete_device_events(&device_id).await {
-        tracing::warn!("failed to delete VM series for device {device_id}: {e}");
+        tracing::warn!("failed to delete events for device {device_id}: {e}");
     }
 
     state.db.delete_user_device(&device_id, &claims.sub).await.map_err(AppError::internal)?;
+
+    if let Err(e) = state.events.delete_device_events(&device_id).await {
+        tracing::warn!("failed to delete straggler events for device {device_id}: {e}");
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -85,7 +91,7 @@ pub async fn me_change_password(
     State(state): State<AppState>,
     Json(body): Json<ChangePasswordRequest>,
 ) -> Result<StatusCode, AppError> {
-    let claims = extract_jwt(&headers, &state.jwt)?;
+    let claims = authenticate(&state, &headers).await?;
 
     let user = state.db.get_user_by_id(&claims.sub).await.map_err(AppError::internal)?;
     let user = user.ok_or_else(|| AppError::not_found("user not found"))?;

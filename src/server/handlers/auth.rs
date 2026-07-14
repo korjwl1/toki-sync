@@ -7,7 +7,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
-use super::super::http::{AppError, AppState, extract_client_ip, extract_jwt, get_oidc_discovery, validate_username};
+use super::super::http::{AppError, AppState, authenticate, extract_client_ip, get_oidc_discovery, validate_username};
 
 // ─── /health ────────────────────────────────────────────────────────────────
 
@@ -47,6 +47,16 @@ pub async fn auth_method(
     }
 }
 
+/// A valid bcrypt hash (at `DEFAULT_COST`) used to equalize the timing of the
+/// login path when the username does not exist. Computed once on first use.
+fn dummy_password_hash() -> &'static str {
+    static HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HASH.get_or_init(|| {
+        bcrypt::hash("toki-sync-timing-equalizer", bcrypt::DEFAULT_COST)
+            .expect("bcrypt hash of constant must succeed")
+    })
+}
+
 // ─── /login ─────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -79,6 +89,12 @@ pub async fn login(
     let user = match user {
         Some(u) => u,
         None => {
+            // Perform a dummy bcrypt verify so the nonexistent-user path costs
+            // the same as the valid-user path, preventing timing-based username
+            // enumeration.
+            let dummy = dummy_password_hash().to_string();
+            let pw = body.password.clone();
+            let _ = tokio::task::spawn_blocking(move || bcrypt::verify(&pw, &dummy)).await;
             let _ = state.brute.record_failure(&ip, &body.username);
             return Err(AppError::unauthorized("invalid credentials"));
         }
@@ -612,7 +628,7 @@ pub async fn device_approve(
     State(state): State<AppState>,
     Json(body): Json<DeviceApproveRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let claims = extract_jwt(&headers, &state.jwt)?;
+    let claims = authenticate(&state, &headers).await?;
     let user_id = &claims.sub;
 
     state.brute.check(user_id, "__device_approve__").map_err(AppError::locked_out)?;

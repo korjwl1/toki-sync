@@ -145,6 +145,11 @@ async fn main() -> Result<()> {
     };
     tracing::info!("Pricing table loaded ({} models)", pricing.len());
 
+    // Shared active-status cache: used by both the HTTP auth path and the TCP
+    // sync handler so a deactivated user is locked out of both.
+    let active_cache: crate::server::http::ActiveCache =
+        Arc::new(crate::server::http::ActiveCacheInner::new());
+
     let state = AppState {
         db, jwt, brute, events: event_store.clone(),
         access_token_ttl_secs: config.auth.access_token_ttl_secs,
@@ -157,6 +162,7 @@ async fn main() -> Result<()> {
         dynamic_settings,
         trust_proxy: config.server.trust_proxy,
         pricing: Arc::new(tokio::sync::RwLock::new(pricing)),
+        active_cache: active_cache.clone(),
     };
 
     // -- Periodic pricing refresh (every 6 hours) ------------------------------
@@ -214,9 +220,11 @@ async fn main() -> Result<()> {
     let tcp_jwt = state.jwt.clone();
     let tcp_events = event_store.clone();
     let max_concurrent_writes = config.server.max_concurrent_writes;
+    let dedup_retention_secs = config.events.dedup_retention_secs;
+    let tcp_active_cache = active_cache.clone();
 
     tokio::spawn(async move {
-        if let Err(e) = run_tcp_server(tcp_db, tcp_jwt, tcp_events, tcp_addr, max_concurrent_writes, shutdown_rx).await {
+        if let Err(e) = run_tcp_server(tcp_db, tcp_jwt, tcp_events, tcp_addr, max_concurrent_writes, dedup_retention_secs, tcp_active_cache, shutdown_rx).await {
             tracing::error!("TCP server error: {e}");
         }
     });

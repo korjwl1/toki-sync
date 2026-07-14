@@ -25,6 +25,8 @@ pub async fn run_tcp_server(
     events: Arc<dyn EventStore>,
     addr: SocketAddr,
     max_concurrent_writes: usize,
+    dedup_retention_secs: i64,
+    active_cache: crate::server::http::ActiveCache,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -63,10 +65,11 @@ pub async fn run_tcp_server(
                 let jwt = jwt.clone();
                 let ev  = events.clone();
                 let batch_sem = batch_semaphore.clone();
+                let active_cache = active_cache.clone();
 
                 handlers.spawn(async move {
                     tracing::debug!("TCP connection from {peer_addr}");
-                    if let Err(e) = handle_connection(stream, db, jwt, ev, batch_sem).await {
+                    if let Err(e) = handle_connection(stream, db, jwt, ev, batch_sem, dedup_retention_secs, active_cache).await {
                         tracing::warn!("TCP connection error from {peer_addr}: {e}");
                     }
                     drop(permit);

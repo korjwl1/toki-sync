@@ -5,7 +5,7 @@ use axum::{
 };
 use serde::Deserialize;
 
-use super::super::http::{AppError, AppState, extract_jwt, require_admin};
+use super::super::http::{AppError, AppState, authenticate, require_admin};
 
 // ─── Admin: team management ─────────────────────────────────────────────────
 
@@ -19,7 +19,7 @@ pub async fn admin_create_team(
     State(state): State<AppState>,
     Json(body): Json<CreateTeamRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
-    require_admin(&headers, &state.jwt, &*state.db).await?;
+    require_admin(&headers, &state).await?;
 
     let name = body.name.trim().to_string();
     if name.is_empty() {
@@ -42,7 +42,7 @@ pub async fn admin_list_teams(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_admin(&headers, &state.jwt, &*state.db).await?;
+    require_admin(&headers, &state).await?;
 
     let teams = state.db.list_teams_with_member_count().await.map_err(AppError::internal)?;
 
@@ -63,7 +63,7 @@ pub async fn admin_delete_team(
     State(state): State<AppState>,
     Path(team_id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    require_admin(&headers, &state.jwt, &*state.db).await?;
+    require_admin(&headers, &state).await?;
 
     let deleted = state.db.delete_team(&team_id).await.map_err(AppError::internal)?;
     if !deleted {
@@ -86,7 +86,7 @@ pub async fn admin_add_team_member(
     Path(team_id): Path<String>,
     Json(body): Json<AddMemberRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
-    require_admin(&headers, &state.jwt, &*state.db).await?;
+    require_admin(&headers, &state).await?;
 
     // Verify team exists
     let team = state.db.get_team(&team_id).await.map_err(AppError::internal)?;
@@ -124,7 +124,7 @@ pub async fn admin_remove_team_member(
     State(state): State<AppState>,
     Path((team_id, user_id)): Path<(String, String)>,
 ) -> Result<StatusCode, AppError> {
-    require_admin(&headers, &state.jwt, &*state.db).await?;
+    require_admin(&headers, &state).await?;
 
     let removed = state.db.remove_team_member(&team_id, &user_id).await.map_err(AppError::internal)?;
     if !removed {
@@ -138,7 +138,7 @@ pub async fn admin_list_team_members(
     State(state): State<AppState>,
     Path(team_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_admin(&headers, &state.jwt, &*state.db).await?;
+    require_admin(&headers, &state).await?;
 
     // Verify team exists
     let team = state.db.get_team(&team_id).await.map_err(AppError::internal)?;
@@ -165,7 +165,7 @@ pub async fn me_teams(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let claims = extract_jwt(&headers, &state.jwt)?;
+    let claims = authenticate(&state, &headers).await?;
     let teams = state.db.list_user_teams(&claims.sub).await.map_err(AppError::internal)?;
 
     let team_list: Vec<_> = teams.into_iter().map(|t| {

@@ -209,7 +209,8 @@ impl PostgresRepo {
             .unwrap_or(0);
         if user_count == 0 {
             let id = uuid::Uuid::new_v4().to_string();
-            let hash = bcrypt::hash("admin123", bcrypt::DEFAULT_COST)
+            let (password, generated) = crate::db::resolve_seed_admin_password();
+            let hash = bcrypt::hash(&password, bcrypt::DEFAULT_COST)
                 .map_err(|e| anyhow::anyhow!("bcrypt hash failed: {e}"))?;
             let now = chrono::Utc::now().timestamp();
             sqlx::query(
@@ -222,7 +223,15 @@ impl PostgresRepo {
             .execute(&self.pool)
             .await
             .context("seed: create default admin")?;
-            tracing::info!("created default admin account (username: admin, password: admin123)");
+            if generated {
+                tracing::warn!(
+                    "no users found and TOKI_ADMIN_PASSWORD not set — created default admin \
+                     account (username: admin) with a randomly generated password: {password} \
+                     — log in and change it immediately"
+                );
+            } else {
+                tracing::info!("created default admin account (username: admin) using TOKI_ADMIN_PASSWORD");
+            }
         }
 
         Ok(())

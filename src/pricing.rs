@@ -49,11 +49,6 @@ impl PricingTable {
     pub fn get(&self, model: &str) -> Option<&ModelPricing> {
         self.prices.get(model)
     }
-
-    /// Calculate cost for given model + token counts.
-    pub fn cost(&self, model: &str, input: u64, output: u64, cache_create: u64, cache_read: u64) -> Option<f64> {
-        self.get(model).map(|p| p.cost(input, output, cache_create, cache_read))
-    }
 }
 
 /// Parse LiteLLM JSON and extract all model prices.
@@ -265,13 +260,13 @@ mod tests {
         });
         let table = PricingTable::new(prices);
 
-        let cost = table.cost("claude-sonnet-4-20250514", 1000, 500, 200, 3000).unwrap();
+        let cost = table.get("claude-sonnet-4-20250514").unwrap().cost(1000, 500, 200, 3000);
         assert!((cost - 0.01215).abs() < 1e-10);
     }
 
     #[test]
     fn test_no_match() {
         let table = PricingTable::new(HashMap::new());
-        assert!(table.cost("unknown-model", 1000, 500, 0, 0).is_none());
+        assert!(table.get("unknown-model").is_none());
     }
 }

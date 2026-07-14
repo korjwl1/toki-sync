@@ -20,6 +20,8 @@ pub async fn handle_connection(
     jwt: Arc<JwtManager>,
     events: Arc<dyn EventStore>,
     batch_semaphore: Arc<Semaphore>,
+    dedup_retention_secs: i64,
+    active_cache: crate::server::http::ActiveCache,
 ) -> Result<()> {
     let (r, w) = tokio::io::split(stream);
     let mut reader = tokio::io::BufReader::new(r);
@@ -61,6 +63,22 @@ pub async fn handle_connection(
 
     let user_id  = claims.sub.clone();
     let provider = auth.provider.clone();
+
+    // Reject deactivated (or deleted) accounts even while their access token is
+    // still within its TTL — same shared cache/semantics as the HTTP path.
+    match crate::server::http::is_user_active_cached(&active_cache, &*db, &user_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            let err = AuthErrPayload { reason: "account deactivated".to_string(), reset_required: false };
+            write_frame(&mut writer, MsgType::AuthErr, &bincode::serialize(&err)?).await?;
+            return Ok(());
+        }
+        Err(e) => {
+            let err = AuthErrPayload { reason: format!("active check failed: {e}"), reset_required: false };
+            write_frame(&mut writer, MsgType::AuthErr, &bincode::serialize(&err)?).await?;
+            return Ok(());
+        }
+    }
 
     // Find or create device using the stable device_key UUID
     let device_name = crate::server::http::truncate_device_name(&auth.device_name);
@@ -134,6 +152,21 @@ pub async fn handle_connection(
             }
 
             MsgType::SyncBatch | MsgType::SyncBatchZstd => {
+                // Re-check active status per batch so a mid-session deactivation
+                // stops further writes (cache TTL <= 60s, or instantly on evict),
+                // not just new connections.
+                match crate::server::http::is_user_active_cached(&active_cache, &*db, &user_id).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let err = SyncErrPayload { reason: "account deactivated".to_string() };
+                        write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?).await?;
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!("active check failed for device={device_id}: {e}");
+                        break;
+                    }
+                }
                 let raw = if msg_type == MsgType::SyncBatchZstd {
                     let decoder = zstd::stream::Decoder::new(payload.as_slice())
                         .map_err(|e| anyhow::anyhow!("zstd decoder init failed: {e}"))?;
@@ -150,7 +183,7 @@ pub async fn handle_connection(
                 let batch: SyncBatchPayload = bincode::deserialize(&raw)?;
                 // Ensure cursor exists for this batch's provider (may differ from auth provider)
                 db.ensure_cursor(&device_id, &batch.provider).await?;
-                match handle_sync_batch(&batch, &user_id, &device_id, &batch.provider, &*db, &*events, &batch_semaphore).await {
+                match handle_sync_batch(&batch, &user_id, &device_id, &batch.provider, &*db, &*events, &batch_semaphore, dedup_retention_secs).await {
                     Ok(last_ts) => {
                         let ack = SyncAckPayload { last_ts_ms: last_ts };
                         write_frame(&mut writer, MsgType::SyncAck, &bincode::serialize(&ack)?).await?;
@@ -207,6 +240,7 @@ async fn handle_sync_batch(
     db: &dyn DatabaseRepo,
     events: &dyn EventStore,
     batch_semaphore: &Semaphore,
+    dedup_retention_secs: i64,
 ) -> Result<i64> {
     if batch.items.is_empty() {
         let current = db.get_last_ts(device_id, provider).await?;
@@ -288,10 +322,13 @@ async fn handle_sync_batch(
     let max_ts = batch.items.iter().map(|i| i.ts_ms).max().unwrap_or(0);
     db.advance_cursor(device_id, provider, max_ts).await?;
 
-    // Clean up old dedup index entries (older than cursor - 24h).
-    // Only run when cutoff is positive (device has >24h of data) to avoid
-    // scanning on every batch for new devices.
-    let cutoff_ms = max_ts - 24 * 3600 * 1000;
+    // Clean up dedup index entries older than the retention window.
+    // Retention is generous (default 30 days) so a late correction/update for
+    // an old message still hits the idx and dedups instead of inserting a
+    // duplicate row. idx_msg entries are tiny compared to events. Only run when
+    // the cutoff is positive (device has more than one retention window of data)
+    // to avoid scanning on every batch for new devices.
+    let cutoff_ms = max_ts - dedup_retention_secs * 1000;
     if cutoff_ms > 0 {
         if let Err(e) = events.cleanup_old_dedup(device_id, cutoff_ms).await {
             tracing::warn!("idx_msg cleanup failed for device {device_id}: {e}");
