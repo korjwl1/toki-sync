@@ -223,6 +223,27 @@ impl Default for EventsConfig {
     }
 }
 
+impl EventsConfig {
+    /// Clamp an invalid `dedup_retention_secs` back to the default, warning so
+    /// the misconfiguration is visible. Invalid means zero/negative (the cutoff
+    /// math `max_ts - retention*1000` would never prune, or go the wrong way) or
+    /// so large that converting to milliseconds overflows i64. The `checked_mul`
+    /// guards that ms conversion (used by the sync handler's cleanup cutoff).
+    pub fn validate_dedup_retention(&mut self) {
+        let valid = self.dedup_retention_secs > 0
+            && self.dedup_retention_secs.checked_mul(1000).is_some();
+        if !valid {
+            let fallback = default_dedup_retention_secs();
+            tracing::warn!(
+                "events.dedup_retention_secs={} is invalid (must be > 0 and fit in ms); \
+                 falling back to default {}s",
+                self.dedup_retention_secs, fallback
+            );
+            self.dedup_retention_secs = fallback;
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     #[serde(default)]
@@ -243,8 +264,9 @@ impl Config {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config: {}", path.display()))?;
         let expanded = expand_env(&raw);
-        let config: Config = toml::from_str(&expanded)
+        let mut config: Config = toml::from_str(&expanded)
             .with_context(|| format!("failed to parse config: {}", path.display()))?;
+        config.events.validate_dedup_retention();
         Ok(config)
     }
 
@@ -276,5 +298,36 @@ impl Config {
                 features: FeaturesConfig::default(),
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_dedup_retention_clamps_invalid() {
+        let default = default_dedup_retention_secs();
+
+        let mut c = EventsConfig::default();
+        c.dedup_retention_secs = 0;
+        c.validate_dedup_retention();
+        assert_eq!(c.dedup_retention_secs, default, "zero clamps to default");
+
+        c.dedup_retention_secs = -3600;
+        c.validate_dedup_retention();
+        assert_eq!(c.dedup_retention_secs, default, "negative clamps to default");
+
+        c.dedup_retention_secs = i64::MAX; // *1000 overflows
+        c.validate_dedup_retention();
+        assert_eq!(c.dedup_retention_secs, default, "overflowing value clamps to default");
+    }
+
+    #[test]
+    fn test_validate_dedup_retention_keeps_valid() {
+        let mut c = EventsConfig::default();
+        c.dedup_retention_secs = 3600;
+        c.validate_dedup_retention();
+        assert_eq!(c.dedup_retention_secs, 3600, "a valid value is left unchanged");
     }
 }
