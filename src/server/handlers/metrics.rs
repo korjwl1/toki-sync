@@ -272,16 +272,38 @@ fn bucket_start_sec(
                 epoch + Duration::days(day_index.div_euclid(step_days) * step_days)
             };
             if let Some(midnight) = start_date.and_hms_opt(0, 0, 0) {
-                // On a DST spring-forward gap local midnight may not exist; take
-                // the earliest valid instant, falling back to the latest.
-                let resolved = tz.from_local_datetime(&midnight).earliest()
-                    .or_else(|| tz.from_local_datetime(&midnight).latest());
+                // Resolve local midnight to its UTC instant. The bucket must always
+                // anchor to the start of the local day (never an epoch fallback), so
+                // the two DST edge cases mirror the local CLI (query.rs
+                // bucket_start_ms) bit-for-bit:
+                //   * fall-back (local midnight happens twice) → the earlier instant.
+                //   * spring-forward gap (local midnight never exists) → advance in
+                //     1-minute steps to the first local time that does exist, i.e.
+                //     the first valid instant of that local day. Bounded to one day
+                //     of steps so a pathological tz can never loop forever.
+                let resolved = match tz.from_local_datetime(&midnight) {
+                    chrono::LocalResult::Single(dt) => Some(dt),
+                    chrono::LocalResult::Ambiguous(earlier, _) => Some(earlier),
+                    chrono::LocalResult::None => {
+                        let mut candidate = midnight;
+                        let mut hit = None;
+                        for _ in 0..24 * 60 {
+                            candidate += Duration::minutes(1);
+                            if let Some(dt) = tz.from_local_datetime(&candidate).earliest() {
+                                hit = Some(dt);
+                                break;
+                            }
+                        }
+                        hit
+                    }
+                };
                 if let Some(dt) = resolved {
                     return dt.timestamp();
                 }
             }
         }
-        // Fall through to epoch alignment if any step above failed.
+        // Fall through to epoch alignment only if timestamp conversion itself
+        // failed (not a DST edge case, which is handled above).
     }
 
     // Non-whole-day step, or any step without a tz (incl. weekly): epoch-aligned.
@@ -892,7 +914,7 @@ mod tests {
 
     #[test]
     fn test_bucket_start_sec_2d_epoch_anchored_local() {
-        use chrono::{Datelike, Duration, NaiveDate, TimeZone};
+        use chrono::{Duration, NaiveDate, TimeZone};
         // A whole-day multiple (2d) floors the local day index by 2, anchored at
         // the 1970-01-01 local midnight — and the bucket start is local midnight.
         let kst: chrono_tz::Tz = "Asia/Seoul".parse().unwrap();
@@ -947,6 +969,24 @@ mod tests {
         let b = bucket_start_sec(ts_ms, step_secs, Some(&kst), chrono::Weekday::Mon);
         let expect = (ts_ms / (step_secs * 1000)) * (step_secs * 1000) / 1000;
         assert_eq!(b, expect, "non-whole-day step must stay epoch-aligned");
+    }
+
+    #[test]
+    fn test_bucket_start_sec_spring_forward_gap_anchors_to_first_valid_instant() {
+        // Mirrors toki query.rs
+        // test_bucket_start_ms_spring_forward_gap_anchors_to_first_valid_instant.
+        // America/Sao_Paulo springs forward 2018-11-04 00:00 -> 01:00, so local
+        // midnight never exists; the day bucket must anchor to the first valid
+        // local instant (01:00 = 2018-11-04T03:00:00Z), never an epoch fallback.
+        let sp: chrono_tz::Tz = "America/Sao_Paulo".parse().unwrap();
+        let ts_ms = chrono::NaiveDate::from_ymd_opt(2018, 11, 4).unwrap()
+            .and_hms_opt(13, 0, 0).unwrap().and_utc().timestamp() * 1000;
+
+        let b = bucket_start_sec(ts_ms, 86400, Some(&sp), chrono::Weekday::Mon);
+        assert_eq!(
+            b, 1_541_300_400,
+            "gap-day bucket must anchor to first valid local instant (2018-11-04T03:00Z)"
+        );
     }
 
     #[test]
