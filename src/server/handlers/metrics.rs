@@ -306,14 +306,16 @@ fn aggregate_events_to_toki_json(
     step_secs: i64,
     since_ms: i64,
     until_ms: i64,
-    is_cost: bool,
+    // cost_usd is now always computed (see the cost block below), so the query
+    // being a cost{} query no longer gates it. Kept for call-site symmetry.
+    _is_cost: bool,
     is_events: bool,
     group_by: &str,
     pricing: &crate::pricing::PricingTable,
     tz: Option<&chrono_tz::Tz>,
     start_of_week: Option<chrono::Weekday>,
 ) -> Result<Vec<u8>, AppError> {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
 
     let step_ms = step_secs * 1000;
     // start_of_week defaults to Monday; only consulted for weekly steps.
@@ -326,7 +328,13 @@ fn aggregate_events_to_toki_json(
         provider: String,
     }
 
-    let mut buckets: BTreeMap<(i64, String), ModelBucket> = BTreeMap::new();
+    // Keyed by (bucket_sec, normalized_provider, group_key). The provider MUST
+    // be part of the key: without it, claude_code and codex events that share a
+    // bucket AND group key (e.g. `by (device_id)` on a device that runs both)
+    // collapse into one bucket and are emitted under whichever provider was seen
+    // first — with that provider's token field names. Empty provider normalizes
+    // to "claude_code" to match the downstream output default.
+    let mut buckets: BTreeMap<(i64, String, String), ModelBucket> = BTreeMap::new();
     // Cap bucket cardinality so a `scope=all` + `by (device_id)` query
     // against a fleet of N devices doesn't balloon `buckets` past memory.
     // Steps are already capped at 2000 buckets time-wise; with N devices
@@ -354,8 +362,9 @@ fn aggregate_events_to_toki_json(
         if bucket_ms + step_ms <= since_ms || bucket_ms >= until_ms { continue; }
 
         let group_key = group_dim.key(event);
+        let provider_key = if event.provider.is_empty() { "claude_code" } else { event.provider.as_str() };
 
-        let key = (bucket_sec, group_key.clone());
+        let key = (bucket_sec, provider_key.to_string(), group_key.clone());
         // Hard cap: refuse to allocate new entries past the limit. Existing
         // buckets still accumulate so the answer for already-seen
         // (bucket, group) pairs is correct; new combinations are dropped and
@@ -384,14 +393,23 @@ fn aggregate_events_to_toki_json(
         }
     }
 
-    // Compute cost if needed. Pricing table is keyed by model name; when
-    // group_by is not "model" (e.g. "project" or "device_id") the lookup
-    // returns None and cost stays absent — the client should aggregate by
-    // model when it needs cost.
-    if is_cost {
-        for ((_, group_key), bucket) in &mut buckets {
-            bucket.cost_usd = pricing.cost(group_key, bucket.input, bucket.output,
-                bucket.cache_create, bucket.cache_read);
+    // Compute per-bucket cost. cost_usd is part of the response contract for
+    // usage{} (and events{}) responses too, not just cost{} — the toki CLI and
+    // the dashboard read it from usage_per_models — so it is always computed,
+    // gated only by whether the model is priced. The pricing table is keyed by
+    // model name, so project/device_id group keys resolve to None and cost stays
+    // absent. Memoize the per-model ModelPricing lookup so a model spanning many
+    // time buckets is hashed once (this repeated lookup was the real waste, not
+    // the field).
+    {
+        let mut price_cache: HashMap<String, Option<crate::pricing::ModelPricing>> = HashMap::new();
+        for ((_, _, group_key), bucket) in &mut buckets {
+            if !price_cache.contains_key(group_key) {
+                price_cache.insert(group_key.clone(), pricing.get(group_key).cloned());
+            }
+            bucket.cost_usd = price_cache[group_key].as_ref().map(|p| {
+                p.cost(bucket.input, bucket.output, bucket.cache_create, bucket.cache_read)
+            });
         }
     }
 
@@ -410,7 +428,7 @@ fn aggregate_events_to_toki_json(
     // single-provider shape `{"providers": {"<provider>": [...]}}` — rather than
     // collapsing every provider's data under the first one seen.
     let mut per_provider: BTreeMap<String, BTreeMap<String, Vec<serde_json::Value>>> = BTreeMap::new();
-    for ((bucket_sec, group_key), bucket) in &buckets {
+    for ((bucket_sec, _provider_key, group_key), bucket) in &buckets {
         let ts_str = if let Some(tz) = tz {
             chrono::DateTime::from_timestamp(*bucket_sec, 0)
                 .map(|dt| dt.with_timezone(tz).format("%Y-%m-%dT%H:%M:%S").to_string())
@@ -438,11 +456,10 @@ fn aggregate_events_to_toki_json(
             entry["cache_read_input_tokens"] = serde_json::json!(bucket.cache_read);
         }
 
-        // Cost was precomputed above only when the query asked for it.
-        if is_cost {
-            if let Some(cost) = bucket.cost_usd {
-                entry["cost_usd"] = serde_json::json!(cost);
-            }
+        // cost_usd is emitted whenever the model is priced, for every query
+        // type (see the cost computation above).
+        if let Some(cost) = bucket.cost_usd {
+            entry["cost_usd"] = serde_json::json!(cost);
         }
         let period_key = format!("{}|{}", ts_str, group_key);
         per_provider
@@ -524,14 +541,23 @@ fn parse_duration_secs(s: &str) -> Result<i64, AppError> {
         message: format!("invalid duration: '{s}'"),
     };
 
-    // Try plain number (seconds), with or without a trailing 's'.
+    // Plain number of seconds.
     if let Ok(n) = s.parse::<i64>() {
         return if n > 0 { Ok(n) } else { Err(invalid()) };
     }
-    if let Ok(n) = s.trim_end_matches('s').parse::<i64>() {
-        return if n > 0 { Ok(n) } else { Err(invalid()) };
+    // Bare "<digits>s" — strip exactly one trailing unit, and only if the rest
+    // is all digits (so "3600ss" falls through to the strict compound parser
+    // below and is rejected there, rather than being trimmed to 3600).
+    if let Some(num) = s.strip_suffix('s') {
+        if !num.is_empty() && num.bytes().all(|b| b.is_ascii_digit()) {
+            let n: i64 = num.parse().map_err(|_| invalid())?;
+            return if n > 0 { Ok(n) } else { Err(invalid()) };
+        }
     }
 
+    // Compound units: repeated <digits><unit> (e.g. 1h30m). Every unit must be
+    // preceded by digits, and all arithmetic is checked so a huge value errors
+    // rather than wrapping.
     let mut total = 0i64;
     let mut num_buf = String::new();
     let mut saw_unit = false;
@@ -539,17 +565,24 @@ fn parse_duration_secs(s: &str) -> Result<i64, AppError> {
         if c.is_ascii_digit() {
             num_buf.push(c);
         } else {
-            let n: i64 = num_buf.parse().unwrap_or(0);
-            num_buf.clear();
-            match c {
-                'd' => total += n * 86400,
-                'h' => total += n * 3600,
-                'm' => total += n * 60,
-                's' => total += n,
-                'w' => total += n * 604800,
-                'y' => total += n * 31536000,
-                _ => return Err(invalid()),
+            // A unit with no preceding digits ("1hms", "hm") is malformed.
+            if num_buf.is_empty() {
+                return Err(invalid());
             }
+            let n: i64 = num_buf.parse().map_err(|_| invalid())?;
+            num_buf.clear();
+            let unit_secs: i64 = match c {
+                'd' => 86400,
+                'h' => 3600,
+                'm' => 60,
+                's' => 1,
+                'w' => 604800,
+                'y' => 31536000,
+                _ => return Err(invalid()),
+            };
+            total = n.checked_mul(unit_secs)
+                .and_then(|v| total.checked_add(v))
+                .ok_or_else(invalid)?;
             saw_unit = true;
         }
     }
@@ -764,6 +797,53 @@ mod tests {
         assert_eq!(parse_duration_secs("1d").unwrap(), 86400);
         assert_eq!(parse_duration_secs("1h30m").unwrap(), 5400);
         assert_eq!(parse_duration_secs("1w").unwrap(), 604800);
+    }
+
+    #[test]
+    fn test_parse_duration_secs_malformed_units() {
+        // Previously accepted by trim_end_matches / no digit-before-unit check.
+        assert!(parse_duration_secs("3600ss").is_err(), "double 's' suffix must error");
+        assert!(parse_duration_secs("1hms").is_err(), "units with no preceding digits");
+        assert!(parse_duration_secs("hms").is_err());
+        assert!(parse_duration_secs("s").is_err());
+        // Checked arithmetic: an astronomically large value errors, not wraps.
+        assert!(parse_duration_secs("100000000000000000y").is_err());
+        // Valid compound still parses.
+        assert_eq!(parse_duration_secs("2w").unwrap(), 1209600);
+        assert_eq!(parse_duration_secs("1h30m").unwrap(), 5400);
+    }
+
+    #[test]
+    fn test_aggregate_same_group_different_provider_not_merged() {
+        // A device that runs both claude_code and codex, grouped by device_id:
+        // both events share (bucket, device_id). Pre-fix they merged into one
+        // bucket under the first provider seen (with its token field names);
+        // post-fix the provider is part of the aggregation key, so each provider
+        // gets its own entry with its own field names.
+        let mut cc = make_event("device-a", "claude-3-opus", "/proj", 1700000000_000, 100);
+        cc.provider = "claude_code".to_string();
+        let mut cx = make_event("device-a", "gpt-5", "/proj", 1700000000_000, 200);
+        cx.provider = "codex".to_string();
+
+        let pricing = crate::pricing::PricingTable::new(std::collections::HashMap::new());
+        let out = aggregate_events_to_toki_json(
+            &[cc, cx], 60, 1700000000_000, 1700000060_000,
+            false, false, "device_id", &pricing, None, None,
+        ).unwrap();
+
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let providers = v["providers"].as_object().unwrap();
+        assert!(providers.contains_key("claude_code"), "missing claude_code: {providers:?}");
+        assert!(providers.contains_key("codex"), "missing codex: {providers:?}");
+
+        let cc_entry = &providers["claude_code"].as_array().unwrap()[0]["usage_per_models"][0];
+        assert_eq!(cc_entry["model"].as_str().unwrap(), "device-a");
+        assert_eq!(cc_entry["input_tokens"].as_u64().unwrap(), 100);
+        assert!(cc_entry.get("cache_creation_input_tokens").is_some(), "claude_code field names");
+
+        let cx_entry = &providers["codex"].as_array().unwrap()[0]["usage_per_models"][0];
+        assert_eq!(cx_entry["input_tokens"].as_u64().unwrap(), 200);
+        assert!(cx_entry.get("reasoning_output_tokens").is_some(), "codex field names");
     }
 
     #[test]
