@@ -90,21 +90,36 @@ pub async fn admin_delete_user(
         }
     }
 
-    // Delete VM series for all user's devices before cascade
     let device_ids = state.db.get_user_device_ids(&user_id).await.map_err(AppError::internal)?;
 
+    // (a) Stop new writes first: mark the user inactive and evict the active
+    //     cache so any live TCP sync session fails its next per-batch active
+    //     check (and the eviction's generation bump blocks an in-flight read
+    //     from re-caching a stale `active=true`).
+    let _ = state.db.set_user_active(&user_id, false).await;
+    state.active_cache.evict(&user_id);
+
+    // (b) Purge the user's event data.
     for did in &device_ids {
         if let Err(e) = state.events.delete_device_events(did).await {
-            tracing::warn!("failed to delete VM series for device {did}: {e}");
+            tracing::warn!("failed to delete events for device {did}: {e}");
         }
     }
 
+    // (c) Delete the relational rows (cascade).
     let deleted = state.db.delete_user(&user_id).await.map_err(AppError::internal)?;
     if !deleted {
         return Err(AppError::not_found("user not found"));
     }
-    // Evict any cached active-status so the deleted user is locked out at once.
-    state.active_cache.lock().unwrap().remove(&user_id);
+
+    // (d) Purge once more to catch any straggler batch that landed between (b)
+    //     and the session actually stopping.
+    for did in &device_ids {
+        if let Err(e) = state.events.delete_device_events(did).await {
+            tracing::warn!("failed to delete straggler events for device {did}: {e}");
+        }
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -196,7 +211,9 @@ pub async fn admin_delete_device(
 ) -> Result<StatusCode, AppError> {
     require_admin(&headers, &state).await?;
 
-    // Delete the device's event data from EventStore before removing from DB
+    // Purge the device's event data, delete the row, then purge again to catch
+    // any straggler batch that landed from a still-open sync session between the
+    // first purge and the row deletion.
     if let Err(e) = state.events.delete_device_events(&device_id).await {
         tracing::warn!("failed to delete events for device {device_id}: {e}");
     }
@@ -204,6 +221,10 @@ pub async fn admin_delete_device(
     let deleted = state.db.delete_device(&device_id).await.map_err(AppError::internal)?;
     if !deleted {
         return Err(AppError::not_found("device not found"));
+    }
+
+    if let Err(e) = state.events.delete_device_events(&device_id).await {
+        tracing::warn!("failed to delete straggler events for device {device_id}: {e}");
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -406,7 +427,7 @@ pub async fn admin_set_user_active(
 
     // Drop the cached active-status so the change takes effect immediately
     // rather than after the cache TTL elapses.
-    state.active_cache.lock().unwrap().remove(&user_id);
+    state.active_cache.evict(&user_id);
 
     // If deactivating, revoke all their refresh tokens
     if !body.active {

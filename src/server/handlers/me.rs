@@ -64,12 +64,18 @@ pub async fn me_delete_device(
         return Err(AppError::not_found("device not found"));
     }
 
-    // Ownership confirmed -- safe to delete VM data
+    // Ownership confirmed -- purge event data, delete the row, then purge again
+    // to catch any straggler batch that landed between the first purge and the
+    // row deletion from a still-open sync session.
     if let Err(e) = state.events.delete_device_events(&device_id).await {
-        tracing::warn!("failed to delete VM series for device {device_id}: {e}");
+        tracing::warn!("failed to delete events for device {device_id}: {e}");
     }
 
     state.db.delete_user_device(&device_id, &claims.sub).await.map_err(AppError::internal)?;
+
+    if let Err(e) = state.events.delete_device_events(&device_id).await {
+        tracing::warn!("failed to delete straggler events for device {device_id}: {e}");
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }

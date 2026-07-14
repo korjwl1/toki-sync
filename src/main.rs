@@ -148,7 +148,7 @@ async fn main() -> Result<()> {
     // Shared active-status cache: used by both the HTTP auth path and the TCP
     // sync handler so a deactivated user is locked out of both.
     let active_cache: crate::server::http::ActiveCache =
-        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        Arc::new(crate::server::http::ActiveCacheInner::new());
 
     let state = AppState {
         db, jwt, brute, events: event_store.clone(),
