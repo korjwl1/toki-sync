@@ -221,6 +221,18 @@ pub async fn handle_connection(
                     write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?).await?;
                     continue;
                 }
+                // Data hygiene: provider names come from the client; reject
+                // anything outside the known shape before it becomes row keys.
+                let provider_ok = !win.provider.is_empty()
+                    && win.provider.len() <= 32
+                    && win.provider.chars().all(|c| c.is_ascii_lowercase() || c == '_');
+                if !provider_ok {
+                    let err = SyncErrPayload {
+                        reason: format!("invalid provider name: {:?}", win.provider),
+                    };
+                    write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?).await?;
+                    continue;
+                }
                 // Windows are ~2/day/limit; anything huge is a misbehaving client.
                 const MAX_WINDOW_ITEMS: usize = 10_000;
                 if win.items.len() > MAX_WINDOW_ITEMS {

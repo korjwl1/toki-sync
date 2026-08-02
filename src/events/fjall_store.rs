@@ -593,8 +593,12 @@ impl EventStore for FjallEventStore {
             let mut stale = Vec::new();
             for guard in windows_ks.iter() {
                 let kv = guard.into_inner()?;
-                if let Ok(w) = bincode::deserialize::<toki_sync_protocol::WireWindow>(&kv.1) {
-                    if w.window_end_ms < cutoff_ms {
+                // The anchor is the key's trailing 8 bytes — no value decode.
+                let anchor = kv.0.len().checked_sub(8)
+                    .and_then(|i| kv.0.get(i..))
+                    .and_then(|b| b.try_into().ok().map(i64::from_be_bytes));
+                if let Some(a) = anchor {
+                    if a < cutoff_ms {
                         stale.push(kv.0.to_vec());
                     }
                 }

@@ -10,7 +10,8 @@ use super::{EventStore, ServerEvent, UserFilter};
 /// dedup at query time regardless of merge state.
 pub struct ClickHouseEventStore {
     url: String,
-    client: ureq::Agent,
+    client: ureq::Agent,    /// Serializes window read-merge-write cycles (see upsert_windows).
+    windows_lock: tokio::sync::Mutex<()>,
 }
 
 impl ClickHouseEventStore {
@@ -21,6 +22,7 @@ impl ClickHouseEventStore {
         let store = ClickHouseEventStore {
             url: url.trim_end_matches('/').to_string(),
             client,
+            windows_lock: tokio::sync::Mutex::new(()),
         };
         // Create table on startup (idempotent)
         store.create_table()?;
@@ -266,25 +268,42 @@ impl EventStore for ClickHouseEventStore {
     ) -> Result<()> {
         if items.is_empty() { return Ok(()); }
 
-        // Read the current merged state for this (user, provider) — a handful
-        // of rows — merge field-wise in app code, and insert the merged rows.
-        let existing = self.query_user_windows(user_id, 0).await?;
+        // Serialize read-merge-write per process: two devices of one user
+        // upserting concurrently could otherwise transiently lose one side's
+        // contribution (fjall has mutation_lock; this is the CH equivalent).
+        let _guard = self.windows_lock.lock().await;
+
+        // Read the current merged state — bounded to the incoming anchors'
+        // range so the FINAL (merge-on-read) scan never walks the user's full
+        // multi-year history on every 5-minute upload.
+        let since = items.iter().map(|w| w.window_end_ms).min().unwrap_or(0);
+        let existing = self.query_user_windows(user_id, since).await?;
+        let mut by_key: std::collections::HashMap<(u8, &str, &str, i64), &toki_sync_protocol::WireWindow> =
+            std::collections::HashMap::with_capacity(existing.len());
+        for (p, e) in &existing {
+            if p == provider {
+                by_key.insert((e.window_kind, e.limit_id.as_str(), e.account.as_str(), e.window_end_ms), e);
+            }
+        }
         let mut merged: Vec<toki_sync_protocol::WireWindow> = Vec::with_capacity(items.len());
         for w in items {
-            let mut row = w.clone();
-            if let Some((_, prev)) = existing.iter().find(|(p, e)| {
-                p == provider
-                    && e.window_kind == w.window_kind
-                    && e.limit_id == w.limit_id
-                    && e.account == w.account
-                    && e.window_end_ms == w.window_end_ms
-            }) {
-                let mut base = prev.clone();
-                super::merge_wire_windows(&mut base, w);
-                row = base;
+            match by_key.get(&(w.window_kind, w.limit_id.as_str(), w.account.as_str(), w.window_end_ms)) {
+                Some(prev) => {
+                    let mut base = (*prev).clone();
+                    super::merge_wire_windows(&mut base, w);
+                    // Skip rows whose merged state equals what is already
+                    // stored: with cursorless 60-day resends, re-inserting
+                    // unchanged rows multiplies ReplacingMergeTree versions
+                    // by orders of magnitude between background merges.
+                    if &&base == prev {
+                        continue;
+                    }
+                    merged.push(base);
+                }
+                None => merged.push(w.clone()),
             }
-            merged.push(row);
         }
+        if merged.is_empty() { return Ok(()); }
 
         let mut sql = format!("INSERT INTO toki_windows ({}) VALUES ", Self::WINDOW_COLS);
         for (i, w) in merged.iter().enumerate() {
