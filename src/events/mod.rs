@@ -122,7 +122,9 @@ pub fn merge_wire_windows(
     other: &toki_sync_protocol::WireWindow,
 ) {
     prev.peak_pct_x100 = prev.peak_pct_x100.max(other.peak_pct_x100);
-    if other.observed_ts_ms > prev.observed_ts_ms {
+    // >= not >: same-instant merges apply in arrival order (mirrors the
+    // client-side WindowSnapshotV1::merge_from).
+    if other.observed_ts_ms >= prev.observed_ts_ms {
         prev.observed_ts_ms = other.observed_ts_ms;
         prev.raw_resets_at_ms = other.raw_resets_at_ms;
         prev.last_sample_gap_ms = other.last_sample_gap_ms;
