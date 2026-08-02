@@ -65,6 +65,7 @@ impl ClickHouseEventStore {
                 raw_resets_at_ms Int64,
                 window_minutes UInt32,
                 peak_pct_x100 UInt16,
+                last_pct_x100 UInt16,
                 observed_ts_ms Int64,
                 first_seen_ms Int64,
                 finalized UInt8,
@@ -85,7 +86,7 @@ impl ClickHouseEventStore {
 
     fn window_from_row(cols: &[&str]) -> Option<(String, toki_sync_protocol::WireWindow)> {
         // TSV column order matches the SELECT in query_user_windows.
-        if cols.len() < 20 { return None; }
+        if cols.len() < 21 { return None; }
         Some((
             cols[1].to_string(),
             toki_sync_protocol::WireWindow {
@@ -96,25 +97,26 @@ impl ClickHouseEventStore {
                 raw_resets_at_ms: cols[6].parse().ok()?,
                 window_minutes: cols[7].parse().ok()?,
                 peak_pct_x100: cols[8].parse().ok()?,
-                observed_ts_ms: cols[9].parse().ok()?,
-                first_seen_ms: cols[10].parse().ok()?,
-                finalized: cols[11] == "1",
-                maxed_out: cols[12] == "1",
-                limit_reached_kind: cols[13].parse().ok()?,
-                time_to_100_ms: cols[14].parse().ok()?,
-                active_ms: cols[15].parse().ok()?,
-                last_sample_gap_ms: cols[16].parse().ok()?,
-                sampled_active_fraction: cols[17].parse().ok()?,
-                n_samples: cols[18].parse().ok()?,
-                plan: cols[19].to_string(),
+                last_pct_x100: cols[9].parse().ok()?,
+                observed_ts_ms: cols[10].parse().ok()?,
+                first_seen_ms: cols[11].parse().ok()?,
+                finalized: cols[12] == "1",
+                maxed_out: cols[13] == "1",
+                limit_reached_kind: cols[14].parse().ok()?,
+                time_to_100_ms: cols[15].parse().ok()?,
+                active_ms: cols[16].parse().ok()?,
+                last_sample_gap_ms: cols[17].parse().ok()?,
+                sampled_active_fraction: cols[18].parse().ok()?,
+                n_samples: cols[19].parse().ok()?,
+                plan: cols[20].to_string(),
             },
         ))
     }
 
     const WINDOW_COLS: &'static str =
         "user_id, provider, limit_id, account, window_kind, window_end_ms, raw_resets_at_ms, \
-         window_minutes, peak_pct_x100, observed_ts_ms, first_seen_ms, finalized, maxed_out, \
-         limit_reached_kind, time_to_100_ms, active_ms, last_sample_gap_ms, \
+         window_minutes, peak_pct_x100, last_pct_x100, observed_ts_ms, first_seen_ms, finalized, \
+         maxed_out, limit_reached_kind, time_to_100_ms, active_ms, last_sample_gap_ms, \
          sampled_active_fraction, n_samples, plan";
 
     fn execute(&self, query: &str) -> Result<String> {
@@ -288,7 +290,7 @@ impl EventStore for ClickHouseEventStore {
         for (i, w) in merged.iter().enumerate() {
             if i > 0 { sql.push(','); }
             sql.push_str(&format!(
-                "('{}','{}','{}','{}',{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},'{}')",
+                "('{}','{}','{}','{}',{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},'{}')",
                 Self::escape(user_id),
                 Self::escape(provider),
                 Self::escape(&w.limit_id),
@@ -298,6 +300,7 @@ impl EventStore for ClickHouseEventStore {
                 w.raw_resets_at_ms,
                 w.window_minutes,
                 w.peak_pct_x100,
+                w.last_pct_x100,
                 w.observed_ts_ms,
                 w.first_seen_ms,
                 w.finalized as u8,

@@ -147,6 +147,7 @@ pub async fn toki_query(
                 "raw_resets_at_ms": w.raw_resets_at_ms,
                 "window_minutes": w.window_minutes,
                 "peak_pct": (w.peak_pct_x100 as f64) / 100.0,
+                "last_pct": (w.last_pct_x100 as f64) / 100.0,
                 "observed_ts_ms": w.observed_ts_ms,
                 "first_seen_ms": w.first_seen_ms,
                 "finalized": w.finalized,
@@ -155,6 +156,7 @@ pub async fn toki_query(
                 "time_to_100_ms": w.time_to_100_ms,
                 "active_ms": w.active_ms,
                 "last_sample_gap_ms": w.last_sample_gap_ms,
+                "sampled_active_fraction": w.sampled_active_fraction,
                 "n_samples": w.n_samples,
                 "plan": w.plan,
             }));

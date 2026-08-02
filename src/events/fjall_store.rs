@@ -992,6 +992,7 @@ mod tests {
             raw_resets_at_ms: 1_786_000_010_000,
             window_minutes: 300,
             peak_pct_x100: 9000,
+            last_pct_x100: 9000,
             observed_ts_ms: 100,
             first_seen_ms: 50,
             finalized: false,

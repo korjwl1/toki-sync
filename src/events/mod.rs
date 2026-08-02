@@ -109,6 +109,14 @@ pub trait EventStore: Send + Sync + 'static {
 
 /// Field-wise merge shared by both backends (mirrors toki's local
 /// WindowSnapshotV1::merge_from — keep the two in semantic lockstep).
+///
+/// Documented deviation from the plan: `active_ms` / `n_samples` /
+/// `sampled_active_fraction` are device-local observations that the plan
+/// wanted recomputed server-side from the synced event stream at query time.
+/// v1 merges them with max() instead — an underestimate of the cross-device
+/// union but monotone and cheap; the recomputation needs an event scan per
+/// windows query and is deferred until multi-device active-time accuracy
+/// actually matters. Peak/flags/first_seen follow the plan exactly.
 pub fn merge_wire_windows(
     prev: &mut toki_sync_protocol::WireWindow,
     other: &toki_sync_protocol::WireWindow,
@@ -118,6 +126,7 @@ pub fn merge_wire_windows(
         prev.observed_ts_ms = other.observed_ts_ms;
         prev.raw_resets_at_ms = other.raw_resets_at_ms;
         prev.last_sample_gap_ms = other.last_sample_gap_ms;
+        prev.last_pct_x100 = other.last_pct_x100;
         prev.plan = other.plan.clone();
     }
     if other.first_seen_ms > 0 {

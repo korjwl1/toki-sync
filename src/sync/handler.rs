@@ -230,9 +230,23 @@ pub async fn handle_connection(
                     write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?).await?;
                     continue;
                 }
-                match events.upsert_windows(&user_id, &win.provider, &win.items).await {
+                // Clock-skew defense (plan F10): a future-dated client clock
+                // must not permanently win last-writer fields. Clamp observed
+                // timestamps to server_now + 60s before merging.
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                let clamp = now_ms + 60_000;
+                let mut items = win.items;
+                for w in &mut items {
+                    if w.observed_ts_ms > clamp {
+                        w.observed_ts_ms = clamp;
+                    }
+                }
+                match events.upsert_windows(&user_id, &win.provider, &items).await {
                     Ok(()) => {
-                        let last = win.items.iter().map(|w| w.observed_ts_ms).max().unwrap_or(0);
+                        let last = items.iter().map(|w| w.observed_ts_ms).max().unwrap_or(0);
                         let ack = SyncAckPayload { last_ts_ms: last };
                         write_frame(&mut writer, MsgType::SyncAck, &bincode::serialize(&ack)?).await?;
                     }
