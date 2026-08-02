@@ -209,7 +209,7 @@ pub async fn handle_connection(
                         break;
                     }
                 }
-                let win: toki_sync_protocol::SyncWindowsPayload = bincode::deserialize(&payload)?;
+                let mut win: toki_sync_protocol::SyncWindowsPayload = bincode::deserialize(&payload)?;
                 if win.windows_schema != toki_sync_protocol::WINDOWS_SCHEMA_VERSION {
                     let err = SyncErrPayload {
                         reason: format!(
@@ -261,15 +261,19 @@ pub async fn handle_connection(
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as i64)
                     .unwrap_or(0);
-                if let Some(bad) = win.items.iter().find(|w| !window_item_ok(w, now_ms_v)) {
-                    let err = SyncErrPayload {
-                        reason: format!(
-                            "invalid window item (limit_id={:?}, end={})",
-                            bad.limit_id, bad.window_end_ms
-                        ),
-                    };
-                    write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?).await?;
-                    continue;
+                // FILTER invalid items, never reject the batch: the client
+                // resends the identical cursorless set every cycle, so one
+                // malformed row (a broken codex generation, a >40d clock)
+                // would otherwise dead-letter that device's window sync for
+                // up to 60 days. Mirrors the observed_ts policy below, which
+                // clamps rather than rejects.
+                let before = win.items.len();
+                win.items.retain(|w| window_item_ok(w, now_ms_v));
+                let dropped = before - win.items.len();
+                if dropped > 0 {
+                    tracing::warn!(
+                        "sync_windows: dropped {dropped}/{before} invalid items for device={device_id}"
+                    );
                 }
                 // Clock-skew defense (plan F10): a future-dated client clock
                 // must not permanently win last-writer fields. Clamp observed

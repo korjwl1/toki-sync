@@ -10,7 +10,8 @@ use super::{EventStore, ServerEvent, UserFilter};
 /// dedup at query time regardless of merge state.
 pub struct ClickHouseEventStore {
     url: String,
-    client: ureq::Agent,    /// Serializes window read-merge-write cycles PER USER (see
+    client: ureq::Agent,
+    /// Serializes window read-merge-write cycles PER USER (see
     /// upsert_windows) — one user's slow FINAL scan or INSERT must not queue
     /// every other user's window sync behind a single global mutex.
     windows_locks: tokio::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
@@ -88,15 +89,44 @@ impl ClickHouseEventStore {
         Ok(())
     }
 
+    /// Reverse ClickHouse TSV escaping (\\, \t, \n, \r). Without it a stored
+    /// string containing a backslash never compares equal to its re-read
+    /// form, and the skip-identical check re-inserts that row every cycle.
+    fn tsv_unescape(s: &str) -> String {
+        if !s.contains('\\') {
+            return s.to_string();
+        }
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                out.push(c);
+                continue;
+            }
+            match chars.next() {
+                Some('t') => out.push('\t'),
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some('\\') => out.push('\\'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        }
+        out
+    }
+
     fn window_from_row(cols: &[&str]) -> Option<(String, toki_sync_protocol::WireWindow)> {
         // TSV column order matches the SELECT in query_user_windows.
         if cols.len() < 21 { return None; }
         Some((
-            cols[1].to_string(),
+            Self::tsv_unescape(cols[1]),
             toki_sync_protocol::WireWindow {
                 window_kind: cols[4].parse().ok()?,
-                limit_id: cols[2].to_string(),
-                account: cols[3].to_string(),
+                limit_id: Self::tsv_unescape(cols[2]),
+                account: Self::tsv_unescape(cols[3]),
                 window_end_ms: cols[5].parse().ok()?,
                 raw_resets_at_ms: cols[6].parse().ok()?,
                 window_minutes: cols[7].parse().ok()?,
@@ -112,7 +142,7 @@ impl ClickHouseEventStore {
                 last_sample_gap_ms: cols[17].parse().ok()?,
                 sampled_active_fraction: cols[18].parse().ok()?,
                 n_samples: cols[19].parse().ok()?,
-                plan: cols[20].to_string(),
+                plan: Self::tsv_unescape(cols[20]),
             },
         ))
     }
@@ -395,19 +425,35 @@ impl EventStore for ClickHouseEventStore {
     }
 
     async fn cleanup_old_windows(&self, cutoff_ms: i64) -> Result<usize> {
-        let sql = format!(
+        // ALTER ... DELETE is a part-rewriting mutation — with 730-day
+        // retention it would be a queued no-op every 6 hours for the table's
+        // first two years. Only mutate when matching rows actually exist.
+        let count_sql = format!(
+            "SELECT count() FROM toki_windows WHERE window_end_ms < {} FORMAT TSV",
+            cutoff_ms,
+        );
+        let delete_sql = format!(
             "ALTER TABLE toki_windows DELETE WHERE window_end_ms < {}",
             cutoff_ms,
         );
         let client = self.client.clone();
         let url = self.url.clone();
         tokio::task::spawn_blocking(move || {
+            let body = client.post(&url)
+                .set("Content-Type", "text/plain")
+                .send_string(&count_sql)
+                .map_err(|e| anyhow::anyhow!("ClickHouse windows count failed: {e}"))?
+                .into_string()
+                .unwrap_or_default();
+            let stale: usize = body.trim().parse().unwrap_or(0);
+            if stale == 0 {
+                return Ok(0);
+            }
             client.post(&url)
                 .set("Content-Type", "text/plain")
-                .send_string(&sql)
+                .send_string(&delete_sql)
                 .map_err(|e| anyhow::anyhow!("ClickHouse windows cleanup failed: {e}"))?;
-            // Mutation row counts are not returned synchronously.
-            Ok(0)
+            Ok(stale)
         })
         .await
         .context("spawn_blocking panicked")?
