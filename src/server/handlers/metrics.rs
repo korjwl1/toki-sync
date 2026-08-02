@@ -120,6 +120,52 @@ pub async fn toki_query(
         .transpose()?
         .unwrap_or(now);
 
+    // Windows metric: its own branch — one row per window instance, never
+    // bucketed, and (v1) strictly scope=self: windows are account-level
+    // provider state with no team aggregation yet.
+    if params.query.trim() == "windows" {
+        if requested_scope != "self" {
+            return Err(AppError::forbidden("windows supports scope=self only"));
+        }
+        let rows = state
+            .events
+            .query_user_windows(&claims.sub, start_ts * 1000)
+            .await
+            .map_err(AppError::internal)?;
+        let mut providers: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
+            std::collections::BTreeMap::new();
+        for (provider, w) in rows {
+            if w.window_end_ms > end_ts * 1000 {
+                continue;
+            }
+            // Same field names as the local WindowRow wire shape.
+            providers.entry(provider).or_default().push(serde_json::json!({
+                "kind": match w.window_kind { 0 => "session", 1 => "weekly", _ => "unknown" },
+                "limit_id": w.limit_id,
+                "account": w.account,
+                "window_end_ms": w.window_end_ms,
+                "raw_resets_at_ms": w.raw_resets_at_ms,
+                "window_minutes": w.window_minutes,
+                "peak_pct": (w.peak_pct_x100 as f64) / 100.0,
+                "observed_ts_ms": w.observed_ts_ms,
+                "first_seen_ms": w.first_seen_ms,
+                "finalized": w.finalized,
+                "maxed_out": w.maxed_out,
+                "limit_reached_kind": w.limit_reached_kind,
+                "time_to_100_ms": w.time_to_100_ms,
+                "active_ms": w.active_ms,
+                "last_sample_gap_ms": w.last_sample_gap_ms,
+                "n_samples": w.n_samples,
+                "plan": w.plan,
+            }));
+        }
+        for list in providers.values_mut() {
+            list.sort_by_key(|v| v["window_end_ms"].as_i64().unwrap_or(0));
+        }
+        let body = serde_json::json!({ "schema": 1, "windows": providers });
+        return Ok(axum::Json(body).into_response());
+    }
+
     let parsed = parse_toki_virtual_query(&params.query);
     let is_range = params.step.is_some();
 
@@ -660,6 +706,16 @@ fn parse_toki_virtual_query(query: &str) -> ParsedQuery {
     };
 
     ParsedQuery { is_cost, is_events, group_by }
+}
+
+
+/// Capability discovery for optional sync features. Older servers 404 here;
+/// clients treat only an authoritative 404/2xx as an answer (transient errors
+/// must be retried, not latched).
+pub async fn capabilities() -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({
+        "sync_windows_v1": true,
+    }))
 }
 
 #[cfg(test)]

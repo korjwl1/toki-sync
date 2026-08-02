@@ -33,6 +33,9 @@ pub struct FjallEventStore {
     events: Keyspace,
     idx_msg: Keyspace,
     idx_user: Keyspace,
+    /// Rate-limit windows: [user_id\0provider\0limit_id\0account\0][kind u8][window_end_ms i64 BE]
+    /// → bincode WireWindow. Additive keyspace (not part of EVENT_SCHEMA_VERSION).
+    windows: Keyspace,
     /// Serializes index-mutating operations (upsert / cleanup / delete).
     ///
     /// Fjall commits a batch atomically, but each op first *reads* the committed
@@ -42,6 +45,25 @@ pub struct FjallEventStore {
     /// upsert just replaced. This is an embedded local store, so serializing the
     /// (rare, batched) writes costs nothing meaningful.
     mutation_lock: Arc<Mutex<()>>,
+}
+
+/// Windows row key: user\0provider\0limit_id\0account\0[kind u8][window_end_ms i64 BE].
+/// Excludes device_id by design — one row per account-level window.
+fn window_row_key(user_id: &str, provider: &str, w: &toki_sync_protocol::WireWindow) -> Vec<u8> {
+    let mut key = Vec::with_capacity(
+        user_id.len() + provider.len() + w.limit_id.len() + w.account.len() + 4 + 9,
+    );
+    key.extend_from_slice(user_id.as_bytes());
+    key.push(0);
+    key.extend_from_slice(provider.as_bytes());
+    key.push(0);
+    key.extend_from_slice(w.limit_id.as_bytes());
+    key.push(0);
+    key.extend_from_slice(w.account.as_bytes());
+    key.push(0);
+    key.push(w.window_kind);
+    key.extend_from_slice(&w.window_end_ms.to_be_bytes());
+    key
 }
 
 impl FjallEventStore {
@@ -60,6 +82,7 @@ impl FjallEventStore {
         let events = db.keyspace("events", opts).context("open events keyspace")?;
         let idx_msg = db.keyspace("idx_msg", opts).context("open idx_msg keyspace")?;
         let idx_user = db.keyspace("idx_user", opts).context("open idx_user keyspace")?;
+        let windows = db.keyspace("windows", opts).context("open windows keyspace")?;
 
         // Check schema version — clear data if mismatched
         let stored = meta.get("schema_version").ok().flatten()
@@ -123,6 +146,7 @@ impl FjallEventStore {
             events,
             idx_msg,
             idx_user,
+            windows,
             mutation_lock: Arc::new(Mutex::new(())),
         })
     }
@@ -496,6 +520,90 @@ impl EventStore for FjallEventStore {
         .await
         .context("spawn_blocking panicked")?
     }
+
+    async fn upsert_windows(
+        &self,
+        user_id: &str,
+        provider: &str,
+        items: &[toki_sync_protocol::WireWindow],
+    ) -> Result<()> {
+        if items.is_empty() { return Ok(()); }
+        let windows_ks = self.windows.clone();
+        let mutation_lock = self.mutation_lock.clone();
+        let user_id = user_id.to_string();
+        let provider = provider.to_string();
+        let items = items.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let _guard = mutation_lock.lock().unwrap_or_else(|e| e.into_inner());
+            for w in &items {
+                let key = window_row_key(&user_id, &provider, w);
+                let merged = match windows_ks.get(&key)? {
+                    Some(prev_bytes) => {
+                        match bincode::deserialize::<toki_sync_protocol::WireWindow>(&prev_bytes) {
+                            Ok(mut prev) => {
+                                super::merge_wire_windows(&mut prev, w);
+                                prev
+                            }
+                            Err(_) => w.clone(),
+                        }
+                    }
+                    None => w.clone(),
+                };
+                let value = bincode::serialize(&merged)?;
+                windows_ks.insert(&key, value)?;
+            }
+            Ok(())
+        })
+        .await
+        .context("spawn_blocking panicked")?
+    }
+
+    async fn query_user_windows(
+        &self,
+        user_id: &str,
+        since_ms: i64,
+    ) -> Result<Vec<(String, toki_sync_protocol::WireWindow)>> {
+        let windows_ks = self.windows.clone();
+        let prefix = format!("{}\0", user_id).into_bytes();
+        tokio::task::spawn_blocking(move || {
+            let mut out = Vec::new();
+            for guard in windows_ks.prefix(&prefix) {
+                let kv = guard.into_inner()?;
+                // key = user\0provider\0limit\0account\0[kind][end]
+                let rest = &kv.0[prefix.len()..];
+                let Some(sep) = rest.iter().position(|&b| b == 0) else { continue };
+                let provider = String::from_utf8_lossy(&rest[..sep]).to_string();
+                if let Ok(w) = bincode::deserialize::<toki_sync_protocol::WireWindow>(&kv.1) {
+                    if w.window_end_ms >= since_ms {
+                        out.push((provider, w));
+                    }
+                }
+            }
+            Ok(out)
+        })
+        .await
+        .context("spawn_blocking panicked")?
+    }
+
+    async fn delete_user_windows(&self, user_id: &str) -> Result<()> {
+        let windows_ks = self.windows.clone();
+        let mutation_lock = self.mutation_lock.clone();
+        let prefix = format!("{}\0", user_id).into_bytes();
+        tokio::task::spawn_blocking(move || {
+            let _guard = mutation_lock.lock().unwrap_or_else(|e| e.into_inner());
+            let mut stale = Vec::new();
+            for guard in windows_ks.prefix(&prefix) {
+                let kv = guard.into_inner()?;
+                stale.push(kv.0.to_vec());
+            }
+            for key in stale {
+                windows_ks.remove(key)?;
+            }
+            Ok(())
+        })
+        .await
+        .context("spawn_blocking panicked")?
+    }
 }
 
 #[cfg(test)]
@@ -846,4 +954,62 @@ mod tests {
         let events = store.query_events(0, i64::MAX, UserFilter::All).await.unwrap();
         assert_eq!(events.len(), 2);
     }
+
+    #[tokio::test]
+    async fn windows_merge_is_field_wise_and_user_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FjallEventStore::open(&dir.path().join("ev")).unwrap();
+
+        let mut w = toki_sync_protocol::WireWindow {
+            window_kind: 0,
+            limit_id: "five_hour".into(),
+            account: "acct".into(),
+            window_end_ms: 1_786_000_000_000,
+            raw_resets_at_ms: 1_786_000_010_000,
+            window_minutes: 300,
+            peak_pct_x100: 9000,
+            observed_ts_ms: 100,
+            first_seen_ms: 50,
+            finalized: false,
+            maxed_out: false,
+            limit_reached_kind: 0,
+            time_to_100_ms: -1,
+            active_ms: 500,
+            last_sample_gap_ms: 10_000,
+            sampled_active_fraction: 1000,
+            n_samples: 10,
+            plan: "old".into(),
+        };
+        store.upsert_windows("user-a", "claude_code", &[w.clone()]).await.unwrap();
+
+        // Device B saw a lower peak but observed later and finalized.
+        w.peak_pct_x100 = 4000;
+        w.observed_ts_ms = 200;
+        w.finalized = true;
+        w.maxed_out = true;
+        w.time_to_100_ms = 7_200_000;
+        w.plan = "new".into();
+        store.upsert_windows("user-a", "claude_code", &[w.clone()]).await.unwrap();
+
+        let rows = store.query_user_windows("user-a", 0).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        let (provider, merged) = &rows[0];
+        assert_eq!(provider, "claude_code");
+        assert_eq!(merged.peak_pct_x100, 9000); // max, not last writer
+        assert_eq!(merged.observed_ts_ms, 200);
+        assert!(merged.finalized && merged.maxed_out);
+        assert_eq!(merged.time_to_100_ms, 7_200_000);
+        assert_eq!(merged.plan, "new");
+
+        // Another user's windows are invisible and separately deletable.
+        store.upsert_windows("user-b", "codex", &[w.clone()]).await.unwrap();
+        assert_eq!(store.query_user_windows("user-b", 0).await.unwrap().len(), 1);
+        store.delete_user_windows("user-a").await.unwrap();
+        assert_eq!(store.query_user_windows("user-a", 0).await.unwrap().len(), 0);
+        assert_eq!(store.query_user_windows("user-b", 0).await.unwrap().len(), 1);
+
+        // since filter
+        assert_eq!(store.query_user_windows("user-b", 1_790_000_000_000).await.unwrap().len(), 0);
+    }
+
 }

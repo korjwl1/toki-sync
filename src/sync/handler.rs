@@ -196,6 +196,54 @@ pub async fn handle_connection(
                 }
             }
 
+            MsgType::SyncWindows => {
+                match crate::server::http::is_user_active_cached(&active_cache, &*db, &user_id).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let err = SyncErrPayload { reason: "account deactivated".to_string() };
+                        write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?).await?;
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!("active check failed for device={device_id}: {e}");
+                        break;
+                    }
+                }
+                let win: toki_sync_protocol::SyncWindowsPayload = bincode::deserialize(&payload)?;
+                if win.windows_schema != toki_sync_protocol::WINDOWS_SCHEMA_VERSION {
+                    let err = SyncErrPayload {
+                        reason: format!(
+                            "unsupported windows_schema {} (server supports {})",
+                            win.windows_schema,
+                            toki_sync_protocol::WINDOWS_SCHEMA_VERSION
+                        ),
+                    };
+                    write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?).await?;
+                    continue;
+                }
+                // Windows are ~2/day/limit; anything huge is a misbehaving client.
+                const MAX_WINDOW_ITEMS: usize = 10_000;
+                if win.items.len() > MAX_WINDOW_ITEMS {
+                    let err = SyncErrPayload {
+                        reason: format!("too many window items ({} > {MAX_WINDOW_ITEMS})", win.items.len()),
+                    };
+                    write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?).await?;
+                    continue;
+                }
+                match events.upsert_windows(&user_id, &win.provider, &win.items).await {
+                    Ok(()) => {
+                        let last = win.items.iter().map(|w| w.observed_ts_ms).max().unwrap_or(0);
+                        let ack = SyncAckPayload { last_ts_ms: last };
+                        write_frame(&mut writer, MsgType::SyncAck, &bincode::serialize(&ack)?).await?;
+                    }
+                    Err(e) => {
+                        tracing::warn!("sync_windows error for device={device_id}: {e}");
+                        let err = SyncErrPayload { reason: e.to_string() };
+                        write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?).await?;
+                    }
+                }
+            }
+
             MsgType::Ping => {
                 write_empty_frame(&mut writer, MsgType::Pong).await?;
             }

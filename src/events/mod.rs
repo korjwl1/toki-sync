@@ -71,4 +71,66 @@ pub trait EventStore: Send + Sync + 'static {
     /// Clean up old dedup index entries for a device.
     /// Removes idx_msg entries whose event timestamp is older than cutoff_ms.
     async fn cleanup_old_dedup(&self, device_id: &str, cutoff_ms: i64) -> Result<()>;
+
+    // ── Rate-limit windows (capability sync_windows_v1) ─────────────────────
+    //
+    // Windows are account-level provider state: the key deliberately excludes
+    // device_id so every device's observation of the same window converges on
+    // one row, merged FIELD-WISE (peak=max, flags=OR, first_seen=min — never
+    // whole-row last-writer-wins, which would let a late-but-stale device
+    // erase another device's higher peak). Clients resend their full recent
+    // set; the merge makes that idempotent.
+
+    /// Merge window snapshots for (user, provider). Keyed by
+    /// (user_id, provider, limit_id, account, window_kind, window_end_ms).
+    async fn upsert_windows(
+        &self,
+        user_id: &str,
+        provider: &str,
+        items: &[toki_sync_protocol::WireWindow],
+    ) -> Result<()>;
+
+    /// Windows whose anchor is >= since_ms for the given user, as
+    /// (provider, window) pairs. v1 scope: single user only (scope=self).
+    async fn query_user_windows(
+        &self,
+        user_id: &str,
+        since_ms: i64,
+    ) -> Result<Vec<(String, toki_sync_protocol::WireWindow)>>;
+
+    /// Delete all window rows for a user (wired into account deletion —
+    /// windows have no device_id, so device purges can never reach them).
+    async fn delete_user_windows(&self, user_id: &str) -> Result<()>;
+}
+
+/// Field-wise merge shared by both backends (mirrors toki's local
+/// WindowSnapshotV1::merge_from — keep the two in semantic lockstep).
+pub fn merge_wire_windows(
+    prev: &mut toki_sync_protocol::WireWindow,
+    other: &toki_sync_protocol::WireWindow,
+) {
+    prev.peak_pct_x100 = prev.peak_pct_x100.max(other.peak_pct_x100);
+    if other.observed_ts_ms > prev.observed_ts_ms {
+        prev.observed_ts_ms = other.observed_ts_ms;
+        prev.raw_resets_at_ms = other.raw_resets_at_ms;
+        prev.last_sample_gap_ms = other.last_sample_gap_ms;
+        prev.plan = other.plan.clone();
+    }
+    if other.first_seen_ms > 0 {
+        prev.first_seen_ms = if prev.first_seen_ms > 0 {
+            prev.first_seen_ms.min(other.first_seen_ms)
+        } else {
+            other.first_seen_ms
+        };
+    }
+    prev.finalized |= other.finalized;
+    prev.maxed_out |= other.maxed_out;
+    prev.limit_reached_kind = prev.limit_reached_kind.max(other.limit_reached_kind);
+    prev.time_to_100_ms = match (prev.time_to_100_ms, other.time_to_100_ms) {
+        (-1, t) | (t, -1) => t,
+        (a, b) => a.min(b),
+    };
+    prev.active_ms = prev.active_ms.max(other.active_ms);
+    prev.sampled_active_fraction = prev.sampled_active_fraction.max(other.sampled_active_fraction);
+    prev.n_samples = prev.n_samples.max(other.n_samples);
 }

@@ -99,11 +99,15 @@ pub async fn admin_delete_user(
     let _ = state.db.set_user_active(&user_id, false).await;
     state.active_cache.evict(&user_id);
 
-    // (b) Purge the user's event data.
+    // (b) Purge the user's event data — and their window rows, which are keyed
+    //     by user (not device) and would otherwise survive every device purge.
     for did in &device_ids {
         if let Err(e) = state.events.delete_device_events(did).await {
             tracing::warn!("failed to delete events for device {did}: {e}");
         }
+    }
+    if let Err(e) = state.events.delete_user_windows(&user_id).await {
+        tracing::warn!("failed to delete windows for user {user_id}: {e}");
     }
 
     // (c) Delete the relational rows (cascade).
@@ -114,6 +118,9 @@ pub async fn admin_delete_user(
 
     // (d) Purge once more to catch any straggler batch that landed between (b)
     //     and the session actually stopping.
+    if let Err(e) = state.events.delete_user_windows(&user_id).await {
+        tracing::warn!("failed to delete straggler windows for user {user_id}: {e}");
+    }
     for did in &device_ids {
         if let Err(e) = state.events.delete_device_events(did).await {
             tracing::warn!("failed to delete straggler events for device {did}: {e}");

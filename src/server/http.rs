@@ -140,6 +140,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/auth/callback", get(auth::oidc_callback))
         // Toki query: same interface as local daemon REPORT protocol
         .route("/api/v1/toki/query", get(metrics::toki_query))
+        // Capability discovery: lets clients probe optional TCP messages
+        // (older servers 404 here and DROP the connection on unknown frames,
+        // so this must be checked before sending them).
+        .route("/api/v1/capabilities", get(metrics::capabilities))
         // User self-service
         .route("/me/devices", get(me::me_devices))
         .route("/me/devices/:device_id", delete(me::me_delete_device))

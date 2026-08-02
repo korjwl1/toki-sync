@@ -46,8 +46,76 @@ impl ClickHouseEventStore {
             ORDER BY (device_id, provider, msg_id)
         ";
         self.execute(ddl).context("create toki_events table")?;
+
+        // Rate-limit windows: account-level, no device_id in the key (see
+        // events/mod.rs). ReplacingMergeTree keeps the row with the highest
+        // observed_ts_ms per key; upsert_windows does an app-level field-wise
+        // merge first and inserts the merged row (which carries max observed),
+        // so the survivor is always the merged state. A concurrent upsert can
+        // transiently lose one side's contribution — clients resend their full
+        // recent set, so the merge converges on the next cycle.
+        let windows_ddl = "
+            CREATE TABLE IF NOT EXISTS toki_windows (
+                user_id String,
+                provider String,
+                limit_id String,
+                account String,
+                window_kind UInt8,
+                window_end_ms Int64,
+                raw_resets_at_ms Int64,
+                window_minutes UInt32,
+                peak_pct_x100 UInt16,
+                observed_ts_ms Int64,
+                first_seen_ms Int64,
+                finalized UInt8,
+                maxed_out UInt8,
+                limit_reached_kind UInt8,
+                time_to_100_ms Int64,
+                active_ms UInt64,
+                last_sample_gap_ms Int64,
+                sampled_active_fraction UInt16,
+                n_samples UInt32,
+                plan String
+            ) ENGINE = ReplacingMergeTree(observed_ts_ms)
+            ORDER BY (user_id, provider, limit_id, account, window_kind, window_end_ms)
+        ";
+        self.execute(windows_ddl).context("create toki_windows table")?;
         Ok(())
     }
+
+    fn window_from_row(cols: &[&str]) -> Option<(String, toki_sync_protocol::WireWindow)> {
+        // TSV column order matches the SELECT in query_user_windows.
+        if cols.len() < 20 { return None; }
+        Some((
+            cols[1].to_string(),
+            toki_sync_protocol::WireWindow {
+                window_kind: cols[4].parse().ok()?,
+                limit_id: cols[2].to_string(),
+                account: cols[3].to_string(),
+                window_end_ms: cols[5].parse().ok()?,
+                raw_resets_at_ms: cols[6].parse().ok()?,
+                window_minutes: cols[7].parse().ok()?,
+                peak_pct_x100: cols[8].parse().ok()?,
+                observed_ts_ms: cols[9].parse().ok()?,
+                first_seen_ms: cols[10].parse().ok()?,
+                finalized: cols[11] == "1",
+                maxed_out: cols[12] == "1",
+                limit_reached_kind: cols[13].parse().ok()?,
+                time_to_100_ms: cols[14].parse().ok()?,
+                active_ms: cols[15].parse().ok()?,
+                last_sample_gap_ms: cols[16].parse().ok()?,
+                sampled_active_fraction: cols[17].parse().ok()?,
+                n_samples: cols[18].parse().ok()?,
+                plan: cols[19].to_string(),
+            },
+        ))
+    }
+
+    const WINDOW_COLS: &'static str =
+        "user_id, provider, limit_id, account, window_kind, window_end_ms, raw_resets_at_ms, \
+         window_minutes, peak_pct_x100, observed_ts_ms, first_seen_ms, finalized, maxed_out, \
+         limit_reached_kind, time_to_100_ms, active_ms, last_sample_gap_ms, \
+         sampled_active_fraction, n_samples, plan";
 
     fn execute(&self, query: &str) -> Result<String> {
         let resp = self.client.post(&self.url)
@@ -182,6 +250,126 @@ impl EventStore for ClickHouseEventStore {
                 .set("Content-Type", "text/plain")
                 .send_string(&sql)
                 .map_err(|e| anyhow::anyhow!("ClickHouse DELETE failed: {e}"))?;
+            Ok(())
+        })
+        .await
+        .context("spawn_blocking panicked")?
+    }
+
+    async fn upsert_windows(
+        &self,
+        user_id: &str,
+        provider: &str,
+        items: &[toki_sync_protocol::WireWindow],
+    ) -> Result<()> {
+        if items.is_empty() { return Ok(()); }
+
+        // Read the current merged state for this (user, provider) — a handful
+        // of rows — merge field-wise in app code, and insert the merged rows.
+        let existing = self.query_user_windows(user_id, 0).await?;
+        let mut merged: Vec<toki_sync_protocol::WireWindow> = Vec::with_capacity(items.len());
+        for w in items {
+            let mut row = w.clone();
+            if let Some((_, prev)) = existing.iter().find(|(p, e)| {
+                p == provider
+                    && e.window_kind == w.window_kind
+                    && e.limit_id == w.limit_id
+                    && e.account == w.account
+                    && e.window_end_ms == w.window_end_ms
+            }) {
+                let mut base = prev.clone();
+                super::merge_wire_windows(&mut base, w);
+                row = base;
+            }
+            merged.push(row);
+        }
+
+        let mut sql = format!("INSERT INTO toki_windows ({}) VALUES ", Self::WINDOW_COLS);
+        for (i, w) in merged.iter().enumerate() {
+            if i > 0 { sql.push(','); }
+            sql.push_str(&format!(
+                "('{}','{}','{}','{}',{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},'{}')",
+                Self::escape(user_id),
+                Self::escape(provider),
+                Self::escape(&w.limit_id),
+                Self::escape(&w.account),
+                w.window_kind,
+                w.window_end_ms,
+                w.raw_resets_at_ms,
+                w.window_minutes,
+                w.peak_pct_x100,
+                w.observed_ts_ms,
+                w.first_seen_ms,
+                w.finalized as u8,
+                w.maxed_out as u8,
+                w.limit_reached_kind,
+                w.time_to_100_ms,
+                w.active_ms,
+                w.last_sample_gap_ms,
+                w.sampled_active_fraction,
+                w.n_samples,
+                Self::escape(&w.plan),
+            ));
+        }
+
+        let client = self.client.clone();
+        let url = self.url.clone();
+        tokio::task::spawn_blocking(move || {
+            client.post(&url)
+                .set("Content-Type", "text/plain")
+                .send_string(&sql)
+                .map_err(|e| anyhow::anyhow!("ClickHouse windows INSERT failed: {e}"))?;
+            Ok(())
+        })
+        .await
+        .context("spawn_blocking panicked")?
+    }
+
+    async fn query_user_windows(
+        &self,
+        user_id: &str,
+        since_ms: i64,
+    ) -> Result<Vec<(String, toki_sync_protocol::WireWindow)>> {
+        let sql = format!(
+            "SELECT {} FROM toki_windows FINAL WHERE user_id = '{}' AND window_end_ms >= {} FORMAT TSV",
+            Self::WINDOW_COLS,
+            Self::escape(user_id),
+            since_ms,
+        );
+        let client = self.client.clone();
+        let url = self.url.clone();
+        let body = tokio::task::spawn_blocking(move || -> Result<String> {
+            let resp = client.post(&url)
+                .set("Content-Type", "text/plain")
+                .send_string(&sql)
+                .map_err(|e| anyhow::anyhow!("ClickHouse windows SELECT failed: {e}"))?;
+            resp.into_string().context("read ClickHouse response")
+        })
+        .await
+        .context("spawn_blocking panicked")??;
+
+        let mut out = Vec::new();
+        for line in body.lines() {
+            let cols: Vec<&str> = line.split('\t').collect();
+            if let Some(pair) = Self::window_from_row(&cols) {
+                out.push(pair);
+            }
+        }
+        Ok(out)
+    }
+
+    async fn delete_user_windows(&self, user_id: &str) -> Result<()> {
+        let sql = format!(
+            "ALTER TABLE toki_windows DELETE WHERE user_id = '{}'",
+            Self::escape(user_id),
+        );
+        let client = self.client.clone();
+        let url = self.url.clone();
+        tokio::task::spawn_blocking(move || {
+            client.post(&url)
+                .set("Content-Type", "text/plain")
+                .send_string(&sql)
+                .map_err(|e| anyhow::anyhow!("ClickHouse windows DELETE failed: {e}"))?;
             Ok(())
         })
         .await
