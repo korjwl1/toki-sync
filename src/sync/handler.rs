@@ -242,6 +242,35 @@ pub async fn handle_connection(
                     write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?).await?;
                     continue;
                 }
+                // Per-item hygiene: these strings become storage keys (NUL is
+                // the fjall key delimiter) and the timestamps drive retention.
+                fn window_item_ok(w: &toki_sync_protocol::WireWindow, now_ms: i64) -> bool {
+                    fn str_ok(s: &str, max: usize) -> bool {
+                        s.len() <= max && !s.chars().any(|c| c.is_control())
+                    }
+                    str_ok(&w.limit_id, 64)
+                        && str_ok(&w.account, 64)
+                        && str_ok(&w.plan, 64)
+                        && w.window_kind <= 1
+                        && w.window_minutes > 0
+                        && w.window_minutes <= 60 * 24 * 31
+                        && w.window_end_ms > now_ms - 2 * 365 * 86_400_000
+                        && w.window_end_ms < now_ms + 40 * 86_400_000
+                }
+                let now_ms_v = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                if let Some(bad) = win.items.iter().find(|w| !window_item_ok(w, now_ms_v)) {
+                    let err = SyncErrPayload {
+                        reason: format!(
+                            "invalid window item (limit_id={:?}, end={})",
+                            bad.limit_id, bad.window_end_ms
+                        ),
+                    };
+                    write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?).await?;
+                    continue;
+                }
                 // Clock-skew defense (plan F10): a future-dated client clock
                 // must not permanently win last-writer fields. Clamp observed
                 // timestamps to server_now + 60s before merging.
@@ -256,6 +285,25 @@ pub async fn handle_connection(
                         w.observed_ts_ms = clamp;
                     }
                 }
+                // Pre-merge in-batch duplicates (same logical window twice in
+                // one payload): stores upsert item-by-item, and without this a
+                // later low-peak duplicate could overwrite an earlier high
+                // peak inside the same ClickHouse batch.
+                {
+                    let mut by_key: std::collections::HashMap<(u8, String, String, i64), toki_sync_protocol::WireWindow> =
+                        std::collections::HashMap::with_capacity(items.len());
+                    for w in items.drain(..) {
+                        let key = (w.window_kind, w.limit_id.clone(), w.account.clone(), w.window_end_ms);
+                        match by_key.get_mut(&key) {
+                            Some(prev) => crate::events::merge_wire_windows(prev, &w),
+                            None => { by_key.insert(key, w); }
+                        }
+                    }
+                    items = by_key.into_values().collect();
+                }
+                // Same write-pressure valve as event batches: bounded
+                // concurrent backend writes across all connections.
+                let _write_permit = batch_semaphore.acquire().await;
                 match events.upsert_windows(&user_id, &win.provider, &items).await {
                     Ok(()) => {
                         let last = items.iter().map(|w| w.observed_ts_ms).max().unwrap_or(0);

@@ -10,8 +10,10 @@ use super::{EventStore, ServerEvent, UserFilter};
 /// dedup at query time regardless of merge state.
 pub struct ClickHouseEventStore {
     url: String,
-    client: ureq::Agent,    /// Serializes window read-merge-write cycles (see upsert_windows).
-    windows_lock: tokio::sync::Mutex<()>,
+    client: ureq::Agent,    /// Serializes window read-merge-write cycles PER USER (see
+    /// upsert_windows) — one user's slow FINAL scan or INSERT must not queue
+    /// every other user's window sync behind a single global mutex.
+    windows_locks: tokio::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl ClickHouseEventStore {
@@ -22,7 +24,7 @@ impl ClickHouseEventStore {
         let store = ClickHouseEventStore {
             url: url.trim_end_matches('/').to_string(),
             client,
-            windows_lock: tokio::sync::Mutex::new(()),
+            windows_locks: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         };
         // Create table on startup (idempotent)
         store.create_table()?;
@@ -268,10 +270,22 @@ impl EventStore for ClickHouseEventStore {
     ) -> Result<()> {
         if items.is_empty() { return Ok(()); }
 
-        // Serialize read-merge-write per process: two devices of one user
+        // Serialize read-merge-write per user: two devices of one user
         // upserting concurrently could otherwise transiently lose one side's
-        // contribution (fjall has mutation_lock; this is the CH equivalent).
-        let _guard = self.windows_lock.lock().await;
+        // contribution (fjall has its windows lock; this is the CH
+        // equivalent, keyed so users never queue behind each other).
+        let user_lock = {
+            let mut locks = self.windows_locks.lock().await;
+            // Prune stale entries opportunistically (bounded growth).
+            if locks.len() > 10_000 {
+                locks.retain(|_, l| std::sync::Arc::strong_count(l) > 1);
+            }
+            locks
+                .entry(user_id.to_string())
+                .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let _guard = user_lock.lock().await;
 
         // Read the current merged state — bounded to the incoming anchors'
         // range so the FINAL (merge-on-read) scan never walks the user's full

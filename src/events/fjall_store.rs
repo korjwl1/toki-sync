@@ -34,8 +34,15 @@ pub struct FjallEventStore {
     idx_msg: Keyspace,
     idx_user: Keyspace,
     /// Rate-limit windows: [user_id\0provider\0limit_id\0account\0][kind u8][window_end_ms i64 BE]
-    /// → bincode WireWindow. Additive keyspace (not part of EVENT_SCHEMA_VERSION).
+    /// → [version u8][bincode WireWindow]. The version byte decouples the
+    /// persisted layout from protocol evolution: unknown (future) versions
+    /// are PRESERVED, never clobbered, by older binaries. Additive keyspace
+    /// (not part of EVENT_SCHEMA_VERSION).
     windows: Keyspace,
+    /// Serializes window read-merge-write cycles. Deliberately separate from
+    /// mutation_lock: window traffic must not queue behind event-batch index
+    /// mutations (and vice versa).
+    windows_lock: Arc<Mutex<()>>,
     /// Serializes index-mutating operations (upsert / cleanup / delete).
     ///
     /// Fjall commits a batch atomically, but each op first *reads* the committed
@@ -45,6 +52,24 @@ pub struct FjallEventStore {
     /// upsert just replaced. This is an embedded local store, so serializing the
     /// (rare, batched) writes costs nothing meaningful.
     mutation_lock: Arc<Mutex<()>>,
+}
+
+const WINDOW_VALUE_VERSION: u8 = 1;
+
+fn encode_window(w: &toki_sync_protocol::WireWindow) -> Result<Vec<u8>> {
+    let body = bincode::serialize(w)?;
+    let mut out = Vec::with_capacity(body.len() + 1);
+    out.push(WINDOW_VALUE_VERSION);
+    out.extend_from_slice(&body);
+    Ok(out)
+}
+
+fn decode_window(bytes: &[u8]) -> Option<toki_sync_protocol::WireWindow> {
+    let (&version, body) = bytes.split_first()?;
+    if version != WINDOW_VALUE_VERSION {
+        return None;
+    }
+    bincode::deserialize(body).ok()
 }
 
 /// Windows row key: user\0provider\0limit_id\0account\0[kind u8][window_end_ms i64 BE].
@@ -147,6 +172,7 @@ impl FjallEventStore {
             idx_msg,
             idx_user,
             windows,
+            windows_lock: Arc::new(Mutex::new(())),
             mutation_lock: Arc::new(Mutex::new(())),
         })
     }
@@ -529,28 +555,32 @@ impl EventStore for FjallEventStore {
     ) -> Result<()> {
         if items.is_empty() { return Ok(()); }
         let windows_ks = self.windows.clone();
-        let mutation_lock = self.mutation_lock.clone();
+        let windows_lock = self.windows_lock.clone();
         let user_id = user_id.to_string();
         let provider = provider.to_string();
         let items = items.to_vec();
         tokio::task::spawn_blocking(move || {
-            let _guard = mutation_lock.lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = windows_lock.lock().unwrap_or_else(|e| e.into_inner());
             for w in &items {
                 let key = window_row_key(&user_id, &provider, w);
                 let merged = match windows_ks.get(&key)? {
-                    Some(prev_bytes) => {
-                        match bincode::deserialize::<toki_sync_protocol::WireWindow>(&prev_bytes) {
-                            Ok(mut prev) => {
-                                super::merge_wire_windows(&mut prev, w);
-                                prev
+                    Some(prev_bytes) => match decode_window(&prev_bytes) {
+                        Some(mut prev) => {
+                            let before = prev.clone();
+                            super::merge_wire_windows(&mut prev, w);
+                            // Cursorless resends carry mostly-unchanged rows:
+                            // skip the write when the merge changed nothing.
+                            if prev == before {
+                                continue;
                             }
-                            Err(_) => w.clone(),
+                            prev
                         }
-                    }
+                        // Future value version: preserve, never clobber.
+                        None => continue,
+                    },
                     None => w.clone(),
                 };
-                let value = bincode::serialize(&merged)?;
-                windows_ks.insert(&key, value)?;
+                windows_ks.insert(&key, encode_window(&merged)?)?;
             }
             Ok(())
         })
@@ -573,7 +603,7 @@ impl EventStore for FjallEventStore {
                 let rest = &kv.0[prefix.len()..];
                 let Some(sep) = rest.iter().position(|&b| b == 0) else { continue };
                 let provider = String::from_utf8_lossy(&rest[..sep]).to_string();
-                if let Ok(w) = bincode::deserialize::<toki_sync_protocol::WireWindow>(&kv.1) {
+                if let Some(w) = decode_window(&kv.1) {
                     if w.window_end_ms >= since_ms {
                         out.push((provider, w));
                     }
@@ -587,7 +617,7 @@ impl EventStore for FjallEventStore {
 
     async fn cleanup_old_windows(&self, cutoff_ms: i64) -> Result<usize> {
         let windows_ks = self.windows.clone();
-        let mutation_lock = self.mutation_lock.clone();
+        let mutation_lock = self.windows_lock.clone();
         tokio::task::spawn_blocking(move || {
             let _guard = mutation_lock.lock().unwrap_or_else(|e| e.into_inner());
             let mut stale = Vec::new();
@@ -615,7 +645,7 @@ impl EventStore for FjallEventStore {
 
     async fn delete_user_windows(&self, user_id: &str) -> Result<()> {
         let windows_ks = self.windows.clone();
-        let mutation_lock = self.mutation_lock.clone();
+        let mutation_lock = self.windows_lock.clone();
         let prefix = format!("{}\0", user_id).into_bytes();
         tokio::task::spawn_blocking(move || {
             let _guard = mutation_lock.lock().unwrap_or_else(|e| e.into_inner());
