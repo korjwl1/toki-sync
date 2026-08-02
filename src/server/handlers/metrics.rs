@@ -150,7 +150,10 @@ pub async fn toki_query(
                 "last_pct": (w.last_pct_x100 as f64) / 100.0,
                 "observed_ts_ms": w.observed_ts_ms,
                 "first_seen_ms": w.first_seen_ms,
-                "finalized": w.finalized,
+                // Derived: a device that uploaded an open snapshot and went
+                // permanently offline never sends the finalize — a passed
+                // reset IS final regardless (mirrors the client's grace).
+                "finalized": w.finalized || w.raw_resets_at_ms + 180_000 < (end_ts * 1000),
                 "maxed_out": w.maxed_out,
                 "limit_reached_kind": w.limit_reached_kind,
                 "time_to_100_ms": w.time_to_100_ms,

@@ -14,6 +14,9 @@ pub struct ClickHouseEventStore {
     /// Serializes window read-merge-write cycles PER USER (see
     /// upsert_windows) — one user's slow FINAL scan or INSERT must not queue
     /// every other user's window sync behind a single global mutex.
+    /// DEPLOYMENT LIMIT: process-local — the documented toki-sync topology is
+    /// a single instance. Running replicas against one ClickHouse would need
+    /// distributed coordination (or an append+aggregate table design).
     windows_locks: tokio::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
 }
 

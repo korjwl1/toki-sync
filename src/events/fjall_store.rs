@@ -64,12 +64,30 @@ fn encode_window(w: &toki_sync_protocol::WireWindow) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-fn decode_window(bytes: &[u8]) -> Option<toki_sync_protocol::WireWindow> {
-    let (&version, body) = bytes.split_first()?;
-    if version != WINDOW_VALUE_VERSION {
-        return None;
+enum WindowDecode {
+    Valid(toki_sync_protocol::WireWindow),
+    FutureVersion,
+    Corrupt,
+}
+
+fn decode_window_versioned(bytes: &[u8]) -> WindowDecode {
+    let Some((&version, body)) = bytes.split_first() else {
+        return WindowDecode::Corrupt;
+    };
+    if version > WINDOW_VALUE_VERSION {
+        return WindowDecode::FutureVersion;
     }
-    bincode::deserialize(body).ok()
+    match bincode::deserialize(body) {
+        Ok(w) => WindowDecode::Valid(w),
+        Err(_) => WindowDecode::Corrupt,
+    }
+}
+
+fn decode_window(bytes: &[u8]) -> Option<toki_sync_protocol::WireWindow> {
+    match decode_window_versioned(bytes) {
+        WindowDecode::Valid(w) => Some(w),
+        _ => None,
+    }
 }
 
 /// Windows row key: user\0provider\0limit_id\0account\0[kind u8][window_end_ms i64 BE].
@@ -564,8 +582,8 @@ impl EventStore for FjallEventStore {
             for w in &items {
                 let key = window_row_key(&user_id, &provider, w);
                 let merged = match windows_ks.get(&key)? {
-                    Some(prev_bytes) => match decode_window(&prev_bytes) {
-                        Some(mut prev) => {
+                    Some(prev_bytes) => match decode_window_versioned(&prev_bytes) {
+                        WindowDecode::Valid(mut prev) => {
                             let before = prev.clone();
                             super::merge_wire_windows(&mut prev, w);
                             // Cursorless resends carry mostly-unchanged rows:
@@ -576,7 +594,13 @@ impl EventStore for FjallEventStore {
                             prev
                         }
                         // Future value version: preserve, never clobber.
-                        None => continue,
+                        WindowDecode::FutureVersion => continue,
+                        // Corrupt current-version bytes: recover with the
+                        // incoming snapshot instead of preserving corruption.
+                        WindowDecode::Corrupt => {
+                            tracing::warn!("corrupt window value replaced");
+                            w.clone()
+                        }
                     },
                     None => w.clone(),
                 };

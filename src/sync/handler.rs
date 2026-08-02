@@ -233,8 +233,10 @@ pub async fn handle_connection(
                     write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?).await?;
                     continue;
                 }
-                // Windows are ~2/day/limit; anything huge is a misbehaving client.
-                const MAX_WINDOW_ITEMS: usize = 10_000;
+                // Windows are ~2/day/limit — a 60-day resend tops out around
+                // a thousand rows; anything past this is a misbehaving client
+                // and gets bounced before the String-heavy premerge.
+                const MAX_WINDOW_ITEMS: usize = 2_000;
                 if win.items.len() > MAX_WINDOW_ITEMS {
                     let err = SyncErrPayload {
                         reason: format!("too many window items ({} > {MAX_WINDOW_ITEMS})", win.items.len()),
@@ -256,6 +258,10 @@ pub async fn handle_connection(
                         && w.window_minutes <= 60 * 24 * 31
                         && w.window_end_ms > now_ms - 2 * 365 * 86_400_000
                         && w.window_end_ms < now_ms + 40 * 86_400_000
+                        && w.limit_reached_kind <= 2
+                        && w.sampled_active_fraction <= 1000
+                        && w.last_sample_gap_ms >= -86_400_000
+                        && (w.first_seen_ms == 0 || w.first_seen_ms <= w.observed_ts_ms)
                 }
                 let now_ms_v = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -289,6 +295,9 @@ pub async fn handle_connection(
                         w.observed_ts_ms = clamp;
                     }
                 }
+                // Write-pressure valve BEFORE the String-heavy premerge, not
+                // after: bounded concurrent windows work across connections.
+                let _write_permit = batch_semaphore.acquire().await;
                 // Pre-merge in-batch duplicates (same logical window twice in
                 // one payload): stores upsert item-by-item, and without this a
                 // later low-peak duplicate could overwrite an earlier high
@@ -305,9 +314,6 @@ pub async fn handle_connection(
                     }
                     items = by_key.into_values().collect();
                 }
-                // Same write-pressure valve as event batches: bounded
-                // concurrent backend writes across all connections.
-                let _write_permit = batch_semaphore.acquire().await;
                 match events.upsert_windows(&user_id, &win.provider, &items).await {
                     Ok(()) => {
                         let last = items.iter().map(|w| w.observed_ts_ms).max().unwrap_or(0);
