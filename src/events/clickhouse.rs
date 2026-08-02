@@ -358,6 +358,25 @@ impl EventStore for ClickHouseEventStore {
         Ok(out)
     }
 
+    async fn cleanup_old_windows(&self, cutoff_ms: i64) -> Result<usize> {
+        let sql = format!(
+            "ALTER TABLE toki_windows DELETE WHERE window_end_ms < {}",
+            cutoff_ms,
+        );
+        let client = self.client.clone();
+        let url = self.url.clone();
+        tokio::task::spawn_blocking(move || {
+            client.post(&url)
+                .set("Content-Type", "text/plain")
+                .send_string(&sql)
+                .map_err(|e| anyhow::anyhow!("ClickHouse windows cleanup failed: {e}"))?;
+            // Mutation row counts are not returned synchronously.
+            Ok(0)
+        })
+        .await
+        .context("spawn_blocking panicked")?
+    }
+
     async fn delete_user_windows(&self, user_id: &str) -> Result<()> {
         let sql = format!(
             "ALTER TABLE toki_windows DELETE WHERE user_id = '{}'",

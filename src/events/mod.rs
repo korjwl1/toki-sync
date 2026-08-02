@@ -101,6 +101,10 @@ pub trait EventStore: Send + Sync + 'static {
     /// Delete all window rows for a user (wired into account deletion —
     /// windows have no device_id, so device purges can never reach them).
     async fn delete_user_windows(&self, user_id: &str) -> Result<()>;
+
+    /// Retention: delete window rows whose anchor is older than cutoff_ms.
+    /// Returns the number removed (0 where unsupported/none).
+    async fn cleanup_old_windows(&self, cutoff_ms: i64) -> Result<usize>;
 }
 
 /// Field-wise merge shared by both backends (mirrors toki's local

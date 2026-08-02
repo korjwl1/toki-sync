@@ -192,11 +192,22 @@ async fn main() -> Result<()> {
     // -- Periodic cleanup (every 6 hours) ────────────────────────────────────
     {
         let db = state.db.clone();
+        let events = state.events.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(6 * 3600));
             interval.tick().await; // skip first immediate tick (cleanup already ran on startup)
             loop {
                 interval.tick().await;
+                // Window retention mirrors the client default (730 days).
+                let cutoff_ms = (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0)) - 730 * 86_400_000;
+                match events.cleanup_old_windows(cutoff_ms).await {
+                    Ok(n) if n > 0 => tracing::info!("windows retention: {n} rows removed"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("windows retention failed: {e}"),
+                }
                 if let Ok(n) = db.cleanup_expired_tokens().await {
                     if n > 0 { tracing::info!("periodic cleanup: {n} expired/revoked refresh tokens"); }
                 }

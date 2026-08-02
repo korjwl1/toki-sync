@@ -585,6 +585,30 @@ impl EventStore for FjallEventStore {
         .context("spawn_blocking panicked")?
     }
 
+    async fn cleanup_old_windows(&self, cutoff_ms: i64) -> Result<usize> {
+        let windows_ks = self.windows.clone();
+        let mutation_lock = self.mutation_lock.clone();
+        tokio::task::spawn_blocking(move || {
+            let _guard = mutation_lock.lock().unwrap_or_else(|e| e.into_inner());
+            let mut stale = Vec::new();
+            for guard in windows_ks.iter() {
+                let kv = guard.into_inner()?;
+                if let Ok(w) = bincode::deserialize::<toki_sync_protocol::WireWindow>(&kv.1) {
+                    if w.window_end_ms < cutoff_ms {
+                        stale.push(kv.0.to_vec());
+                    }
+                }
+            }
+            let n = stale.len();
+            for key in stale {
+                windows_ks.remove(key)?;
+            }
+            Ok(n)
+        })
+        .await
+        .context("spawn_blocking panicked")?
+    }
+
     async fn delete_user_windows(&self, user_id: &str) -> Result<()> {
         let windows_ks = self.windows.clone();
         let mutation_lock = self.mutation_lock.clone();
