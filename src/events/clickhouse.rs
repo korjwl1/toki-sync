@@ -55,6 +55,11 @@ impl ClickHouseEventStore {
         ";
         self.execute(ddl).context("create toki_events table")?;
 
+        // Version note: ReplacingMergeTree keeps the row with the highest
+        // version. observed_ts_ms would TIE whenever a merge changes a row
+        // without advancing it (a late device contributing a higher peak),
+        // leaving the winner unspecified and the update possibly lost — so the
+        // version is `updated_at`, a monotonic write clock.
         // Rate-limit windows: account-level, no device_id in the key (see
         // events/mod.rs). ReplacingMergeTree keeps the row with the highest
         // observed_ts_ms per key; upsert_windows does an app-level field-wise
@@ -84,8 +89,9 @@ impl ClickHouseEventStore {
                 last_sample_gap_ms Int64,
                 sampled_active_fraction UInt16,
                 n_samples UInt32,
-                plan String
-            ) ENGINE = ReplacingMergeTree(observed_ts_ms)
+                plan String,
+                updated_at UInt64
+            ) ENGINE = ReplacingMergeTree(updated_at)
             ORDER BY (user_id, provider, limit_id, account, window_kind, window_end_ms)
         ";
         self.execute(windows_ddl).context("create toki_windows table")?;
@@ -400,11 +406,15 @@ impl EventStore for ClickHouseEventStore {
         }
         if merged.is_empty() { return Ok(0); }
 
-        let mut sql = format!("INSERT INTO toki_windows ({}) VALUES ", Self::WINDOW_COLS);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let mut sql = format!("INSERT INTO toki_windows ({}, updated_at) VALUES ", Self::WINDOW_COLS);
         for (i, w) in merged.iter().enumerate() {
             if i > 0 { sql.push(','); }
             sql.push_str(&format!(
-                "('{}','{}','{}','{}',{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},'{}')",
+                "('{}','{}','{}','{}',{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},'{}',{})",
                 Self::escape(user_id),
                 Self::escape(provider),
                 Self::escape(&w.limit_id),
@@ -426,6 +436,7 @@ impl EventStore for ClickHouseEventStore {
                 w.sampled_active_fraction,
                 w.n_samples,
                 Self::escape(&w.plan),
+                now_ms,
             ));
         }
 
@@ -454,8 +465,10 @@ impl EventStore for ClickHouseEventStore {
         // ALTER ... DELETE is a part-rewriting mutation — with 730-day
         // retention it would be a queued no-op every 6 hours for the table's
         // first two years. Only mutate when matching rows actually exist.
+        // FINAL: without it the count includes un-merged duplicate versions
+        // and the "rows removed" figure over-reports.
         let count_sql = format!(
-            "SELECT count() FROM toki_windows WHERE window_end_ms < {} FORMAT TSV",
+            "SELECT count() FROM toki_windows FINAL WHERE window_end_ms < {} FORMAT TSV",
             cutoff_ms,
         );
         let delete_sql = format!(

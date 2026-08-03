@@ -153,7 +153,10 @@ pub async fn toki_query(
                 // Derived: a device that uploaded an open snapshot and went
                 // permanently offline never sends the finalize — a passed
                 // reset IS final regardless (mirrors the client's grace).
-                "finalized": w.finalized || w.raw_resets_at_ms + 180_000 < (end_ts * 1000),
+                // Compared against WALL CLOCK: end_ts is caller-supplied and a
+                // date string rounds up to 23:59:59, which would report a
+                // still-open window (peak still climbing) as final.
+                "finalized": w.finalized || w.raw_resets_at_ms + 180_000 < (now * 1000),
                 "maxed_out": w.maxed_out,
                 "limit_reached_kind": w.limit_reached_kind,
                 "time_to_100_ms": w.time_to_100_ms,

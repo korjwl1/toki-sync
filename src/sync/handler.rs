@@ -269,21 +269,6 @@ pub async fn handle_connection(
                 // Windows are ~2/day/limit — a 60-day resend tops out around
                 // a thousand rows; anything past this is a misbehaving client
                 // and gets bounced before the String-heavy premerge.
-                const MAX_WINDOW_ITEMS: usize = 2_000;
-                let mut over_cap = 0usize;
-                if win.items.len() > MAX_WINDOW_ITEMS {
-                    // Keep the NEWEST rows rather than rejecting the batch:
-                    // the client resends the same cursorless set every cycle,
-                    // so a whole-batch reject stored zero rows forever (a
-                    // machine with many distinct accounts can legitimately
-                    // exceed the cap). Same policy as the per-item filter.
-                    over_cap = win.items.len() - MAX_WINDOW_ITEMS;
-                    win.items.sort_by_key(|w| std::cmp::Reverse(w.window_end_ms));
-                    win.items.truncate(MAX_WINDOW_ITEMS);
-                    tracing::warn!(
-                        "sync_windows: kept newest {MAX_WINDOW_ITEMS}, dropped {over_cap} over-cap items for device={device_id}"
-                    );
-                }
                 // Per-item hygiene: these strings become storage keys (NUL is
                 // the fjall key delimiter) and the timestamps drive retention.
                 fn window_item_ok(w: &toki_sync_protocol::WireWindow, now_ms: i64) -> bool {
@@ -302,6 +287,10 @@ pub async fn handle_connection(
                         // (raw + grace); an unbounded value can wrap in release.
                         && w.raw_resets_at_ms > now_ms - 2 * 365 * 86_400_000
                         && w.raw_resets_at_ms < now_ms + 41 * 86_400_000
+                        // Symmetric bounds: these become storage values and,
+                        // on ClickHouse, a row version.
+                        && w.observed_ts_ms > now_ms - 2 * 365 * 86_400_000
+                        && w.first_seen_ms >= 0
                         && w.limit_reached_kind <= 2
                         && w.sampled_active_fraction <= 1000
                         && w.last_sample_gap_ms >= -86_400_000
@@ -317,7 +306,7 @@ pub async fn handle_connection(
                 // would otherwise dead-letter that device's window sync for
                 // up to 60 days. Mirrors the observed_ts policy below, which
                 // clamps rather than rejects.
-                let before = win.items.len() + over_cap;
+                let before = win.items.len();
                 win.items.retain(|w| window_item_ok(w, now_ms_v));
                 let dropped = before - win.items.len();
                 if dropped > 0 {
@@ -334,6 +323,25 @@ pub async fn handle_connection(
                     if w.active_ms > cap {
                         w.active_ms = cap;
                     }
+                }
+                const MAX_WINDOW_ITEMS: usize = 2_000;
+                let mut over_cap = 0usize;
+                // NOTE: per-item validation runs BEFORE this block (below in
+                // source order but hoisted at runtime) so a skewed clock's
+                // far-future rows cannot sort to the front and evict real
+                // data. See the retain() immediately above.
+                if win.items.len() > MAX_WINDOW_ITEMS {
+                    // Keep the NEWEST rows rather than rejecting the batch:
+                    // the client resends the same cursorless set every cycle,
+                    // so a whole-batch reject stored zero rows forever (a
+                    // machine with many distinct accounts can legitimately
+                    // exceed the cap). Same policy as the per-item filter.
+                    over_cap = win.items.len() - MAX_WINDOW_ITEMS;
+                    win.items.sort_by_key(|w| std::cmp::Reverse(w.window_end_ms));
+                    win.items.truncate(MAX_WINDOW_ITEMS);
+                    tracing::warn!(
+                        "sync_windows: kept newest {MAX_WINDOW_ITEMS}, dropped {over_cap} over-cap items for device={device_id}"
+                    );
                 }
                 // Clock-skew defense (plan F10): a future-dated client clock
                 // must not permanently win last-writer fields. Clamp observed
@@ -361,7 +369,10 @@ pub async fn handle_connection(
                 // and stall every user's ingestion. handle_sync_batch drops
                 // its permit before acking for exactly this reason.
                 let (upsert_result, skipped) = {
-                    let _write_permit = batch_semaphore.acquire().await;
+                    let _write_permit = batch_semaphore
+                        .acquire()
+                        .await
+                        .map_err(|e| anyhow::anyhow!("write semaphore closed: {e}"))?;
                     // Pre-merge in-batch duplicates (same logical window twice
                     // in one payload): stores upsert item-by-item, and without
                     // this a later low-peak duplicate could overwrite an
@@ -382,8 +393,13 @@ pub async fn handle_connection(
                 };
                 // Rows the store could not write (e.g. a future value version
                 // it must preserve) count as not-accepted, so the client is
-                // not told to latch its fingerprint over them.
+                // not told to latch its fingerprint over them. `over_cap` is
+                // deliberately EXCLUDED: it is a stable property of the
+                // device's set, so answering SyncErr for it would mean a
+                // permanent 5-minute resend loop that can never succeed (the
+                // client caps its own set now, so this is belt and braces).
                 let dropped = dropped + skipped;
+                let _ = over_cap;
                 match upsert_result {
                     Ok(()) if dropped == 0 => {
                         let last = items.iter().map(|w| w.observed_ts_ms).max().unwrap_or(0);

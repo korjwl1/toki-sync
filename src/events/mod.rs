@@ -153,6 +153,13 @@ pub fn merge_wire_windows(
         (a, b) => a.min(b),
     };
     prev.active_ms = prev.active_ms.max(other.active_ms);
+    // Re-apply the ingest clamp AFTER merging: window_minutes follows the
+    // newer observation while active_ms takes the max, so the invariant
+    // (active ≤ window length) does not survive the merge on its own.
+    let cap = (prev.window_minutes as u64).saturating_mul(60_000);
+    if prev.active_ms > cap {
+        prev.active_ms = cap;
+    }
     prev.sampled_active_fraction = prev.sampled_active_fraction.max(other.sampled_active_fraction);
     prev.n_samples = prev.n_samples.max(other.n_samples);
 }
