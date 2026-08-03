@@ -226,6 +226,22 @@ pub async fn handle_connection(
                         break;
                     }
                 }
+                // Bound BEFORE deserializing: the post-auth frame limit is
+                // MAX_PAYLOAD_SIZE (16 MiB), which would expand to ~171k
+                // WireWindows (~40 MB live) per connection — far past the
+                // 2000-item cap enforced below. A legitimate full 60-day set
+                // is well under 1 MiB.
+                const MAX_WINDOWS_PAYLOAD: usize = 1024 * 1024;
+                if payload.len() > MAX_WINDOWS_PAYLOAD {
+                    let err = SyncErrPayload {
+                        reason: format!(
+                            "windows payload too large: {} bytes (max {MAX_WINDOWS_PAYLOAD})",
+                            payload.len()
+                        ),
+                    };
+                    write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?).await?;
+                    continue;
+                }
                 let mut win: toki_sync_protocol::SyncWindowsPayload = bincode::deserialize(&payload)?;
                 if win.windows_schema != toki_sync_protocol::WINDOWS_SCHEMA_VERSION {
                     let err = SyncErrPayload {
@@ -254,12 +270,19 @@ pub async fn handle_connection(
                 // a thousand rows; anything past this is a misbehaving client
                 // and gets bounced before the String-heavy premerge.
                 const MAX_WINDOW_ITEMS: usize = 2_000;
+                let mut over_cap = 0usize;
                 if win.items.len() > MAX_WINDOW_ITEMS {
-                    let err = SyncErrPayload {
-                        reason: format!("too many window items ({} > {MAX_WINDOW_ITEMS})", win.items.len()),
-                    };
-                    write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?).await?;
-                    continue;
+                    // Keep the NEWEST rows rather than rejecting the batch:
+                    // the client resends the same cursorless set every cycle,
+                    // so a whole-batch reject stored zero rows forever (a
+                    // machine with many distinct accounts can legitimately
+                    // exceed the cap). Same policy as the per-item filter.
+                    over_cap = win.items.len() - MAX_WINDOW_ITEMS;
+                    win.items.sort_by_key(|w| std::cmp::Reverse(w.window_end_ms));
+                    win.items.truncate(MAX_WINDOW_ITEMS);
+                    tracing::warn!(
+                        "sync_windows: kept newest {MAX_WINDOW_ITEMS}, dropped {over_cap} over-cap items for device={device_id}"
+                    );
                 }
                 // Per-item hygiene: these strings become storage keys (NUL is
                 // the fjall key delimiter) and the timestamps drive retention.
@@ -275,6 +298,10 @@ pub async fn handle_connection(
                         && w.window_minutes <= 60 * 24 * 31
                         && w.window_end_ms > now_ms - 2 * 365 * 86_400_000
                         && w.window_end_ms < now_ms + 40 * 86_400_000
+                        // Bounded because the query path does arithmetic on it
+                        // (raw + grace); an unbounded value can wrap in release.
+                        && w.raw_resets_at_ms > now_ms - 2 * 365 * 86_400_000
+                        && w.raw_resets_at_ms < now_ms + 41 * 86_400_000
                         && w.limit_reached_kind <= 2
                         && w.sampled_active_fraction <= 1000
                         && w.last_sample_gap_ms >= -86_400_000
@@ -290,7 +317,7 @@ pub async fn handle_connection(
                 // would otherwise dead-letter that device's window sync for
                 // up to 60 days. Mirrors the observed_ts policy below, which
                 // clamps rather than rejects.
-                let before = win.items.len();
+                let before = win.items.len() + over_cap;
                 win.items.retain(|w| window_item_ok(w, now_ms_v));
                 let dropped = before - win.items.len();
                 if dropped > 0 {
@@ -321,15 +348,24 @@ pub async fn handle_connection(
                     if w.observed_ts_ms > clamp {
                         w.observed_ts_ms = clamp;
                     }
+                    // Keep the validated invariant true AFTER clamping: it was
+                    // checked against the pre-clamp observed_ts.
+                    if w.first_seen_ms > w.observed_ts_ms {
+                        w.first_seen_ms = w.observed_ts_ms;
+                    }
                 }
-                // Write-pressure valve BEFORE the String-heavy premerge, not
-                // after: bounded concurrent windows work across connections.
-                let _write_permit = batch_semaphore.acquire().await;
-                // Pre-merge in-batch duplicates (same logical window twice in
-                // one payload): stores upsert item-by-item, and without this a
-                // later low-peak duplicate could overwrite an earlier high
-                // peak inside the same ClickHouse batch.
-                {
+                // Write-pressure valve around the premerge+upsert ONLY. The
+                // permit must not span the response write: a peer that stops
+                // reading blocks write_frame indefinitely (no write timeout
+                // exists), and ten such connections would drain the semaphore
+                // and stall every user's ingestion. handle_sync_batch drops
+                // its permit before acking for exactly this reason.
+                let (upsert_result, skipped) = {
+                    let _write_permit = batch_semaphore.acquire().await;
+                    // Pre-merge in-batch duplicates (same logical window twice
+                    // in one payload): stores upsert item-by-item, and without
+                    // this a later low-peak duplicate could overwrite an
+                    // earlier high peak inside the same ClickHouse batch.
                     let mut by_key: std::collections::HashMap<(u8, String, String, i64), toki_sync_protocol::WireWindow> =
                         std::collections::HashMap::with_capacity(items.len());
                     for w in items.drain(..) {
@@ -340,8 +376,15 @@ pub async fn handle_connection(
                         }
                     }
                     items = by_key.into_values().collect();
-                }
-                match events.upsert_windows(&user_id, &win.provider, &items).await {
+                    let r = events.upsert_windows(&user_id, &win.provider, &items).await;
+                    let skipped = r.as_ref().copied().unwrap_or(0);
+                    (r.map(|_| ()), skipped)
+                };
+                // Rows the store could not write (e.g. a future value version
+                // it must preserve) count as not-accepted, so the client is
+                // not told to latch its fingerprint over them.
+                let dropped = dropped + skipped;
+                match upsert_result {
                     Ok(()) if dropped == 0 => {
                         let last = items.iter().map(|w| w.observed_ts_ms).max().unwrap_or(0);
                         let ack = SyncAckPayload { last_ts_ms: last };

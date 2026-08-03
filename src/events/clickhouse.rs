@@ -342,8 +342,8 @@ impl EventStore for ClickHouseEventStore {
         user_id: &str,
         provider: &str,
         items: &[toki_sync_protocol::WireWindow],
-    ) -> Result<()> {
-        if items.is_empty() { return Ok(()); }
+    ) -> Result<usize> {
+        if items.is_empty() { return Ok(0); }
 
         // Serialize read-merge-write per user: two devices of one user
         // upserting concurrently could otherwise transiently lose one side's
@@ -398,7 +398,7 @@ impl EventStore for ClickHouseEventStore {
                 None => merged.push(w.clone()),
             }
         }
-        if merged.is_empty() { return Ok(()); }
+        if merged.is_empty() { return Ok(0); }
 
         let mut sql = format!("INSERT INTO toki_windows ({}) VALUES ", Self::WINDOW_COLS);
         for (i, w) in merged.iter().enumerate() {
@@ -436,7 +436,7 @@ impl EventStore for ClickHouseEventStore {
                 .set("Content-Type", "text/plain")
                 .send_string(&sql)
                 .map_err(|e| anyhow::anyhow!("ClickHouse windows INSERT failed: {e}"))?;
-            Ok(())
+            Ok(0)
         })
         .await
         .context("spawn_blocking panicked")?

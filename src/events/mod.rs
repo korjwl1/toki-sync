@@ -83,12 +83,15 @@ pub trait EventStore: Send + Sync + 'static {
 
     /// Merge window snapshots for (user, provider). Keyed by
     /// (user_id, provider, limit_id, account, window_kind, window_end_ms).
+    /// Returns the number of items NOT stored (e.g. a stored row written by a
+    /// newer binary that must be preserved) so the caller can avoid telling
+    /// the client its batch was fully accepted.
     async fn upsert_windows(
         &self,
         user_id: &str,
         provider: &str,
         items: &[toki_sync_protocol::WireWindow],
-    ) -> Result<()>;
+    ) -> Result<usize>;
 
     /// Windows whose anchor is >= since_ms for the given user, as
     /// (provider, window) pairs. v1 scope: single user only (scope=self).
@@ -129,6 +132,10 @@ pub fn merge_wire_windows(
         prev.raw_resets_at_ms = other.raw_resets_at_ms;
         prev.last_sample_gap_ms = other.last_sample_gap_ms;
         prev.last_pct_x100 = other.last_pct_x100;
+        // Travels with raw_resets_at_ms: leaving the first writer's duration
+        // against a later writer's reset makes the pair inconsistent (and the
+        // active_ms cap derives from it).
+        prev.window_minutes = other.window_minutes;
         prev.plan = other.plan.clone();
     }
     if other.first_seen_ms > 0 {

@@ -570,8 +570,8 @@ impl EventStore for FjallEventStore {
         user_id: &str,
         provider: &str,
         items: &[toki_sync_protocol::WireWindow],
-    ) -> Result<()> {
-        if items.is_empty() { return Ok(()); }
+    ) -> Result<usize> {
+        if items.is_empty() { return Ok(0); }
         let windows_ks = self.windows.clone();
         let windows_lock = self.windows_lock.clone();
         let user_id = user_id.to_string();
@@ -579,6 +579,7 @@ impl EventStore for FjallEventStore {
         let items = items.to_vec();
         tokio::task::spawn_blocking(move || {
             let _guard = windows_lock.lock().unwrap_or_else(|e| e.into_inner());
+            let mut skipped = 0usize;
             for w in &items {
                 let key = window_row_key(&user_id, &provider, w);
                 let merged = match windows_ks.get(&key)? {
@@ -593,8 +594,13 @@ impl EventStore for FjallEventStore {
                             }
                             prev
                         }
-                        // Future value version: preserve, never clobber.
-                        WindowDecode::FutureVersion => continue,
+                        // Future value version: preserve, never clobber — and
+                        // report it as not-stored so the caller doesn't ack a
+                        // fully-accepted batch.
+                        WindowDecode::FutureVersion => {
+                            skipped += 1;
+                            continue;
+                        }
                         // Corrupt current-version bytes: recover with the
                         // incoming snapshot instead of preserving corruption.
                         WindowDecode::Corrupt => {
@@ -606,7 +612,7 @@ impl EventStore for FjallEventStore {
                 };
                 windows_ks.insert(&key, encode_window(&merged)?)?;
             }
-            Ok(())
+            Ok(skipped)
         })
         .await
         .context("spawn_blocking panicked")?
@@ -643,7 +649,9 @@ impl EventStore for FjallEventStore {
         let windows_ks = self.windows.clone();
         let mutation_lock = self.windows_lock.clone();
         tokio::task::spawn_blocking(move || {
-            let _guard = mutation_lock.lock().unwrap_or_else(|e| e.into_inner());
+            // Scan WITHOUT the lock (reads are safe); take it only for the
+            // removals — holding it across a multi-million-row scan would
+            // stall every window upsert for the scan's duration.
             let mut stale = Vec::new();
             for guard in windows_ks.iter() {
                 let kv = guard.into_inner()?;
@@ -658,8 +666,11 @@ impl EventStore for FjallEventStore {
                 }
             }
             let n = stale.len();
-            for key in stale {
-                windows_ks.remove(key)?;
+            {
+                let _guard = mutation_lock.lock().unwrap_or_else(|e| e.into_inner());
+                for key in stale {
+                    windows_ks.remove(key)?;
+                }
             }
             Ok(n)
         })
