@@ -175,6 +175,48 @@ impl ClickHouseEventStore {
     }
 }
 
+impl ClickHouseEventStore {
+    /// Window query with an optional provider predicate (index-aligned with
+    /// the table's ORDER BY).
+    async fn query_user_windows_filtered(
+        &self,
+        user_id: &str,
+        provider: Option<&str>,
+        since_ms: i64,
+    ) -> Result<Vec<(String, toki_sync_protocol::WireWindow)>> {
+        let provider_clause = provider
+            .map(|p| format!(" AND provider = '{}'", Self::escape(p)))
+            .unwrap_or_default();
+        let sql = format!(
+            "SELECT {} FROM toki_windows FINAL WHERE user_id = '{}'{} AND window_end_ms >= {} FORMAT TSV",
+            Self::WINDOW_COLS,
+            Self::escape(user_id),
+            provider_clause,
+            since_ms,
+        );
+        let client = self.client.clone();
+        let url = self.url.clone();
+        let body = tokio::task::spawn_blocking(move || -> Result<String> {
+            let resp = client.post(&url)
+                .set("Content-Type", "text/plain")
+                .send_string(&sql)
+                .map_err(|e| anyhow::anyhow!("ClickHouse windows SELECT failed: {e}"))?;
+            resp.into_string().context("read ClickHouse response")
+        })
+        .await
+        .context("spawn_blocking panicked")??;
+
+        let mut out = Vec::new();
+        for line in body.lines() {
+            let cols: Vec<&str> = line.split('\t').collect();
+            if let Some(pair) = Self::window_from_row(&cols) {
+                out.push(pair);
+            }
+        }
+        Ok(out)
+    }
+}
+
 #[async_trait::async_trait]
 impl EventStore for ClickHouseEventStore {
     async fn upsert_events(&self, events: &[ServerEvent]) -> Result<()> {
@@ -324,7 +366,13 @@ impl EventStore for ClickHouseEventStore {
         // range so the FINAL (merge-on-read) scan never walks the user's full
         // multi-year history on every 5-minute upload.
         let since = items.iter().map(|w| w.window_end_ms).min().unwrap_or(0);
-        let existing = self.query_user_windows(user_id, since).await?;
+        // Provider-scoped: the premerge only needs THIS provider's rows, and
+        // the table's ORDER BY leads with (user_id, provider) so the
+        // predicate is index-aligned. Reading every provider made the cost
+        // P²n per change round instead of Pn.
+        let existing = self
+            .query_user_windows_filtered(user_id, Some(provider), since)
+            .await?;
         let mut by_key: std::collections::HashMap<(u8, &str, &str, i64), &toki_sync_protocol::WireWindow> =
             std::collections::HashMap::with_capacity(existing.len());
         for (p, e) in &existing {
@@ -399,32 +447,7 @@ impl EventStore for ClickHouseEventStore {
         user_id: &str,
         since_ms: i64,
     ) -> Result<Vec<(String, toki_sync_protocol::WireWindow)>> {
-        let sql = format!(
-            "SELECT {} FROM toki_windows FINAL WHERE user_id = '{}' AND window_end_ms >= {} FORMAT TSV",
-            Self::WINDOW_COLS,
-            Self::escape(user_id),
-            since_ms,
-        );
-        let client = self.client.clone();
-        let url = self.url.clone();
-        let body = tokio::task::spawn_blocking(move || -> Result<String> {
-            let resp = client.post(&url)
-                .set("Content-Type", "text/plain")
-                .send_string(&sql)
-                .map_err(|e| anyhow::anyhow!("ClickHouse windows SELECT failed: {e}"))?;
-            resp.into_string().context("read ClickHouse response")
-        })
-        .await
-        .context("spawn_blocking panicked")??;
-
-        let mut out = Vec::new();
-        for line in body.lines() {
-            let cols: Vec<&str> = line.split('\t').collect();
-            if let Some(pair) = Self::window_from_row(&cols) {
-                out.push(pair);
-            }
-        }
-        Ok(out)
+        self.query_user_windows_filtered(user_id, None, since_ms).await
     }
 
     async fn cleanup_old_windows(&self, cutoff_ms: i64) -> Result<usize> {

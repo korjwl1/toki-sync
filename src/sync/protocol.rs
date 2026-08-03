@@ -46,8 +46,26 @@ where
     write_frame(w, msg_type, &[]).await
 }
 
+/// Read a frame with a caller-supplied payload cap. Use this wherever the
+/// peer is not yet authenticated: the length is attacker-controlled and is
+/// allocated BEFORE the body arrives, so a pre-auth cap is the difference
+/// between a few KiB and MAX_PAYLOAD_SIZE per connection.
+pub async fn read_frame_limited<R>(r: &mut R, max_payload: u32) -> io::Result<(MsgType, Vec<u8>)>
+where
+    R: AsyncReadExt + Unpin,
+{
+    read_frame_inner(r, max_payload.min(MAX_PAYLOAD_SIZE)).await
+}
+
 /// Read a frame. Returns Err(InvalidData) if payload > MAX_PAYLOAD_SIZE.
 pub async fn read_frame<R>(r: &mut R) -> io::Result<(MsgType, Vec<u8>)>
+where
+    R: AsyncReadExt + Unpin,
+{
+    read_frame_inner(r, MAX_PAYLOAD_SIZE).await
+}
+
+async fn read_frame_inner<R>(r: &mut R, max_payload: u32) -> io::Result<(MsgType, Vec<u8>)>
 where
     R: AsyncReadExt + Unpin,
 {
@@ -61,16 +79,25 @@ where
         io::Error::new(io::ErrorKind::InvalidData, format!("unknown msg_type: {type_u32}"))
     })?;
 
-    if len > MAX_PAYLOAD_SIZE {
+    if len > max_payload {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("payload too large: {len} bytes (max {MAX_PAYLOAD_SIZE})"),
+            format!("payload too large: {len} bytes (max {max_payload})"),
         ));
     }
 
-    let mut payload = vec![0u8; len as usize];
-    if len > 0 {
-        r.read_exact(&mut payload).await?;
+    // Chunked read: never pre-allocate the declared length. A peer that
+    // announces a large frame and then stalls now holds only the bytes it
+    // actually sent, not its claim.
+    const CHUNK: usize = 64 * 1024;
+    let mut payload = Vec::with_capacity((len as usize).min(CHUNK));
+    let mut remaining = len as usize;
+    while remaining > 0 {
+        let take = remaining.min(CHUNK);
+        let start = payload.len();
+        payload.resize(start + take, 0);
+        r.read_exact(&mut payload[start..]).await?;
+        remaining -= take;
     }
     Ok((msg_type, payload))
 }

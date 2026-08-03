@@ -28,7 +28,24 @@ pub async fn handle_connection(
     let mut writer = tokio::io::BufWriter::new(w);
 
     // ── AUTH ────────────────────────────────────────────────────────────────
-    let (msg_type, payload) = read_frame(&mut reader).await?;
+    // Pre-auth hardening: an unauthenticated peer gets a small payload cap and
+    // a short deadline. Without both, 500 connections could each announce a
+    // MAX_PAYLOAD_SIZE frame and stall — GiBs of allocation and every
+    // connection slot held, all before a single JWT is checked.
+    const AUTH_MAX_PAYLOAD: u32 = 64 * 1024;
+    const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    let (msg_type, payload) = match tokio::time::timeout(
+        HANDSHAKE_TIMEOUT,
+        read_frame_limited(&mut reader, AUTH_MAX_PAYLOAD),
+    )
+    .await
+    {
+        Ok(frame) => frame?,
+        Err(_) => {
+            tracing::warn!("auth handshake timed out");
+            return Ok(());
+        }
+    };
     if msg_type != MsgType::Auth {
         return Err(anyhow::anyhow!("expected AUTH, got {msg_type:?}"));
     }
@@ -281,6 +298,16 @@ pub async fn handle_connection(
                         "sync_windows: dropped {dropped}/{before} invalid items for device={device_id}"
                     );
                 }
+                // Enforce the local tracker's invariant server-side too: a
+                // compromised/buggy device could otherwise store an active_ms
+                // large enough to overflow the monitor's Int64 summation and
+                // wedge Plan Fit for the whole account.
+                for w in &mut win.items {
+                    let cap = (w.window_minutes as u64).saturating_mul(60_000);
+                    if w.active_ms > cap {
+                        w.active_ms = cap;
+                    }
+                }
                 // Clock-skew defense (plan F10): a future-dated client clock
                 // must not permanently win last-writer fields. Clamp observed
                 // timestamps to server_now + 60s before merging.
@@ -315,10 +342,21 @@ pub async fn handle_connection(
                     items = by_key.into_values().collect();
                 }
                 match events.upsert_windows(&user_id, &win.provider, &items).await {
-                    Ok(()) => {
+                    Ok(()) if dropped == 0 => {
                         let last = items.iter().map(|w| w.observed_ts_ms).max().unwrap_or(0);
                         let ack = SyncAckPayload { last_ts_ms: last };
                         write_frame(&mut writer, MsgType::SyncAck, &bincode::serialize(&ack)?).await?;
+                    }
+                    Ok(()) => {
+                        // Valid items are stored, but the batch was NOT fully
+                        // accepted: answering SyncAck would let the client
+                        // confirm its fingerprint and skip every future resend
+                        // of this set, so a row that becomes valid later (a
+                        // corrected clock) would never be retried.
+                        let err = SyncErrPayload {
+                            reason: format!("{dropped} of {before} window items rejected"),
+                        };
+                        write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?).await?;
                     }
                     Err(e) => {
                         tracing::warn!("sync_windows error for device={device_id}: {e}");
