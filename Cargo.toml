@@ -11,9 +11,9 @@ path = "src/main.rs"
 
 [dependencies]
 # HTTP server
-axum = { version = "0.7", features = ["macros"] }
-tower = "0.4"
-tower-http = { version = "0.5", features = ["trace"] }
+axum = { version = "0.8", features = ["macros"] }
+tower = "0.5"
+tower-http = { version = "0.7", features = ["trace"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -27,12 +27,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bincode = "1"
 toki-sync-protocol = { git = "https://github.com/korjwl1/toki-sync-protocol.git", tag = "v1.0.0" }
-toml = "0.8"
+toml = "1"
 
 # Auth
-jsonwebtoken = "9"
-base64 = "0.22"
-bcrypt = "0.15"
+jsonwebtoken = { version = "11", features = ["rust_crypto"] }
+base64 = "0.23"
+bcrypt = "0.19"
 
 # Compression
 zstd = "0.13"
@@ -56,11 +56,11 @@ fjall = "3"
 
 # Config / utils
 anyhow = "1"
-thiserror = "1"
+thiserror = "2"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
-dirs = "5"
+dirs = "6"
 regex = "1.12.3"
 
 [dev-dependencies]

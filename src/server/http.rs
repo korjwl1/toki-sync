@@ -146,32 +146,32 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/capabilities", get(metrics::capabilities))
         // User self-service
         .route("/me/devices", get(me::me_devices))
-        .route("/me/devices/:device_id", delete(me::me_delete_device))
-        .route("/me/devices/:device_id/name", axum::routing::patch(me::me_rename_device))
+        .route("/me/devices/{device_id}", delete(me::me_delete_device))
+        .route("/me/devices/{device_id}/name", axum::routing::patch(me::me_rename_device))
         .route("/me/password", axum::routing::patch(me::me_change_password))
         .route("/me/teams", get(teams::me_teams))
         // Admin
         .route("/admin/users", get(admin::admin_list_users).post(admin::admin_create_user))
-        .route("/admin/users/:user_id", delete(admin::admin_delete_user))
-        .route("/admin/users/:user_id/password", axum::routing::patch(admin::admin_change_user_password))
-        .route("/admin/users/:user_id/role", axum::routing::patch(admin::admin_change_user_role))
+        .route("/admin/users/{user_id}", delete(admin::admin_delete_user))
+        .route("/admin/users/{user_id}/password", axum::routing::patch(admin::admin_change_user_password))
+        .route("/admin/users/{user_id}/role", axum::routing::patch(admin::admin_change_user_role))
         .route("/admin/devices", get(admin::admin_list_devices))
-        .route("/admin/devices/:device_id", delete(admin::admin_delete_device))
+        .route("/admin/devices/{device_id}", delete(admin::admin_delete_device))
         // Admin: pending registrations
         .route("/admin/pending", get(admin::admin_list_pending))
-        .route("/admin/pending/:id/approve", post(admin::admin_approve_pending))
-        .route("/admin/pending/:id/reject", post(admin::admin_reject_pending))
+        .route("/admin/pending/{id}/approve", post(admin::admin_approve_pending))
+        .route("/admin/pending/{id}/reject", post(admin::admin_reject_pending))
         // Admin: server info & settings
         .route("/admin/server-info", get(admin::admin_server_info))
         .route("/admin/settings", get(admin::admin_list_settings))
-        .route("/admin/settings/:key", axum::routing::put(admin::admin_update_setting))
+        .route("/admin/settings/{key}", axum::routing::put(admin::admin_update_setting))
         // Admin: user active status
-        .route("/admin/users/:user_id/active", axum::routing::patch(admin::admin_set_user_active))
+        .route("/admin/users/{user_id}/active", axum::routing::patch(admin::admin_set_user_active))
         // Admin: teams
         .route("/admin/teams", get(teams::admin_list_teams).post(teams::admin_create_team))
-        .route("/admin/teams/:team_id", delete(teams::admin_delete_team))
-        .route("/admin/teams/:team_id/members", get(teams::admin_list_team_members).post(teams::admin_add_team_member))
-        .route("/admin/teams/:team_id/members/:user_id", delete(teams::admin_remove_team_member))
+        .route("/admin/teams/{team_id}", delete(teams::admin_delete_team))
+        .route("/admin/teams/{team_id}/members", get(teams::admin_list_team_members).post(teams::admin_add_team_member))
+        .route("/admin/teams/{team_id}/members/{user_id}", delete(teams::admin_remove_team_member))
         .with_state(state)
 }
 
