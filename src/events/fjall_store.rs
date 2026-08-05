@@ -1080,6 +1080,106 @@ mod tests {
         assert_eq!(events.len(), 2);
     }
 
+    fn wire(limit: &str, end_ms: i64, peak: u16) -> toki_sync_protocol::WireWindow {
+        toki_sync_protocol::WireWindow {
+            window_kind: 0,
+            limit_id: limit.into(),
+            account: "acct".into(),
+            window_end_ms: end_ms,
+            raw_resets_at_ms: end_ms,
+            window_minutes: 300,
+            peak_pct_x100: peak,
+            last_pct_x100: peak,
+            observed_ts_ms: end_ms - 1000,
+            first_seen_ms: end_ms - 300_000,
+            finalized: true,
+            maxed_out: false,
+            limit_reached_kind: 0,
+            time_to_100_ms: -1,
+            active_ms: 500,
+            last_sample_gap_ms: 1000,
+            sampled_active_fraction: 1000,
+            n_samples: 5,
+            plan: "max_5x".into(),
+        }
+    }
+
+    /// The retention sweep was rewritten to scan and delete in bounded batches
+    /// (the previous shape collected every stale key into one Vec first and
+    /// could OOM before deleting anything). Uses more rows than one batch so
+    /// the loop's re-scan path is actually taken.
+    #[tokio::test]
+    async fn cleanup_old_windows_batches_and_keeps_recent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FjallEventStore::open(&dir.path().join("ev")).unwrap();
+        let cutoff = 1_700_000_000_000i64;
+
+        let mut old = Vec::new();
+        for i in 0..250i64 {
+            old.push(wire(&format!("l{i}"), cutoff - 86_400_000 - i, 5000));
+        }
+        let mut fresh = Vec::new();
+        for i in 0..40i64 {
+            fresh.push(wire(&format!("f{i}"), cutoff + 86_400_000 + i, 5000));
+        }
+        store.upsert_windows("u", "codex", &old).await.unwrap();
+        store.upsert_windows("u", "codex", &fresh).await.unwrap();
+        assert_eq!(store.query_user_windows("u", 0).await.unwrap().len(), 290);
+
+        let removed = store.cleanup_old_windows(cutoff).await.unwrap();
+        assert_eq!(removed, 250, "every stale row removed, exactly once");
+        let left = store.query_user_windows("u", 0).await.unwrap();
+        assert_eq!(left.len(), 40, "rows at or after the cutoff survive");
+
+        // Idempotent: a second sweep finds nothing and must terminate.
+        assert_eq!(store.cleanup_old_windows(cutoff).await.unwrap(), 0);
+    }
+
+    /// `query_user_windows` filters on the key's trailing anchor before
+    /// decoding the value. The fast path must return the same rows the old
+    /// decode-then-filter path did, including the exact boundary.
+    #[tokio::test]
+    async fn query_since_filter_is_inclusive_at_the_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FjallEventStore::open(&dir.path().join("ev")).unwrap();
+        let t = 1_750_000_000_000i64;
+        store
+            .upsert_windows("u", "codex", &[wire("a", t - 1, 100), wire("b", t, 200), wire("c", t + 1, 300)])
+            .await
+            .unwrap();
+
+        let rows = store.query_user_windows("u", t).await.unwrap();
+        let mut ends: Vec<i64> = rows.iter().map(|(_, w)| w.window_end_ms).collect();
+        ends.sort();
+        assert_eq!(ends, vec![t, t + 1], "since is inclusive; older rows excluded");
+    }
+
+    /// A future value version must be preserved, never clobbered by an older
+    /// binary — otherwise a rollback silently destroys newer devices' data.
+    #[tokio::test]
+    async fn future_value_version_is_preserved_and_reported_as_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FjallEventStore::open(&dir.path().join("ev")).unwrap();
+        let w = wire("a", 1_750_000_000_000, 5000);
+        store.upsert_windows("u", "codex", &[w.clone()]).await.unwrap();
+
+        // Rewrite the stored value with an unknown version byte.
+        let rows: Vec<Vec<u8>> = store
+            .windows
+            .prefix(b"u\0".to_vec())
+            .map(|g| g.into_inner().unwrap().0.to_vec())
+            .collect();
+        assert_eq!(rows.len(), 1);
+        let mut poisoned = vec![255u8];
+        poisoned.extend_from_slice(&bincode::serialize(&w).unwrap());
+        store.windows.insert(&rows[0], &poisoned).unwrap();
+
+        let skipped = store.upsert_windows("u", "codex", &[w.clone()]).await.unwrap();
+        assert_eq!(skipped, 1, "unknown version must be skipped, not overwritten");
+        let raw = store.windows.get(&rows[0]).unwrap().unwrap();
+        assert_eq!(raw[0], 255, "stored bytes untouched");
+    }
+
     #[tokio::test]
     async fn windows_merge_is_field_wise_and_user_scoped() {
         let dir = tempfile::tempdir().unwrap();
