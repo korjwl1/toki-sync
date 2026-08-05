@@ -32,6 +32,9 @@ pub async fn run_tcp_server(
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let semaphore = Arc::new(Semaphore::new(MAX_TCP_CONNECTIONS));
     let batch_semaphore = Arc::new(Semaphore::new(max_concurrent_writes));
+    // One limiter for the whole listener: the point is that it survives a
+    // reconnect, so it must NOT be per-connection state.
+    let windows_rate: crate::sync::handler::WindowsRateLimiter = Default::default();
     let mut handlers = JoinSet::new();
     tracing::info!("TCP sync server listening on {addr} (max_concurrent_writes={max_concurrent_writes})");
 
@@ -66,10 +69,11 @@ pub async fn run_tcp_server(
                 let ev  = events.clone();
                 let batch_sem = batch_semaphore.clone();
                 let active_cache = active_cache.clone();
+                let windows_rate = windows_rate.clone();
 
                 handlers.spawn(async move {
                     tracing::debug!("TCP connection from {peer_addr}");
-                    if let Err(e) = handle_connection(stream, db, jwt, ev, batch_sem, dedup_retention_secs, active_cache).await {
+                    if let Err(e) = handle_connection(stream, db, jwt, ev, batch_sem, dedup_retention_secs, active_cache, windows_rate).await {
                         tracing::warn!("TCP connection error from {peer_addr}: {e}");
                     }
                     drop(permit);

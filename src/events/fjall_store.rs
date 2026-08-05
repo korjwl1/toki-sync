@@ -668,30 +668,43 @@ impl EventStore for FjallEventStore {
         let windows_ks = self.windows.clone();
         let mutation_lock = self.windows_lock.clone();
         tokio::task::spawn_blocking(move || {
-            // Scan WITHOUT the lock (reads are safe); take it only for the
-            // removals — holding it across a multi-million-row scan would
-            // stall every window upsert for the scan's duration.
-            let mut stale = Vec::new();
-            for guard in windows_ks.iter() {
-                let kv = guard.into_inner()?;
-                // The anchor is the key's trailing 8 bytes — no value decode.
-                let anchor = kv.0.len().checked_sub(8)
-                    .and_then(|i| kv.0.get(i..))
-                    .and_then(|b| b.try_into().ok().map(i64::from_be_bytes));
-                if let Some(a) = anchor {
-                    if a < cutoff_ms {
-                        stale.push(kv.0.to_vec());
+            // Scan and delete in BOUNDED batches. Collecting every stale key
+            // first meant one Vec<Vec<u8>> proportional to the whole expired
+            // set — on a multi-tenant store aging past the 730-day cutoff that
+            // is the scan this function's own comment calls "multi-million-row",
+            // and it would OOM before deleting anything. Batching also stops
+            // the mutation lock from being held across the entire sweep.
+            const BATCH: usize = 10_000;
+            let mut removed = 0usize;
+            loop {
+                let mut stale: Vec<Vec<u8>> = Vec::with_capacity(BATCH);
+                for guard in windows_ks.iter() {
+                    let kv = guard.into_inner()?;
+                    // The anchor is the key's trailing 8 bytes — no value decode.
+                    let anchor = kv.0.len().checked_sub(8)
+                        .and_then(|i| kv.0.get(i..))
+                        .and_then(|b| b.try_into().ok().map(i64::from_be_bytes));
+                    if let Some(a) = anchor {
+                        if a < cutoff_ms {
+                            stale.push(kv.0.to_vec());
+                            if stale.len() >= BATCH {
+                                break;
+                            }
+                        }
                     }
                 }
-            }
-            let n = stale.len();
-            {
-                let _guard = mutation_lock.lock().unwrap_or_else(|e| e.into_inner());
-                for key in stale {
-                    windows_ks.remove(key)?;
+                if stale.is_empty() {
+                    break;
                 }
+                {
+                    let _guard = mutation_lock.lock();
+                    for key in &stale {
+                        windows_ks.remove(key)?;
+                    }
+                }
+                removed += stale.len();
             }
-            Ok(n)
+            Ok(removed)
         })
         .await
         .context("spawn_blocking panicked")?

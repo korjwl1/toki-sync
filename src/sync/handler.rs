@@ -14,6 +14,39 @@ const MAX_DECOMPRESSED_SIZE: usize = 64 * 1024 * 1024; // 64 MiB
 const MAX_BATCH_SIZE: usize = 50_000;
 
 /// Handle a single TCP client connection.
+/// Per-user floor between accepted `SyncWindows` batches, shared by every
+/// connection so reconnecting cannot reset it. The client throttles itself to
+/// 5 minutes; this only catches buggy or hostile peers.
+pub type WindowsRateLimiter = Arc<WindowsRateLimiterInner>;
+
+#[derive(Default)]
+pub struct WindowsRateLimiterInner {
+    last: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+}
+
+impl WindowsRateLimiterInner {
+    const MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+    /// Sweep threshold: the map holds one small entry per active user, and
+    /// stale entries are dropped opportunistically so it cannot grow with the
+    /// total number of users ever seen.
+    const SWEEP_AT: usize = 4096;
+
+    pub fn allow(&self, user_id: &str) -> bool {
+        let now = std::time::Instant::now();
+        let mut map = self.last.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(prev) = map.get(user_id) {
+            if now.duration_since(*prev) < Self::MIN_INTERVAL {
+                return false;
+            }
+        }
+        if map.len() >= Self::SWEEP_AT {
+            map.retain(|_, t| now.duration_since(*t) < Self::MIN_INTERVAL);
+        }
+        map.insert(user_id.to_string(), now);
+        true
+    }
+}
+
 pub async fn handle_connection(
     stream: TcpStream,
     db: Arc<dyn DatabaseRepo>,
@@ -22,6 +55,7 @@ pub async fn handle_connection(
     batch_semaphore: Arc<Semaphore>,
     dedup_retention_secs: i64,
     active_cache: crate::server::http::ActiveCache,
+    windows_rate: WindowsRateLimiter,
 ) -> Result<()> {
     let (r, w) = tokio::io::split(stream);
     let mut reader = tokio::io::BufReader::new(r);
@@ -144,12 +178,6 @@ pub async fn handle_connection(
     // ── Main loop ────────────────────────────────────────────────────────────
     // Read timeout: 2 missed PING cycles (client sends every 60s) → disconnect.
     const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-    // The 5-minute window-sync throttle lives entirely in the client, so an
-    // authenticated peer can otherwise fire SyncWindows back-to-back, each one
-    // costing a per-user merging read of that user's retained history plus a
-    // write. Server-side floor, well under the client's own interval.
-    const WINDOWS_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
-    let mut last_windows_at: Option<std::time::Instant> = None;
 
     loop {
         let (msg_type, payload) = match tokio::time::timeout(READ_TIMEOUT, read_frame(&mut reader)).await {
@@ -220,18 +248,17 @@ pub async fn handle_connection(
             }
 
             MsgType::SyncWindows => {
-                if let Some(prev) = last_windows_at {
-                    if prev.elapsed() < WINDOWS_MIN_INTERVAL {
-                        // Not an error the client should surface: it already
-                        // throttles itself, so this only fires for a buggy or
-                        // hostile peer. Ack-shaped reply keeps it quiet.
-                        tracing::debug!("sync_windows throttled for device={device_id}");
-                        let err = SyncErrPayload { reason: "windows sync throttled".to_string() };
-                        write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?).await?;
-                        continue;
-                    }
+                // Keyed by USER and shared across connections: a per-connection
+                // throttle is reset by reconnecting, so a peer holding one valid
+                // JWT could loop connect -> upload -> disconnect and grow stored
+                // rows without bound (every distinct limit_id/account tuple is a
+                // new key, and retention only removes OLD anchors).
+                if !windows_rate.allow(&user_id) {
+                    tracing::debug!("sync_windows throttled for user={user_id} device={device_id}");
+                    let err = SyncErrPayload { reason: "windows sync throttled".to_string() };
+                    write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?).await?;
+                    continue;
                 }
-                last_windows_at = Some(std::time::Instant::now());
                 match crate::server::http::is_user_active_cached(&active_cache, &*db, &user_id).await {
                     Ok(true) => {}
                     Ok(false) => {

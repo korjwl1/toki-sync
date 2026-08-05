@@ -61,6 +61,7 @@ impl ClickHouseEventStore {
             windows_locks: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         };
         // Create table on startup (idempotent)
+        store.recover_interrupted_migration()?;
         store.create_table()?;
         Ok(store)
     }
@@ -99,6 +100,36 @@ impl ClickHouseEventStore {
         // recent set, so the merge converges on the next cycle.
         self.execute(WINDOWS_DDL).context("create toki_windows table")?;
         self.migrate_windows_table()?;
+        Ok(())
+    }
+
+    /// Recover from a crash between the two RENAMEs of the fallback migration
+    /// path. Must run BEFORE `CREATE TABLE IF NOT EXISTS`: that statement would
+    /// otherwise mint an empty new-schema table, the migration check would see
+    /// its `updated_at` column and return happy, and the real history would sit
+    /// stranded in `toki_windows_old` forever — unrecoverable by client resends
+    /// for any device that has since gone offline.
+    fn recover_interrupted_migration(&self) -> Result<()> {
+        let live = self.execute(
+            "SELECT count() FROM system.tables WHERE database = currentDatabase() \
+             AND name = 'toki_windows'",
+        )?;
+        if live.trim() != "0" {
+            return Ok(());
+        }
+        for staged in ["toki_windows_v2", "toki_windows_old"] {
+            let exists = self.execute(&format!(
+                "SELECT count() FROM system.tables WHERE database = currentDatabase() \
+                 AND name = '{staged}'"
+            ))?;
+            if exists.trim() == "0" {
+                continue;
+            }
+            tracing::warn!("recovering interrupted toki_windows migration from {staged}");
+            self.execute(&format!("RENAME TABLE {staged} TO toki_windows"))
+                .with_context(|| format!("recover toki_windows from {staged}"))?;
+            return Ok(());
+        }
         Ok(())
     }
 
