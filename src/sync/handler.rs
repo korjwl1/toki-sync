@@ -144,6 +144,12 @@ pub async fn handle_connection(
     // ── Main loop ────────────────────────────────────────────────────────────
     // Read timeout: 2 missed PING cycles (client sends every 60s) → disconnect.
     const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+    // The 5-minute window-sync throttle lives entirely in the client, so an
+    // authenticated peer can otherwise fire SyncWindows back-to-back, each one
+    // costing a per-user merging read of that user's retained history plus a
+    // write. Server-side floor, well under the client's own interval.
+    const WINDOWS_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+    let mut last_windows_at: Option<std::time::Instant> = None;
 
     loop {
         let (msg_type, payload) = match tokio::time::timeout(READ_TIMEOUT, read_frame(&mut reader)).await {
@@ -214,6 +220,18 @@ pub async fn handle_connection(
             }
 
             MsgType::SyncWindows => {
+                if let Some(prev) = last_windows_at {
+                    if prev.elapsed() < WINDOWS_MIN_INTERVAL {
+                        // Not an error the client should surface: it already
+                        // throttles itself, so this only fires for a buggy or
+                        // hostile peer. Ack-shaped reply keeps it quiet.
+                        tracing::debug!("sync_windows throttled for device={device_id}");
+                        let err = SyncErrPayload { reason: "windows sync throttled".to_string() };
+                        write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?).await?;
+                        continue;
+                    }
+                }
+                last_windows_at = Some(std::time::Instant::now());
                 match crate::server::http::is_user_active_cached(&active_cache, &*db, &user_id).await {
                     Ok(true) => {}
                     Ok(false) => {
@@ -271,7 +289,17 @@ pub async fn handle_connection(
                 // and gets bounced before the String-heavy premerge.
                 // Per-item hygiene: these strings become storage keys (NUL is
                 // the fjall key delimiter) and the timestamps drive retention.
-                fn window_item_ok(w: &toki_sync_protocol::WireWindow, now_ms: i64) -> bool {
+                // Split by whether waiting can make the item valid, because
+                // the two need OPPOSITE answers. A transient reject must feed
+                // `dropped` -> SyncErr, so the client keeps retrying until its
+                // clock catches up. A stable reject must NOT: the client resends
+                // the identical cursorless set every cycle, so SyncErr for a
+                // permanently-invalid row means the fingerprint never latches
+                // and the device re-scans, re-serializes and re-uploads its
+                // whole 60-day set every 5 minutes, forever, with
+                // `sync_last_error` stuck. (A >64-byte `plan` from a new plan
+                // tier is enough to trigger that.) Same reasoning as `over_cap`.
+                fn window_item_stable_ok(w: &toki_sync_protocol::WireWindow, now_ms: i64) -> bool {
                     fn str_ok(s: &str, max: usize) -> bool {
                         s.len() <= max && !s.chars().any(|c| c.is_control())
                     }
@@ -281,20 +309,23 @@ pub async fn handle_connection(
                         && w.window_kind <= 1
                         && w.window_minutes > 0
                         && w.window_minutes <= 60 * 24 * 31
-                        && w.window_end_ms > now_ms - 2 * 365 * 86_400_000
-                        && w.window_end_ms < now_ms + 40 * 86_400_000
-                        // Bounded because the query path does arithmetic on it
-                        // (raw + grace); an unbounded value can wrap in release.
-                        && w.raw_resets_at_ms > now_ms - 2 * 365 * 86_400_000
-                        && w.raw_resets_at_ms < now_ms + 41 * 86_400_000
-                        // Symmetric bounds: these become storage values and,
-                        // on ClickHouse, a row version.
-                        && w.observed_ts_ms > now_ms - 2 * 365 * 86_400_000
                         && w.first_seen_ms >= 0
                         && w.limit_reached_kind <= 2
                         && w.sampled_active_fraction <= 1000
                         && w.last_sample_gap_ms >= -86_400_000
                         && (w.first_seen_ms == 0 || w.first_seen_ms <= w.observed_ts_ms)
+                        // Too old only gets older: unrecoverable, so stable.
+                        && w.window_end_ms > now_ms - 2 * 365 * 86_400_000
+                        && w.raw_resets_at_ms > now_ms - 2 * 365 * 86_400_000
+                }
+                /// Only upper bounds: a row dated past the horizon becomes
+                /// valid as the server clock advances (or the client's
+                /// corrects), so it is worth retrying.
+                fn window_item_transient_ok(w: &toki_sync_protocol::WireWindow, now_ms: i64) -> bool {
+                    w.window_end_ms < now_ms + 40 * 86_400_000
+                        // Bounded because the query path does arithmetic on it
+                        // (raw + grace); an unbounded value can wrap in release.
+                        && w.raw_resets_at_ms < now_ms + 41 * 86_400_000
                 }
                 let now_ms_v = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -306,12 +337,38 @@ pub async fn handle_connection(
                 // would otherwise dead-letter that device's window sync for
                 // up to 60 days. Mirrors the observed_ts policy below, which
                 // clamps rather than rejects.
+                // Clamp `observed_ts_ms` up into range rather than rejecting,
+                // symmetric with the upper clamp below. A machine that booted
+                // before NTP converged stamps observations near epoch, and
+                // `merge_from` only advances observed_ts on `>=`, so the bad
+                // stamp would otherwise persist for the full 60-day horizon.
+                let observed_floor = now_ms_v - 2 * 365 * 86_400_000;
+                for w in &mut win.items {
+                    if w.observed_ts_ms < observed_floor {
+                        w.observed_ts_ms = observed_floor;
+                    }
+                }
                 let before = win.items.len();
-                win.items.retain(|w| window_item_ok(w, now_ms_v));
-                let dropped = before - win.items.len();
+                let mut stable_rejects = 0usize;
+                win.items.retain(|w| {
+                    let ok = window_item_stable_ok(w, now_ms_v);
+                    if !ok {
+                        stable_rejects += 1;
+                    }
+                    ok
+                });
+                let after_stable = win.items.len();
+                win.items.retain(|w| window_item_transient_ok(w, now_ms_v));
+                let dropped = after_stable - win.items.len();
+                if stable_rejects > 0 {
+                    tracing::warn!(
+                        "sync_windows: dropped {stable_rejects}/{before} permanently-invalid items \
+                         for device={device_id} (not retried)"
+                    );
+                }
                 if dropped > 0 {
                     tracing::warn!(
-                        "sync_windows: dropped {dropped}/{before} invalid items for device={device_id}"
+                        "sync_windows: deferred {dropped}/{before} out-of-horizon items for device={device_id}"
                     );
                 }
                 // Enforce the local tracker's invariant server-side too: a
@@ -326,10 +383,9 @@ pub async fn handle_connection(
                 }
                 const MAX_WINDOW_ITEMS: usize = 2_000;
                 let mut over_cap = 0usize;
-                // NOTE: per-item validation runs BEFORE this block (below in
-                // source order but hoisted at runtime) so a skewed clock's
-                // far-future rows cannot sort to the front and evict real
-                // data. See the retain() immediately above.
+                // Per-item validation runs above, before this truncation, so a
+                // skewed clock's far-future rows cannot sort to the front and
+                // evict real data. Keep that order.
                 if win.items.len() > MAX_WINDOW_ITEMS {
                     // Keep the NEWEST rows rather than rejecting the batch:
                     // the client resends the same cursorless set every cycle,
@@ -377,16 +433,33 @@ pub async fn handle_connection(
                     // in one payload): stores upsert item-by-item, and without
                     // this a later low-peak duplicate could overwrite an
                     // earlier high peak inside the same ClickHouse batch.
-                    let mut by_key: std::collections::HashMap<(u8, String, String, i64), toki_sync_protocol::WireWindow> =
-                        std::collections::HashMap::with_capacity(items.len());
+                    // Sort + merge adjacent, not a HashMap: the map cost two
+                    // String clones and a bucket per item (~4000 allocations
+                    // per upload) to defend against duplicates the client
+                    // structurally cannot produce — its local key is this exact
+                    // tuple, so one key yields one row.
+                    items.sort_unstable_by(|a, b| {
+                        a.window_kind
+                            .cmp(&b.window_kind)
+                            .then_with(|| a.limit_id.cmp(&b.limit_id))
+                            .then_with(|| a.account.cmp(&b.account))
+                            .then_with(|| a.window_end_ms.cmp(&b.window_end_ms))
+                    });
+                    let mut merged: Vec<toki_sync_protocol::WireWindow> = Vec::with_capacity(items.len());
                     for w in items.drain(..) {
-                        let key = (w.window_kind, w.limit_id.clone(), w.account.clone(), w.window_end_ms);
-                        match by_key.get_mut(&key) {
-                            Some(prev) => crate::events::merge_wire_windows(prev, &w),
-                            None => { by_key.insert(key, w); }
+                        match merged.last_mut() {
+                            Some(prev)
+                                if prev.window_kind == w.window_kind
+                                    && prev.limit_id == w.limit_id
+                                    && prev.account == w.account
+                                    && prev.window_end_ms == w.window_end_ms =>
+                            {
+                                crate::events::merge_wire_windows(prev, &w)
+                            }
+                            _ => merged.push(w),
                         }
                     }
-                    items = by_key.into_values().collect();
+                    items = merged;
                     let r = events.upsert_windows(&user_id, &win.provider, &items).await;
                     let skipped = r.as_ref().copied().unwrap_or(0);
                     (r.map(|_| ()), skipped)
@@ -396,8 +469,10 @@ pub async fn handle_connection(
                 // not told to latch its fingerprint over them. `over_cap` is
                 // deliberately EXCLUDED: it is a stable property of the
                 // device's set, so answering SyncErr for it would mean a
-                // permanent 5-minute resend loop that can never succeed (the
-                // client caps its own set now, so this is belt and braces).
+                // permanent 5-minute resend loop that can never succeed. The
+                // client applies the same cap before sending (see
+                // MAX_WINDOWS_PER_SYNC), so reaching this is a misbehaving or
+                // outdated client, not the normal path.
                 let dropped = dropped + skipped;
                 let _ = over_cap;
                 match upsert_result {

@@ -36,8 +36,13 @@ pub struct FjallEventStore {
     /// Rate-limit windows: [user_id\0provider\0limit_id\0account\0][kind u8][window_end_ms i64 BE]
     /// → [version u8][bincode WireWindow]. The version byte decouples the
     /// persisted layout from protocol evolution: unknown (future) versions
-    /// are PRESERVED, never clobbered, by older binaries. Additive keyspace
-    /// (not part of EVENT_SCHEMA_VERSION).
+    /// are PRESERVED, never clobbered, by older binaries.
+    ///
+    /// Additive keyspace: adding it does not bump EVENT_SCHEMA_VERSION. It is
+    /// NOT protected from a version reset, though — that path removes the
+    /// whole directory. Clients resend their full 60-day set within 5 minutes,
+    /// so only the 60d-730d retention tail is lost, and only on an events
+    /// schema bump.
     windows: Keyspace,
     /// Serializes window read-merge-write cycles. Deliberately separate from
     /// mutation_lock: window traffic must not queue behind event-batch index
@@ -138,6 +143,9 @@ impl FjallEventStore {
             drop(events);
             drop(idx_msg);
             drop(idx_user);
+            // Kept alive here, this Arc handle into the old FjallDatabase
+            // would outlive the remove_dir_all and the recursive reopen.
+            drop(windows);
             drop(db);
             std::fs::remove_dir_all(path).ok();
             return Self::open(path); // recursive call to reopen fresh
@@ -632,6 +640,17 @@ impl EventStore for FjallEventStore {
                 // key = user\0provider\0limit\0account\0[kind][end]
                 let rest = &kv.0[prefix.len()..];
                 let Some(sep) = rest.iter().position(|&b| b == 0) else { continue };
+                // Filter on the key's trailing 8 bytes (the anchor) BEFORE
+                // decoding: storage holds up to 730 days and a dashboard asks
+                // for 7-30, so decoding first meant a bincode deserialize and
+                // three String allocations per row, ~98% of them discarded.
+                // Same trick cleanup_old_windows uses.
+                let anchor = kv.0.len().checked_sub(8)
+                    .and_then(|i| kv.0.get(i..))
+                    .and_then(|b| b.try_into().ok().map(i64::from_be_bytes));
+                if anchor.map(|a| a < since_ms).unwrap_or(false) {
+                    continue;
+                }
                 let provider = String::from_utf8_lossy(&rest[..sep]).to_string();
                 if let Some(w) = decode_window(&kv.1) {
                     if w.window_end_ms >= since_ms {

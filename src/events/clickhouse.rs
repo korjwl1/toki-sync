@@ -20,6 +20,36 @@ pub struct ClickHouseEventStore {
     windows_locks: tokio::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
 }
 
+/// Shared by table creation and the one-time `updated_at` migration, which
+/// derives the v2 table from it by name substitution — they cannot drift.
+const WINDOWS_DDL: &str = "
+            CREATE TABLE IF NOT EXISTS toki_windows (
+                user_id String,
+                provider String,
+                limit_id String,
+                account String,
+                window_kind UInt8,
+                window_end_ms Int64,
+                raw_resets_at_ms Int64,
+                window_minutes UInt32,
+                peak_pct_x100 UInt16,
+                last_pct_x100 UInt16,
+                observed_ts_ms Int64,
+                first_seen_ms Int64,
+                finalized UInt8,
+                maxed_out UInt8,
+                limit_reached_kind UInt8,
+                time_to_100_ms Int64,
+                active_ms UInt64,
+                last_sample_gap_ms Int64,
+                sampled_active_fraction UInt16,
+                n_samples UInt32,
+                plan String,
+                updated_at UInt64
+            ) ENGINE = ReplacingMergeTree(updated_at)
+            ORDER BY (user_id, provider, limit_id, account, window_kind, window_end_ms)
+";
+
 impl ClickHouseEventStore {
     pub fn new(url: &str) -> Result<Self> {
         let client = ureq::AgentBuilder::new()
@@ -67,34 +97,46 @@ impl ClickHouseEventStore {
         // so the survivor is always the merged state. A concurrent upsert can
         // transiently lose one side's contribution — clients resend their full
         // recent set, so the merge converges on the next cycle.
-        let windows_ddl = "
-            CREATE TABLE IF NOT EXISTS toki_windows (
-                user_id String,
-                provider String,
-                limit_id String,
-                account String,
-                window_kind UInt8,
-                window_end_ms Int64,
-                raw_resets_at_ms Int64,
-                window_minutes UInt32,
-                peak_pct_x100 UInt16,
-                last_pct_x100 UInt16,
-                observed_ts_ms Int64,
-                first_seen_ms Int64,
-                finalized UInt8,
-                maxed_out UInt8,
-                limit_reached_kind UInt8,
-                time_to_100_ms Int64,
-                active_ms UInt64,
-                last_sample_gap_ms Int64,
-                sampled_active_fraction UInt16,
-                n_samples UInt32,
-                plan String,
-                updated_at UInt64
-            ) ENGINE = ReplacingMergeTree(updated_at)
-            ORDER BY (user_id, provider, limit_id, account, window_kind, window_end_ms)
-        ";
-        self.execute(windows_ddl).context("create toki_windows table")?;
+        self.execute(WINDOWS_DDL).context("create toki_windows table")?;
+        self.migrate_windows_table()?;
+        Ok(())
+    }
+
+    /// `CREATE TABLE IF NOT EXISTS` is a no-op against a table created by an
+    /// earlier build, so a deployment that ran before `updated_at` existed
+    /// would keep the old 21-column / `ReplacingMergeTree(observed_ts_ms)`
+    /// shape and fail EVERY window INSERT ("no such column: updated_at")
+    /// forever — invisibly, since startup still succeeds.
+    ///
+    /// ClickHouse cannot change a ReplacingMergeTree version column in place,
+    /// so this rebuilds: new table, copy with `observed_ts_ms AS updated_at`,
+    /// swap, drop. Idempotent — a table that already has the column returns
+    /// immediately, which is the only path a fresh install ever takes.
+    fn migrate_windows_table(&self) -> Result<()> {
+        let has_col = self.execute(
+            "SELECT count() FROM system.columns WHERE database = currentDatabase() \
+             AND table = 'toki_windows' AND name = 'updated_at'",
+        )?;
+        if has_col.trim() != "0" {
+            return Ok(());
+        }
+        tracing::warn!("toki_windows predates updated_at; rebuilding table (one-time migration)");
+        self.execute("DROP TABLE IF EXISTS toki_windows_v2")
+            .context("drop stale migration table")?;
+        let v2_ddl = WINDOWS_DDL.replace("toki_windows", "toki_windows_v2");
+        self.execute(&v2_ddl).context("create toki_windows_v2")?;
+        // Old rows have no write clock; observed_ts_ms is the closest
+        // monotonic stand-in and is what the old engine versioned on.
+        self.execute(
+            "INSERT INTO toki_windows_v2 SELECT *, toUInt64(observed_ts_ms) AS updated_at \
+             FROM toki_windows",
+        )
+        .context("copy toki_windows rows")?;
+        self.execute("EXCHANGE TABLES toki_windows AND toki_windows_v2")
+            .context("swap toki_windows")?;
+        self.execute("DROP TABLE IF EXISTS toki_windows_v2")
+            .context("drop old toki_windows")?;
+        tracing::info!("toki_windows migration complete");
         Ok(())
     }
 
@@ -465,10 +507,15 @@ impl EventStore for ClickHouseEventStore {
         // ALTER ... DELETE is a part-rewriting mutation — with 730-day
         // retention it would be a queued no-op every 6 hours for the table's
         // first two years. Only mutate when matching rows actually exist.
-        // FINAL: without it the count includes un-merged duplicate versions
-        // and the "rows removed" figure over-reports.
+        // No FINAL on the gate: as a GATE the plain count is exactly as
+        // correct (zero iff no physical row matches iff the mutation has
+        // nothing to do), and FINAL would force a merging read of all six
+        // ORDER BY columns plus the version across every part — every 6 hours,
+        // for two years, to compute a number that is always 0. The returned
+        // figure can over-report un-merged duplicates on the rare tick where
+        // the gate actually fires; that is a log line, not a decision.
         let count_sql = format!(
-            "SELECT count() FROM toki_windows FINAL WHERE window_end_ms < {} FORMAT TSV",
+            "SELECT count() FROM toki_windows WHERE window_end_ms < {} FORMAT TSV",
             cutoff_ms,
         );
         let delete_sql = format!(
