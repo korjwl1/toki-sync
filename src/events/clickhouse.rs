@@ -132,8 +132,23 @@ impl ClickHouseEventStore {
              FROM toki_windows",
         )
         .context("copy toki_windows rows")?;
-        self.execute("EXCHANGE TABLES toki_windows AND toki_windows_v2")
-            .context("swap toki_windows")?;
+        // EXCHANGE requires the Atomic database engine (ClickHouse 20.7+).
+        // On Ordinary it errors, so fall back to the two-step RENAME — briefly
+        // table-less, but the alternative is a server that cannot migrate at
+        // all. A crash before this point simply re-runs the whole migration on
+        // restart (the detection query still sees no `updated_at`), so the
+        // sequence is idempotent.
+        if self.execute("EXCHANGE TABLES toki_windows AND toki_windows_v2").is_err() {
+            tracing::warn!("EXCHANGE TABLES unavailable; falling back to RENAME");
+            self.execute("RENAME TABLE toki_windows TO toki_windows_old")
+                .context("rename old toki_windows")?;
+            self.execute("RENAME TABLE toki_windows_v2 TO toki_windows")
+                .context("rename new toki_windows")?;
+            self.execute("DROP TABLE IF EXISTS toki_windows_old")
+                .context("drop old toki_windows")?;
+            tracing::info!("toki_windows migration complete (RENAME path)");
+            return Ok(());
+        }
         self.execute("DROP TABLE IF EXISTS toki_windows_v2")
             .context("drop old toki_windows")?;
         tracing::info!("toki_windows migration complete");
