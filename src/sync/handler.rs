@@ -31,7 +31,16 @@ impl WindowsRateLimiterInner {
     /// total number of users ever seen.
     const SWEEP_AT: usize = 4096;
 
-    pub fn allow(&self, user_id: &str) -> bool {
+    /// Keyed by (user, provider), NOT user alone: the client runs one sync
+    /// thread PER PROVIDER on its own connection, each uploading that
+    /// provider's windows on its own 5-minute cadence. A user-only key let the
+    /// codex thread's upload throttle the claude thread's, so a legitimate
+    /// two-provider client kept bouncing one of them off a limiter meant for
+    /// abusive peers. Uses the CONNECTION's provider (known at auth) so the
+    /// check still runs before the payload is deserialized.
+    pub fn allow(&self, user_id: &str, provider: &str) -> bool {
+        let key = format!("{user_id}\u{1}{provider}");
+        let user_id = key.as_str();
         let now = std::time::Instant::now();
         let mut map = self.last.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(prev) = map.get(user_id) {
@@ -414,7 +423,7 @@ pub async fn handle_connection(
                 // JWT could loop connect -> upload -> disconnect and grow stored
                 // rows without bound (every distinct limit_id/account tuple is a
                 // new key, and retention only removes OLD anchors).
-                if !windows_rate.allow(&user_id) {
+                if !windows_rate.allow(&user_id, &provider) {
                     tracing::debug!("sync_windows throttled for user={user_id} device={device_id}");
                     let err = SyncErrPayload { reason: "windows sync throttled".to_string() };
                     write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?).await?;
@@ -872,10 +881,16 @@ mod window_batch_tests {
     #[test]
     fn windows_rate_limiter_is_per_user_and_survives_reconnect() {
         let limiter = WindowsRateLimiterInner::default();
-        assert!(limiter.allow("user-a"), "first batch accepted");
-        assert!(!limiter.allow("user-a"), "second batch inside the window refused");
-        assert!(limiter.allow("user-b"), "a different user is unaffected");
-        // A "reconnect" is just another call with the same user id.
-        assert!(!limiter.allow("user-a"));
+        assert!(limiter.allow("user-a", "codex"), "first batch accepted");
+        assert!(!limiter.allow("user-a", "codex"), "second batch inside the window refused");
+        assert!(limiter.allow("user-b", "codex"), "a different user is unaffected");
+        // A "reconnect" is just another call with the same key.
+        assert!(!limiter.allow("user-a", "codex"));
+        // The client runs one sync thread per provider on the same account;
+        // they must not throttle each other.
+        assert!(
+            limiter.allow("user-a", "claude_code"),
+            "a second provider for the same user must not be blocked"
+        );
     }
 }
