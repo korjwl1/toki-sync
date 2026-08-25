@@ -174,7 +174,9 @@ pub async fn toki_query(
         return Ok(axum::Json(body).into_response());
     }
 
-    let parsed = parse_toki_virtual_query(&params.query);
+    // A query this backend cannot execute is refused, never approximated: the
+    // caller gets the reason (contract Q1) instead of another query's numbers.
+    let parsed = parse_toki_virtual_query(&params.query).map_err(unsupported_query_error)?;
     let is_range = params.step.is_some();
 
     let step_secs: i64 = params.step.as_deref()
@@ -236,7 +238,8 @@ pub async fn toki_query(
         .and_then(|s| parse_weekday(s));
     let toki_json = aggregate_events_to_toki_json(
         &all_events, effective_step, since_ms, until_ms,
-        parsed.is_cost, parsed.is_events, &parsed.group_by, &pricing,
+        parsed.is_cost, parsed.is_events, &parsed.group_by,
+        parsed.provider.as_deref(), &pricing,
         tz.as_ref(), start_of_week,
     )?;
 
@@ -254,11 +257,11 @@ pub async fn toki_query(
 /// bucket them identically to the local daemon's query engine.
 /// Supported `by (...)` labels in the toki virtual query language.
 ///
-/// `From<&str>` falls back to `Model` for any unknown label rather than
-/// erroring — preserves the historical "silent fallback" behavior but
-/// makes the exhaustive switch in `aggregate_events_to_toki_json` a
-/// compile-time check: adding a future label means the compiler points
-/// at every place that needs an arm.
+/// `From<&str>` falls back to `Model` for any string outside this set, but it
+/// is never reached from a request: `parse_toki_virtual_query` rejects an
+/// unsupported `by (...)` label before the query runs. The fallback exists so
+/// the switch in `aggregate_events_to_toki_json` stays exhaustive — adding a
+/// future label means the compiler points at every place that needs an arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GroupBy {
     Model,
@@ -387,6 +390,9 @@ fn aggregate_events_to_toki_json(
     _is_cost: bool,
     is_events: bool,
     group_by: &str,
+    // `provider="…"` from the query's label matchers. Previously parsed away
+    // and dropped, so a provider-scoped panel silently summed every provider.
+    provider_filter: Option<&str>,
     pricing: &crate::pricing::PricingTable,
     tz: Option<&chrono_tz::Tz>,
     start_of_week: Option<chrono::Weekday>,
@@ -439,6 +445,11 @@ fn aggregate_events_to_toki_json(
 
         let group_key = group_dim.key(event);
         let provider_key = if event.provider.is_empty() { "claude_code" } else { event.provider.as_str() };
+
+        // 3b. Provider matcher. Compared against the same normalized key the
+        //     response is bucketed under, so `provider="claude_code"` also
+        //     matches events that arrived with an empty provider.
+        if provider_filter.is_some_and(|want| want != provider_key) { continue; }
 
         let key = (bucket_sec, provider_key.to_string(), group_key.clone());
         // Hard cap: refuse to allocate new entries past the limit. Existing
@@ -685,35 +696,408 @@ fn parse_weekday(s: &str) -> Option<chrono::Weekday> {
 
 // ─── Virtual query parser ───────────────────────────────────────────────────
 //
-// Parses toki virtual metric queries (usage{}, events{}, cost{}) to extract
-// the query type and group-by dimension. No PromQL rewriting needed since
-// EventStore handles queries directly.
+// Parses the subset of the toki virtual query language that this backend can
+// actually execute. The query language itself belongs to the daemon
+// (`toki/src/query_parser.rs`); this parser does not extend it, it only decides
+// whether a query is inside the subset the sync server can answer faithfully.
+//
+// It REFUSES anything outside that subset instead of approximating it. The
+// previous implementation searched the string for `cost{` / `events{` and a
+// `by (...)` clause and ignored everything else, so
+// `usage{model="claude-opus-4-6"}`, `avg(...)`, `count(...)`, `rate(...)`,
+// `by (session)`, `... offset 7d`, `windows{}` and every outright typo were all
+// answered with the result of a *different* query — an unfiltered `sum` over
+// `usage` grouped by model — with nothing in the response to say so. A number
+// that is not the answer to the question is worse than an error, because the
+// caller believes it.
+//
+// Accepted grammar (`?` = optional):
+//
+//   query      = "sum" by_clause? "(" inner ")" by_clause?
+//              | inner by_clause?
+//   inner      = "increase" "(" selector ")" | selector
+//   selector   = metric filters? bucket?
+//   metric     = "usage" | "toki_tokens_total" | "cost" | "events"
+//   filters    = "{" (filter ("," filter)*)? "}"
+//   filter     = "provider" "=" '"' value '"'
+//   bucket     = "[" duration "]"
+//   by_clause  = "by" "(" label ("," label)* ")"
+//   label      = "model" | "project" | "device_id" | "type"
+//
+// The bare query `windows` is handled by its own branch in `toki_query` before
+// this parser is reached.
 
 struct ParsedQuery {
     is_cost: bool,
     is_events: bool,
     group_by: String,
+    /// `provider="…"` label matcher, when present. Honoured by the aggregator:
+    /// it was previously parsed away and dropped, which quietly widened every
+    /// provider-scoped panel to all providers.
+    provider: Option<String>,
 }
 
-fn parse_toki_virtual_query(query: &str) -> ParsedQuery {
-    let is_cost = query.contains("cost{") || query.contains("cost[");
-    let is_events = query.contains("events{") || query.contains("events[");
+/// Byte cursor over the query text. Everything the grammar cares about is
+/// ASCII; label *values* may not be, so quoted strings are scanned by byte
+/// (a `"` byte cannot occur inside a multi-byte UTF-8 sequence).
+struct QueryCursor<'a> {
+    src: &'a str,
+    pos: usize,
+}
 
-    let group_by = {
-        let by_re = regex::Regex::new(r"by\s*\(([^)]*)\)").unwrap();
-        by_re.captures(query)
-            .and_then(|c| c.get(1))
-            .map(|m| {
-                m.as_str().split(',')
-                    .map(|s| s.trim())
-                    .find(|s| *s != "type")
-                    .unwrap_or("model")
-                    .to_string()
-            })
-            .unwrap_or_else(|| "model".to_string())
+impl<'a> QueryCursor<'a> {
+    fn new(src: &'a str) -> Self {
+        Self { src, pos: 0 }
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.src.as_bytes().get(self.pos).copied()
+    }
+
+    fn skip_ws(&mut self) {
+        while self.peek().is_some_and(|b| b.is_ascii_whitespace()) {
+            self.pos += 1;
+        }
+    }
+
+    /// Consume `b` if it is the next non-whitespace byte.
+    fn eat(&mut self, b: u8) -> bool {
+        self.skip_ws();
+        if self.peek() == Some(b) {
+            self.pos += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Consume an identifier (`[A-Za-z0-9_]+`), if one starts here.
+    fn ident(&mut self) -> Option<&'a str> {
+        self.skip_ws();
+        let start = self.pos;
+        while self.peek().is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_') {
+            self.pos += 1;
+        }
+        (self.pos > start).then(|| &self.src[start..self.pos])
+    }
+
+    fn at_end(&mut self) -> bool {
+        self.skip_ws();
+        self.pos >= self.src.len()
+    }
+
+    /// What is left, for error messages. Bounded so a huge query cannot blow up
+    /// the response body.
+    fn tail(&self) -> String {
+        let rest = self.src[self.pos..].trim();
+        let cut = rest.char_indices().nth(40).map_or(rest.len(), |(i, _)| i);
+        if cut < rest.len() {
+            format!("{}…", &rest[..cut])
+        } else {
+            rest.to_string()
+        }
+    }
+
+    /// `"…"` string literal.
+    fn quoted(&mut self) -> Result<&'a str, String> {
+        self.skip_ws();
+        if self.peek() != Some(b'"') {
+            return Err(format!("expected a quoted label value, found `{}`", self.tail()));
+        }
+        self.pos += 1;
+        let start = self.pos;
+        while let Some(b) = self.peek() {
+            if b == b'"' {
+                let value = &self.src[start..self.pos];
+                self.pos += 1;
+                return Ok(value);
+            }
+            if b == b'\\' {
+                return Err("escape sequences in label values are not supported".to_string());
+            }
+            self.pos += 1;
+        }
+        Err("unterminated quoted label value".to_string())
+    }
+
+    /// `( label, … )` after a `by` keyword that has already been consumed.
+    fn by_labels(&mut self) -> Result<Vec<&'a str>, String> {
+        if !self.eat(b'(') {
+            return Err("`by` must be followed by `(...)`".to_string());
+        }
+        let mut labels = Vec::new();
+        loop {
+            if self.eat(b')') {
+                break;
+            }
+            let label = self
+                .ident()
+                .ok_or_else(|| format!("expected a label name in `by (...)`, found `{}`", self.tail()))?;
+            labels.push(label);
+            if self.eat(b',') {
+                continue;
+            }
+            if self.eat(b')') {
+                break;
+            }
+            return Err(format!("expected `,` or `)` in `by (...)`, found `{}`", self.tail()));
+        }
+        if labels.is_empty() {
+            return Err("`by ()` needs at least one label".to_string());
+        }
+        Ok(labels)
+    }
+}
+
+/// Turn a refusal reason into the 400 the caller sees.
+///
+/// `AppError`'s `IntoResponse` serialises this as `{"error": "<message>"}`, so
+/// the reason is carried verbatim in the response body and a client can show it
+/// without interpreting a status code (contract Q2).
+fn unsupported_query_error(reason: String) -> AppError {
+    AppError {
+        status: StatusCode::BAD_REQUEST,
+        message: format!("unsupported query: {reason}"),
+    }
+}
+
+/// Parse a virtual query, or explain why this backend cannot execute it.
+///
+/// The `Err` string is user-facing: it is returned verbatim in the 400 response
+/// body so the caller can show it (see `contracts/query-contract.md` Q1/Q2).
+fn parse_toki_virtual_query(query: &str) -> Result<ParsedQuery, String> {
+    let mut c = QueryCursor::new(query);
+    if c.at_end() {
+        return Err("the query is empty".to_string());
+    }
+
+    let mut group_labels: Vec<&str> = Vec::new();
+    let mut have_by = false;
+    let mut open_parens = 0usize;
+
+    // ── Optional aggregation wrapper: `sum (…)` / `sum by (…) (…)` ──
+    let mark = c.pos;
+    if let Some(id) = c.ident() {
+        // An identifier here is an aggregation only if a parenthesised body
+        // follows it — either straight away, or after a `by (...)` clause.
+        // `increase` is a range function and is handled one level down, and a
+        // metric can carry a *trailing* group-by (`events by (model)`), which
+        // is why the by-clause alone does not make this a call.
+        c.skip_ws();
+        let mut wrapper = c.peek() == Some(b'(') && id != "increase";
+        let mut labels: Vec<&str> = Vec::new();
+
+        if !wrapper {
+            let by_mark = c.pos;
+            if c.ident() == Some("by") {
+                // A malformed by-clause is an error wherever it appears, so
+                // this propagates instead of silently rewinding.
+                let parsed_labels = c.by_labels()?;
+                c.skip_ws();
+                if c.peek() == Some(b'(') {
+                    wrapper = true;
+                    labels = parsed_labels;
+                } else {
+                    c.pos = by_mark;
+                }
+            } else {
+                c.pos = by_mark;
+            }
+        }
+
+        if wrapper {
+            if id != "sum" {
+                return Err(format!(
+                    "`{id}(...)` is not supported by the sync backend; the only aggregation it computes is `sum`"
+                ));
+            }
+            have_by = !labels.is_empty();
+            group_labels = labels;
+            if !c.eat(b'(') {
+                return Err(format!(
+                    "`sum` must be followed by a parenthesised expression, found `{}`",
+                    c.tail()
+                ));
+            }
+            open_parens += 1;
+        } else {
+            c.pos = mark;
+        }
+    }
+
+    // ── Optional range function: `increase(…)` ──
+    let mark = c.pos;
+    if let Some(id) = c.ident() {
+        c.skip_ws();
+        if c.peek() == Some(b'(') {
+            if id != "increase" {
+                return Err(format!(
+                    "function `{id}` is not supported by the sync backend; it only understands `increase`"
+                ));
+            }
+            c.pos += 1;
+            open_parens += 1;
+        } else {
+            c.pos = mark;
+        }
+    }
+
+    // ── Metric ──
+    let metric = c
+        .ident()
+        .ok_or_else(|| format!("expected a metric name, found `{}`", c.tail()))?;
+    let (is_cost, is_events) = match metric {
+        // `toki_tokens_total` is the pre-rename spelling of `usage`; saved
+        // dashboards still carry it.
+        "usage" | "toki_tokens_total" => (false, false),
+        "cost" => (true, false),
+        "events" => (false, true),
+        "windows" => {
+            return Err(
+                "metric `windows` is only available on the sync backend as the bare query `windows`"
+                    .to_string(),
+            );
+        }
+        "sessions" | "projects" => {
+            return Err(format!(
+                "metric `{metric}` is only available from the local daemon, not the sync backend"
+            ));
+        }
+        other => {
+            return Err(format!(
+                "unknown metric `{other}`; the sync backend understands `usage`, `cost` and `events`"
+            ));
+        }
     };
 
-    ParsedQuery { is_cost, is_events, group_by }
+    // ── Optional label matchers ──
+    let mut provider: Option<&str> = None;
+    if c.eat(b'{') {
+        loop {
+            if c.eat(b'}') {
+                break;
+            }
+            let key = c
+                .ident()
+                .ok_or_else(|| format!("expected a label name in `{{...}}`, found `{}`", c.tail()))?;
+            c.skip_ws();
+            // Only `=` is executable here; the rest would silently match everything.
+            let op = match (c.peek(), c.src.as_bytes().get(c.pos + 1).copied()) {
+                (Some(b'='), Some(b'~')) => "=~",
+                (Some(b'!'), Some(b'~')) => "!~",
+                (Some(b'!'), Some(b'=')) => "!=",
+                (Some(b'='), _) => "=",
+                _ => return Err(format!("expected a label matcher after `{key}`, found `{}`", c.tail())),
+            };
+            c.pos += op.len();
+            if op != "=" {
+                return Err(format!(
+                    "label matcher `{op}` is not supported by the sync backend; only `=` is"
+                ));
+            }
+            let value = c.quoted()?;
+            if key != "provider" {
+                return Err(format!(
+                    "filter on `{key}` is not supported by the sync backend; it can only filter on `provider`"
+                ));
+            }
+            if value.is_empty() {
+                return Err("`provider` filter must not be empty".to_string());
+            }
+            if provider.is_some_and(|p| p != value) {
+                return Err("conflicting `provider` filters".to_string());
+            }
+            provider = Some(value);
+
+            if c.eat(b',') {
+                continue;
+            }
+            if c.eat(b'}') {
+                break;
+            }
+            return Err(format!("expected `,` or `}}` in `{{...}}`, found `{}`", c.tail()));
+        }
+    }
+
+    // ── Optional range selector. The bucket width the server aggregates on
+    //    comes from the `step` parameter, so this is validated for syntax only.
+    if c.eat(b'[') {
+        let start = c.pos;
+        while c.peek().is_some_and(|b| b != b']') {
+            c.pos += 1;
+        }
+        let raw = c.src[start..c.pos].trim();
+        if !c.eat(b']') {
+            return Err("unterminated `[` range selector".to_string());
+        }
+        if parse_duration_secs(raw).is_err() {
+            return Err(format!("invalid range `[{raw}]`"));
+        }
+    }
+
+    // ── `offset` shifts the window; the server has no way to apply it. ──
+    let mark = c.pos;
+    if let Some(id) = c.ident() {
+        if id == "offset" {
+            return Err("`offset` is not supported by the sync backend".to_string());
+        }
+        c.pos = mark;
+    }
+
+    for _ in 0..open_parens {
+        if !c.eat(b')') {
+            return Err(format!("unbalanced parentheses; expected `)`, found `{}`", c.tail()));
+        }
+    }
+
+    // ── Trailing group-by (`increase(usage[1d]) by (model)`, legacy toki form) ──
+    let mark = c.pos;
+    if let Some(id) = c.ident() {
+        if id == "by" {
+            if have_by {
+                return Err("duplicate `by (...)` clause".to_string());
+            }
+            group_labels = c.by_labels()?;
+        } else {
+            c.pos = mark;
+        }
+    }
+
+    if !c.at_end() {
+        return Err(format!("unexpected trailing input `{}`", c.tail()));
+    }
+
+    // ── Resolve the single grouping dimension the aggregator supports. ──
+    let mut selected: Option<&str> = None;
+    for label in &group_labels {
+        match *label {
+            // Token-kind split: the aggregator emits input/output/cache fields
+            // side by side, so `type` is already in the response and needs no
+            // grouping. Skipped, as it always was.
+            "type" => {}
+            "model" | "project" | "device_id" => {
+                if selected.is_some_and(|s| s != *label) {
+                    return Err(format!(
+                        "the sync backend can group by only one label, got `{}`",
+                        group_labels.join(", ")
+                    ));
+                }
+                selected = Some(label);
+            }
+            other => {
+                return Err(format!(
+                    "group-by label `{other}` is not supported by the sync backend; use `model`, `project` or `device_id`"
+                ));
+            }
+        }
+    }
+
+    Ok(ParsedQuery {
+        is_cost,
+        is_events,
+        group_by: selected.unwrap_or("model").to_string(),
+        provider: provider.map(str::to_string),
+    })
 }
 
 
@@ -759,17 +1143,44 @@ mod tests {
         assert!(matches!(parse_scope(""), Scope::Invalid));
     }
 
+    // MARK: - Virtual query parser
+    //
+    // Two halves, and both matter:
+    //
+    //   * the `accepted` half pins the queries the backend answered correctly
+    //     before this parser existed — it fails if the rewrite narrows the set;
+    //   * the `refused` half pins the queries it used to answer with *another
+    //     query's* numbers — every one of these returned a `ParsedQuery` under
+    //     the old substring scan, so each of these assertions fails against it.
+
+    fn parsed(query: &str) -> ParsedQuery {
+        parse_toki_virtual_query(query)
+            .unwrap_or_else(|e| panic!("`{query}` must stay accepted, got: {e}"))
+    }
+
+    fn refusal(query: &str) -> String {
+        match parse_toki_virtual_query(query) {
+            Err(reason) => reason,
+            Ok(p) => panic!(
+                "`{query}` must be refused, but was answered as cost={} events={} group_by={} — \
+                 that is the silent-substitute bug",
+                p.is_cost, p.is_events, p.group_by
+            ),
+        }
+    }
+
     #[test]
     fn test_parse_virtual_query_usage() {
-        let r = parse_toki_virtual_query("sum by (model) (increase(usage{}[1d]))");
+        let r = parsed("sum by (model) (increase(usage{}[1d]))");
         assert!(!r.is_cost);
         assert!(!r.is_events);
         assert_eq!(r.group_by, "model");
+        assert_eq!(r.provider, None);
     }
 
     #[test]
     fn test_parse_virtual_query_cost() {
-        let r = parse_toki_virtual_query("sum by (model) (increase(cost{}[1d]))");
+        let r = parsed("sum by (model) (increase(cost{}[1d]))");
         assert!(r.is_cost);
         assert!(!r.is_events);
         assert_eq!(r.group_by, "model");
@@ -777,7 +1188,7 @@ mod tests {
 
     #[test]
     fn test_parse_virtual_query_events() {
-        let r = parse_toki_virtual_query("sum by (model) (increase(events{}[1d]))");
+        let r = parsed("sum by (model) (increase(events{}[1d]))");
         assert!(!r.is_cost);
         assert!(r.is_events);
         assert_eq!(r.group_by, "model");
@@ -785,16 +1196,228 @@ mod tests {
 
     #[test]
     fn test_parse_virtual_query_by_project() {
-        let r = parse_toki_virtual_query("sum by (project) (increase(usage{}[1d]))");
+        let r = parsed("sum by (project) (increase(usage{}[1d]))");
         assert_eq!(r.group_by, "project");
     }
 
     #[test]
     fn test_parse_virtual_query_device_id() {
-        let r = parse_toki_virtual_query("sum by (device_id) (increase(events{}[1d]))");
+        let r = parsed("sum by (device_id) (increase(events{}[1d]))");
         assert!(!r.is_cost);
         assert!(r.is_events);
         assert_eq!(r.group_by, "device_id");
+    }
+
+    /// Every shape the old scanner answered *correctly* still parses to the
+    /// same result. This is the anti-regression net for "do not narrow the
+    /// accepted set" — it covers the panel templates the app ships
+    /// (`toki_monitor` DashboardConfig / DashboardSettingsSheet), the legacy
+    /// trailing-`by` form the daemon accepts, and the bare selector forms.
+    #[test]
+    fn test_previously_accepted_queries_are_unchanged() {
+        // (query, is_cost, is_events, group_by)
+        let cases: &[(&str, bool, bool, &str)] = &[
+            ("sum by (model) (increase(usage{}[1d]))",       false, false, "model"),
+            ("sum by (model) (increase(usage[1h]))",         false, false, "model"),
+            ("sum by (model) (increase(cost{}[1d]))",        true,  false, "model"),
+            ("sum by (model) (increase(events{}[1d]))",      false, true,  "model"),
+            ("sum by (project) (increase(usage{}[1d]))",     false, false, "project"),
+            ("sum by (device_id) (increase(usage{}[1d]))",   false, false, "device_id"),
+            // `type` was skipped by the old scanner; it still is.
+            ("sum by (type) (increase(usage{}[1d]))",        false, false, "model"),
+            ("sum by (type, project) (increase(cost[1d]))",  true,  false, "project"),
+            // No `by` clause → per-model rows, same as the daemon's default.
+            ("sum(increase(usage[1d]))",                     false, false, "model"),
+            ("increase(cost{}[1d])",                         true,  false, "model"),
+            ("usage{}[1d]",                                  false, false, "model"),
+            ("usage",                                        false, false, "model"),
+            // Legacy toki form: group-by trails the expression.
+            ("increase(usage[1d]) by (project)",             false, false, "project"),
+            ("usage[5m] by (model)",                         false, false, "model"),
+            ("sum(usage[1d]) by (device_id)",                false, false, "device_id"),
+            // Pre-rename spelling still carried by saved dashboards.
+            ("sum by (model) (increase(toki_tokens_total{}[1d]))", false, false, "model"),
+            // Whitespace variants.
+            ("sum  by ( model , type ) ( increase( usage{} [1d] ) )", false, false, "model"),
+        ];
+        for (query, is_cost, is_events, group_by) in cases {
+            let r = parsed(query);
+            assert_eq!(r.is_cost, *is_cost, "is_cost for `{query}`");
+            assert_eq!(r.is_events, *is_events, "is_events for `{query}`");
+            assert_eq!(r.group_by, *group_by, "group_by for `{query}`");
+        }
+    }
+
+    /// A bare `events` (no `{}` and no `[…]`) used to slip past the substring
+    /// scan — it looked for the literal `events{` / `events[` — and was
+    /// answered as a *usage* query: token sums where the caller asked for a
+    /// call count. The metric is now read as a metric, so the same query
+    /// returns what it says.
+    #[test]
+    fn test_bare_events_metric_is_an_events_query() {
+        for query in ["events", "events by (model)", "sum(events)", "sum by (project) (events)"] {
+            let r = parsed(query);
+            assert!(r.is_events, "`{query}` is an events query");
+            assert!(!r.is_cost);
+        }
+    }
+
+    /// The core of this change: a query the backend cannot execute is refused.
+    /// Under the old scanner every one of these returned an answer computed
+    /// from `sum(usage) by (model)` instead.
+    #[test]
+    fn test_unrecognised_queries_are_refused() {
+        let queries = [
+            // Metrics this backend has no branch for.
+            "sum by (model) (increase(http_requests_total[5m]))",
+            "sum by (model) (increase(sessions[1d]))",
+            "sum by (model) (increase(projects[1d]))",
+            "sum by (model) (increase(windows[1d]))",
+            "usge{}[1d]",                       // typo — used to be silently `usage`
+            // Aggregations and functions it does not implement.
+            "avg by (model) (increase(usage[1d]))",
+            "count by (model) (increase(events[1d]))",
+            "max by (model) (increase(usage[1d]))",
+            "sum by (model) (rate(usage[5m]))",
+            "sum by (model) (sum_over_time(usage[1d]))",
+            // Label matchers it cannot apply.
+            "sum by (model) (increase(usage{model=\"claude-opus-4-6\"}[1d]))",
+            "sum by (model) (increase(usage{project=\"toki\"}[1d]))",
+            "sum by (model) (increase(usage{provider=~\"claude.*\"}[1d]))",
+            "sum by (model) (increase(usage{provider!=\"codex\"}[1d]))",
+            // Modifiers it cannot apply.
+            "sum by (model) (increase(usage[1d] offset 7d))",
+            // Group-by dimensions it cannot produce.
+            "sum by (session) (increase(usage[1d]))",
+            "sum by (provider) (increase(usage[1d]))",
+            "sum by (model, project) (increase(usage[1d]))",
+            "sum by () (increase(usage[1d]))",
+            // Not a query at all.
+            "",
+            "   ",
+            "hello world",
+            "{}",
+            "1 + 1",
+            "sum by (model) (increase(usage[1d])",   // unbalanced
+            "sum by (model) (increase(usage[nope]))", // unparseable range
+        ];
+        for query in queries {
+            let reason = refusal(query);
+            assert!(!reason.is_empty(), "refusal of `{query}` must carry a reason");
+        }
+    }
+
+    /// The reason has to be readable by the person who wrote the query, which
+    /// means naming the part that was rejected — not just "bad request".
+    #[test]
+    fn test_refusal_reason_names_the_offending_token() {
+        let cases = [
+            ("sum by (model) (increase(usage{model=\"opus\"}[1d]))", "model"),
+            ("sum by (session) (increase(usage[1d]))",               "session"),
+            ("avg by (model) (increase(usage[1d]))",                 "avg"),
+            ("sum by (model) (rate(usage[5m]))",                     "rate"),
+            ("sum by (model) (increase(http_requests_total[5m]))",   "http_requests_total"),
+            ("sum by (model) (increase(usage[1d] offset 7d))",       "offset"),
+            ("sum by (model) (increase(sessions[1d]))",              "sessions"),
+        ];
+        for (query, needle) in cases {
+            let reason = refusal(query);
+            assert!(
+                reason.contains(needle),
+                "refusal of `{query}` should mention `{needle}`, got: {reason}"
+            );
+        }
+    }
+
+    /// The refusal must reach the client as a 400 with the reason in the body,
+    /// not as an empty 200 that looks like "no data".
+    #[tokio::test]
+    async fn test_refusal_becomes_400_with_reason_in_body() {
+        let reason = refusal("sum by (model) (increase(http_requests_total[5m]))");
+        let err = unsupported_query_error(reason.clone());
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let message = body["error"].as_str().expect("body must carry an `error` string");
+        assert!(message.starts_with("unsupported query: "), "got: {message}");
+        assert!(message.contains(&reason), "the reason must survive verbatim, got: {message}");
+        assert!(message.contains("http_requests_total"), "got: {message}");
+    }
+
+    /// The cursor walks bytes; a query with multi-byte text in it must be
+    /// refused with a message, not slice-panic mid-character.
+    #[test]
+    fn test_non_ascii_query_is_refused_without_panicking() {
+        for query in ["사용량", "usage{model=\"프로젝트\"}", "usage[1일]", "usage{} 한글"] {
+            let reason = refusal(query);
+            assert!(!reason.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_provider_filter_is_parsed() {
+        let r = parsed("sum by (model) (increase(usage{provider=\"claude_code\"}[1d]))");
+        assert_eq!(r.provider.as_deref(), Some("claude_code"));
+        assert_eq!(r.group_by, "model");
+
+        let r = parsed("sum by (project) (increase(cost{provider=\"codex\"}[1d]))");
+        assert_eq!(r.provider.as_deref(), Some("codex"));
+        assert!(r.is_cost);
+    }
+
+    #[test]
+    fn test_empty_and_conflicting_provider_filters_are_refused() {
+        assert!(refusal("usage{provider=\"\"}").contains("provider"));
+        assert!(
+            refusal("usage{provider=\"codex\",provider=\"claude_code\"}").contains("conflicting")
+        );
+    }
+
+    /// The `provider="…"` matcher used to be parsed and then thrown away, so a
+    /// panel scoped to one provider was answered with every provider's tokens
+    /// summed together. It now narrows the aggregation.
+    #[test]
+    fn test_provider_filter_narrows_the_aggregation() {
+        let mut codex = make_event("d2", "m1", "p", 1_700_000_000_000, 200);
+        codex.provider = "codex".to_string();
+        // Legacy upload with no provider — normalizes to claude_code, both in
+        // the response key and in the matcher.
+        let mut legacy = make_event("d3", "m1", "p", 1_700_000_000_000, 300);
+        legacy.provider = String::new();
+        let events = vec![
+            make_event("d1", "m1", "p", 1_700_000_000_000, 100),
+            codex,
+            legacy,
+        ];
+        let pricing = crate::pricing::PricingTable::new(std::collections::HashMap::new());
+
+        let totals = |provider_filter: Option<&str>| -> serde_json::Value {
+            let out = aggregate_events_to_toki_json(
+                &events, 60, 1_700_000_000_000, 1_700_000_060_000,
+                false, false, "model", provider_filter, &pricing, None, None,
+            ).unwrap();
+            serde_json::from_slice(&out).unwrap()
+        };
+
+        // No matcher: unchanged: both providers are reported.
+        let all = totals(None);
+        let keys: Vec<&String> = all["providers"].as_object().unwrap().keys().collect();
+        assert_eq!(keys, vec!["claude_code", "codex"], "unfiltered query keeps every provider");
+
+        let only_codex = totals(Some("codex"));
+        let obj = only_codex["providers"].as_object().unwrap();
+        assert_eq!(obj.keys().collect::<Vec<_>>(), vec!["codex"], "codex filter drops claude_code");
+        let entry = &obj["codex"].as_array().unwrap()[0]["usage_per_models"][0];
+        assert_eq!(entry["input_tokens"].as_u64(), Some(200));
+
+        let only_claude = totals(Some("claude_code"));
+        let obj = only_claude["providers"].as_object().unwrap();
+        assert_eq!(obj.keys().collect::<Vec<_>>(), vec!["claude_code"], "claude filter drops codex");
+        let entry = &obj["claude_code"].as_array().unwrap()[0]["usage_per_models"][0];
+        assert_eq!(entry["input_tokens"].as_u64(), Some(400), "empty provider counts as claude_code");
     }
 
     // MARK: - Aggregation integration tests
@@ -845,7 +1468,7 @@ mod tests {
         let pricing = crate::pricing::PricingTable::new(std::collections::HashMap::new());
         let out = aggregate_events_to_toki_json(
             &events, 60, 1700000000_000, 1700000060_000,
-            false, false, "device_id", &pricing, None, None,
+            false, false, "device_id", None, &pricing, None, None,
         ).unwrap();
 
         let periods = parse_periods(&out);
@@ -869,7 +1492,7 @@ mod tests {
         let pricing = crate::pricing::PricingTable::new(std::collections::HashMap::new());
         let out = aggregate_events_to_toki_json(
             &events, 60, 1700000000_000, 1700000060_000,
-            false, false, "model", &pricing, None, None,
+            false, false, "model", None, &pricing, None, None,
         ).unwrap();
         let periods = parse_periods(&out);
         assert_eq!(periods.len(), 2, "two distinct models → two entries");
@@ -914,7 +1537,7 @@ mod tests {
         let pricing = crate::pricing::PricingTable::new(std::collections::HashMap::new());
         let out = aggregate_events_to_toki_json(
             &[cc, cx], 60, 1700000000_000, 1700000060_000,
-            false, false, "device_id", &pricing, None, None,
+            false, false, "device_id", None, &pricing, None, None,
         ).unwrap();
 
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
@@ -1065,7 +1688,7 @@ mod tests {
         let pricing = crate::pricing::PricingTable::new(std::collections::HashMap::new());
         let out = aggregate_events_to_toki_json(
             &[cc, cx], 60, 1700000000_000, 1700000060_000,
-            false, false, "model", &pricing, None, None,
+            false, false, "model", None, &pricing, None, None,
         ).unwrap();
 
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
@@ -1086,7 +1709,7 @@ mod tests {
         let pricing = crate::pricing::PricingTable::new(std::collections::HashMap::new());
         let out = aggregate_events_to_toki_json(
             &events, 60, 1700000000_000, 1700000060_000,
-            false, false, "project", &pricing, None, None,
+            false, false, "project", None, &pricing, None, None,
         ).unwrap();
         let periods = parse_periods(&out);
         assert_eq!(periods.len(), 2, "two projects, same model → two entries");
