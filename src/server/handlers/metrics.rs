@@ -234,8 +234,7 @@ pub async fn toki_query(
             }
         }
     });
-    let start_of_week = params.start_of_week.as_deref()
-        .and_then(|s| parse_weekday(s));
+    let start_of_week = params.start_of_week.as_deref().and_then(parse_weekday);
     let toki_json = aggregate_events_to_toki_json(
         &all_events, effective_step, since_ms, until_ms,
         parsed.is_cost, parsed.is_events, &parsed.group_by,
@@ -380,6 +379,9 @@ fn bucket_start_sec(
 /// - Server omits the "information" block that local CLI adds (optional for parsers)
 ///
 /// EventStore has already deduped by msg_id, so each event appears once.
+#[allow(clippy::too_many_arguments)] // one aggregation entry point; bundling
+// these into a struct would only move the argument list to a type nobody else
+// constructs.
 fn aggregate_events_to_toki_json(
     events: &[ServerEvent],
     step_secs: i64,
@@ -1462,12 +1464,12 @@ mod tests {
         // ONE entry with the two devices' tokens merged under the model
         // name; post-fix it produces TWO entries keyed by device_id.
         let events = vec![
-            make_event("device-a", "claude-3-opus", "/proj", 1700000000_000, 100),
-            make_event("device-b", "claude-3-opus", "/proj", 1700000000_000, 250),
+            make_event("device-a", "claude-3-opus", "/proj", 1_700_000_000_000, 100),
+            make_event("device-b", "claude-3-opus", "/proj", 1_700_000_000_000, 250),
         ];
         let pricing = crate::pricing::PricingTable::new(std::collections::HashMap::new());
         let out = aggregate_events_to_toki_json(
-            &events, 60, 1700000000_000, 1700000060_000,
+            &events, 60, 1_700_000_000_000, 1_700_000_060_000,
             false, false, "device_id", None, &pricing, None, None,
         ).unwrap();
 
@@ -1485,13 +1487,13 @@ mod tests {
         // Default group_by=model still works: two devices, two models →
         // each model is its own entry, devices merged.
         let events = vec![
-            make_event("device-a", "claude-3-opus", "/proj", 1700000000_000, 100),
-            make_event("device-b", "claude-3-opus", "/proj", 1700000000_000, 50),
-            make_event("device-a", "claude-3-haiku", "/proj", 1700000000_000, 30),
+            make_event("device-a", "claude-3-opus", "/proj", 1_700_000_000_000, 100),
+            make_event("device-b", "claude-3-opus", "/proj", 1_700_000_000_000, 50),
+            make_event("device-a", "claude-3-haiku", "/proj", 1_700_000_000_000, 30),
         ];
         let pricing = crate::pricing::PricingTable::new(std::collections::HashMap::new());
         let out = aggregate_events_to_toki_json(
-            &events, 60, 1700000000_000, 1700000060_000,
+            &events, 60, 1_700_000_000_000, 1_700_000_060_000,
             false, false, "model", None, &pricing, None, None,
         ).unwrap();
         let periods = parse_periods(&out);
@@ -1529,14 +1531,14 @@ mod tests {
         // bucket under the first provider seen (with its token field names);
         // post-fix the provider is part of the aggregation key, so each provider
         // gets its own entry with its own field names.
-        let mut cc = make_event("device-a", "claude-3-opus", "/proj", 1700000000_000, 100);
+        let mut cc = make_event("device-a", "claude-3-opus", "/proj", 1_700_000_000_000, 100);
         cc.provider = "claude_code".to_string();
-        let mut cx = make_event("device-a", "gpt-5", "/proj", 1700000000_000, 200);
+        let mut cx = make_event("device-a", "gpt-5", "/proj", 1_700_000_000_000, 200);
         cx.provider = "codex".to_string();
 
         let pricing = crate::pricing::PricingTable::new(std::collections::HashMap::new());
         let out = aggregate_events_to_toki_json(
-            &[cc, cx], 60, 1700000000_000, 1700000060_000,
+            &[cc, cx], 60, 1_700_000_000_000, 1_700_000_060_000,
             false, false, "device_id", None, &pricing, None, None,
         ).unwrap();
 
@@ -1680,14 +1682,14 @@ mod tests {
     fn test_aggregate_splits_by_provider() {
         // A mixed-provider result must place each provider's data under its own
         // key, not merge codex under claude_code.
-        let mut cc = make_event("device-a", "claude-3-opus", "/proj", 1700000000_000, 100);
+        let mut cc = make_event("device-a", "claude-3-opus", "/proj", 1_700_000_000_000, 100);
         cc.provider = "claude_code".to_string();
-        let mut cx = make_event("device-b", "gpt-5", "/proj", 1700000000_000, 200);
+        let mut cx = make_event("device-b", "gpt-5", "/proj", 1_700_000_000_000, 200);
         cx.provider = "codex".to_string();
 
         let pricing = crate::pricing::PricingTable::new(std::collections::HashMap::new());
         let out = aggregate_events_to_toki_json(
-            &[cc, cx], 60, 1700000000_000, 1700000060_000,
+            &[cc, cx], 60, 1_700_000_000_000, 1_700_000_060_000,
             false, false, "model", None, &pricing, None, None,
         ).unwrap();
 
@@ -1703,12 +1705,12 @@ mod tests {
     #[test]
     fn test_aggregate_groups_by_project() {
         let events = vec![
-            make_event("device-a", "claude-3-opus", "/proj-x", 1700000000_000, 100),
-            make_event("device-a", "claude-3-opus", "/proj-y", 1700000000_000, 50),
+            make_event("device-a", "claude-3-opus", "/proj-x", 1_700_000_000_000, 100),
+            make_event("device-a", "claude-3-opus", "/proj-y", 1_700_000_000_000, 50),
         ];
         let pricing = crate::pricing::PricingTable::new(std::collections::HashMap::new());
         let out = aggregate_events_to_toki_json(
-            &events, 60, 1700000000_000, 1700000060_000,
+            &events, 60, 1_700_000_000_000, 1_700_000_060_000,
             false, false, "project", None, &pricing, None, None,
         ).unwrap();
         let periods = parse_periods(&out);
