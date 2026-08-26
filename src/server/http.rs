@@ -216,7 +216,7 @@ pub fn extract_client_ip(headers: &HeaderMap, addr: &SocketAddr, trust_proxy: bo
     if trust_proxy {
         headers.get("x-forwarded-for")
             .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.split(',').last())
+            .and_then(|s| s.rsplit(',').next())
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|| addr.ip().to_string())
     } else {
@@ -289,8 +289,18 @@ impl ActiveCacheInner {
     /// Cache a freshly-read value, but only if no eviction happened since the
     /// read began (`gen_at_read`). Prevents resurrecting an entry an admin just
     /// invalidated.
+    ///
+    /// Sweeps expired entries on the way through. The TTL governs how long a
+    /// value is TRUSTED, and used to say nothing about how long it is KEPT:
+    /// `get_fresh` reads past a stale entry without removing it, and `evict`
+    /// only fires when an admin deactivates someone. So a user who
+    /// authenticated once and never returned held a slot for the life of the
+    /// process. Small per entry and bounded by distinct users ever seen — not
+    /// a leak that will take a container down — but it only ever grew, and the
+    /// sweep costs one pass over a map that is already locked and short.
     fn insert_if_current(&self, user_id: &str, active: bool, gen_at_read: u64) {
         let mut map = self.map.lock().unwrap();
+        map.retain(|_, (_, at)| at.elapsed() < ACTIVE_CACHE_TTL);
         if self.generation.load(std::sync::atomic::Ordering::Acquire) == gen_at_read {
             map.insert(user_id.to_string(), (active, Instant::now()));
         }
