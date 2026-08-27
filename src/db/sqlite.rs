@@ -1202,6 +1202,20 @@ impl DatabaseRepo for SqliteRepo {
         let now = chrono::Utc::now().timestamp();
         let mut tx = self.pool.begin().await.context("begin monitor upsert tx")?;
 
+        // SQLite's `BEGIN` is deferred, so a transaction that reads first takes
+        // only a read lock and two concurrent writers both pass the CAS and
+        // quota checks on the same snapshot. Neither loses data — WAL refuses
+        // the second upgrade — but the loser fails with SQLITE_BUSY_SNAPSHOT,
+        // which busy_timeout does not retry, so the caller sees an opaque 500
+        // instead of the 409 the contract promises. Taking the write lock up
+        // front serialises settings mutations per user, mirroring the
+        // `SELECT ... FOR UPDATE` on the Postgres path.
+        sqlx::query("UPDATE users SET id = id WHERE id = ?")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await
+            .context("upsert_monitor_setting: lock user")?;
+
         let current: Option<(i64, i64, i64)> = sqlx::query_as(
             "SELECT version, updated_at, size_bytes FROM monitor_settings WHERE user_id = ? AND key = ?",
         )
