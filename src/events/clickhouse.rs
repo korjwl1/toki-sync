@@ -369,6 +369,7 @@ impl EventStore for ClickHouseEventStore {
         since_ms: i64,
         until_ms: i64,
         filter: UserFilter,
+        limit: usize,
     ) -> Result<Vec<ServerEvent>> {
         let user_clause = match &filter {
             UserFilter::Single(uid) => format!("AND user_id = '{}'", Self::escape(uid)),
@@ -385,6 +386,7 @@ impl EventStore for ClickHouseEventStore {
              FROM toki_events FINAL \
              WHERE ts_ms >= {since_ms} AND ts_ms < {until_ms} {user_clause} \
              ORDER BY ts_ms \
+             LIMIT {limit} \
              FORMAT JSONEachRow"
         );
 

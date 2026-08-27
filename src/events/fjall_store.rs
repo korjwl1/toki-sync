@@ -400,6 +400,7 @@ fn scan_events(
     since_ms: i64,
     until_ms: i64,
     filter: &UserFilter,
+    limit: usize,
 ) -> Vec<ServerEvent> {
     use std::collections::HashSet;
 
@@ -444,6 +445,7 @@ fn scan_events(
         }
 
         results.push(event);
+        if results.len() >= limit { break; }
     }
 
     results
@@ -460,6 +462,7 @@ fn scan_user_events(
     user_id: &str,
     since_ms: i64,
     until_ms: i64,
+    limit: usize,
 ) -> Vec<ServerEvent> {
     let prefix = {
         let mut p = user_id.as_bytes().to_vec();
@@ -488,6 +491,7 @@ fn scan_user_events(
             Ok(mut e) => {
                 e.session = load_session(sessions_ks, &key[ts_off..]);
                 results.push(e);
+                if results.len() >= limit { break; }
             }
             Err(_) => continue,
         }
@@ -555,6 +559,7 @@ impl EventStore for FjallEventStore {
         since_ms: i64,
         until_ms: i64,
         filter: UserFilter,
+        limit: usize,
     ) -> Result<Vec<ServerEvent>> {
         let events_ks = self.events.clone();
         let idx_user_ks = self.idx_user.clone();
@@ -566,23 +571,27 @@ impl EventStore for FjallEventStore {
             // keyspace (no user narrowing possible).
             let results = match &filter {
                 UserFilter::Single(uid) => {
-                    scan_user_events(&idx_user_ks, &sessions_ks, uid, since_ms, until_ms)
+                    scan_user_events(&idx_user_ks, &sessions_ks, uid, since_ms, until_ms, limit)
                 }
                 UserFilter::Multiple(uids) => {
-                    let mut out = Vec::new();
+                    // The cap is on the combined result, so each user's scan
+                    // gets only the remaining headroom.
+                    let mut out: Vec<ServerEvent> = Vec::new();
                     for uid in uids {
+                        if out.len() >= limit { break; }
                         out.extend(scan_user_events(
                             &idx_user_ks,
                             &sessions_ks,
                             uid,
                             since_ms,
                             until_ms,
+                            limit - out.len(),
                         ));
                     }
                     out
                 }
                 UserFilter::All => {
-                    scan_events(&events_ks, &sessions_ks, since_ms, until_ms, &filter)
+                    scan_events(&events_ks, &sessions_ks, since_ms, until_ms, &filter, limit)
                 }
             };
             Ok(results)
@@ -884,6 +893,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_query_limit_bounds_what_the_scan_reads() {
+        // The cap has to stop the scan, not trim the result afterwards:
+        // buffering an entire account's history and then truncating is the
+        // memory problem, not a fix for it.
+        let dir = TempDir::new().unwrap();
+        let store = FjallEventStore::open(dir.path()).unwrap();
+
+        let events: Vec<ServerEvent> = (0..50)
+            .map(|i| make_event("d1", &format!("m{i}"), 1000 + i as i64, "opus", 1))
+            .collect();
+        store.upsert_events(&events).await.unwrap();
+
+        // Per-user index path.
+        let capped = store
+            .query_events(0, i64::MAX, UserFilter::Single("user1".into()), 10)
+            .await
+            .unwrap();
+        assert_eq!(capped.len(), 10);
+        // Oldest-first, so the cap keeps a contiguous prefix of the range.
+        assert_eq!(capped[0].msg_id, "m0");
+
+        // Full-keyspace path.
+        let capped_all = store
+            .query_events(0, i64::MAX, UserFilter::All, 7)
+            .await
+            .unwrap();
+        assert_eq!(capped_all.len(), 7);
+
+        // A limit above the row count still returns everything.
+        let all = store
+            .query_events(0, i64::MAX, UserFilter::All, 1000)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 50);
+    }
+
+    #[tokio::test]
     async fn test_upsert_dedup() {
         let dir = TempDir::new().unwrap();
         let store = FjallEventStore::open(dir.path()).unwrap();
@@ -891,7 +937,7 @@ mod tests {
         let e1 = make_event("d1", "msg_abc", 1000, "opus", 8);
         store.upsert_events(&[e1]).await.unwrap();
 
-        let events = store.query_events(0, i64::MAX, UserFilter::All).await.unwrap();
+        let events = store.query_events(0, i64::MAX, UserFilter::All, usize::MAX).await.unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].input_tokens, 8);
 
@@ -899,7 +945,7 @@ mod tests {
         let e2 = make_event("d1", "msg_abc", 2000, "opus", 246);
         store.upsert_events(&[e2]).await.unwrap();
 
-        let events = store.query_events(0, i64::MAX, UserFilter::All).await.unwrap();
+        let events = store.query_events(0, i64::MAX, UserFilter::All, usize::MAX).await.unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].input_tokens, 246);
         assert_eq!(events[0].ts_ms, 2000);
@@ -918,7 +964,7 @@ mod tests {
         let e2 = make_event("d1", "msg_abc", 2000, "opus", 246);
         store.upsert_events(&[e1, e2]).await.unwrap();
 
-        let events = store.query_events(0, i64::MAX, UserFilter::All).await.unwrap();
+        let events = store.query_events(0, i64::MAX, UserFilter::All, usize::MAX).await.unwrap();
         assert_eq!(events.len(), 1, "same-batch same-msg_id must collapse to one row");
         assert_eq!(events[0].input_tokens, 246);
         assert_eq!(events[0].ts_ms, 2000);
@@ -939,7 +985,7 @@ mod tests {
         e2.provider = "codex".to_string();
         store.upsert_events(&[e1, e2]).await.unwrap();
 
-        let events = store.query_events(0, i64::MAX, UserFilter::All).await.unwrap();
+        let events = store.query_events(0, i64::MAX, UserFilter::All, usize::MAX).await.unwrap();
         assert_eq!(events.len(), 2, "distinct codex hashes must not be collapsed");
     }
 
@@ -953,7 +999,7 @@ mod tests {
 
         store.upsert_events(&[claude, codex]).await.unwrap();
         let rows = store
-            .query_events(0, i64::MAX, UserFilter::All)
+            .query_events(0, i64::MAX, UserFilter::All, usize::MAX)
             .await
             .unwrap();
         assert_eq!(rows.len(), 2, "provider is part of the logical event key");
@@ -972,7 +1018,7 @@ mod tests {
         let earlier = make_event("d1", "msg_abc", 1000, "opus", 8);
         store.upsert_events(&[later, earlier]).await.unwrap();
 
-        let events = store.query_events(0, i64::MAX, UserFilter::All).await.unwrap();
+        let events = store.query_events(0, i64::MAX, UserFilter::All, usize::MAX).await.unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].input_tokens, 246);
         assert_eq!(events[0].ts_ms, 2000);
@@ -987,7 +1033,7 @@ mod tests {
         let e2 = make_event("d1", "msg_b", 2000, "opus", 200);
         store.upsert_events(&[e1, e2]).await.unwrap();
 
-        let events = store.query_events(0, i64::MAX, UserFilter::All).await.unwrap();
+        let events = store.query_events(0, i64::MAX, UserFilter::All, usize::MAX).await.unwrap();
         assert_eq!(events.len(), 2);
     }
 
@@ -1002,7 +1048,7 @@ mod tests {
             make_event("d1", "c", 3000, "opus", 300),
         ]).await.unwrap();
 
-        let events = store.query_events(1500, 2500, UserFilter::All).await.unwrap();
+        let events = store.query_events(1500, 2500, UserFilter::All, usize::MAX).await.unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].input_tokens, 200);
     }
@@ -1018,7 +1064,7 @@ mod tests {
         e2.user_id = "bob".to_string();
         store.upsert_events(&[e1, e2]).await.unwrap();
 
-        let events = store.query_events(0, i64::MAX, UserFilter::Single("alice".into())).await.unwrap();
+        let events = store.query_events(0, i64::MAX, UserFilter::Single("alice".into()), usize::MAX).await.unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].input_tokens, 100);
     }
@@ -1038,7 +1084,7 @@ mod tests {
         e2.user_id = "alice".to_string();
         store.upsert_events(&[e2]).await.unwrap();
 
-        let events = store.query_events(0, i64::MAX, UserFilter::Single("alice".into())).await.unwrap();
+        let events = store.query_events(0, i64::MAX, UserFilter::Single("alice".into()), usize::MAX).await.unwrap();
         assert_eq!(events.len(), 1, "per-user index must not retain the replaced event");
         assert_eq!(events[0].input_tokens, 250);
         assert_eq!(events[0].ts_ms, 2000);
@@ -1058,7 +1104,7 @@ mod tests {
 
         store.delete_device_events("d1").await.unwrap();
 
-        let events = store.query_events(0, i64::MAX, UserFilter::Single("alice".into())).await.unwrap();
+        let events = store.query_events(0, i64::MAX, UserFilter::Single("alice".into()), usize::MAX).await.unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].device_id, "d2");
     }
@@ -1088,7 +1134,7 @@ mod tests {
         }
 
         let store = FjallEventStore::open(dir.path()).unwrap();
-        let events = store.query_events(0, i64::MAX, UserFilter::Single("alice".into())).await.unwrap();
+        let events = store.query_events(0, i64::MAX, UserFilter::Single("alice".into()), usize::MAX).await.unwrap();
         assert_eq!(events.len(), 1, "backfill must index pre-existing events");
         assert_eq!(events[0].input_tokens, 42);
     }
@@ -1103,7 +1149,7 @@ mod tests {
 
         store.upsert_events(&[event]).await.unwrap();
         let rows = store
-            .query_events(0, i64::MAX, UserFilter::Single("user1".into()))
+            .query_events(0, i64::MAX, UserFilter::Single("user1".into()), usize::MAX)
             .await
             .unwrap();
         assert_eq!(rows[0].session, "session-123");
@@ -1129,7 +1175,7 @@ mod tests {
 
         store.delete_device_events("d1").await.unwrap();
 
-        let events = store.query_events(0, i64::MAX, UserFilter::All).await.unwrap();
+        let events = store.query_events(0, i64::MAX, UserFilter::All, usize::MAX).await.unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].device_id, "d2");
     }
@@ -1154,7 +1200,7 @@ mod tests {
         h1.await.unwrap().unwrap();
         h2.await.unwrap().unwrap();
 
-        let events = store.query_events(0, i64::MAX, UserFilter::All).await.unwrap();
+        let events = store.query_events(0, i64::MAX, UserFilter::All, usize::MAX).await.unwrap();
         assert_eq!(events.len(), 1, "concurrent upserts must not double-count");
         assert_eq!(events[0].input_tokens, 246, "max-ts event must win");
         assert_eq!(events[0].ts_ms, 2000);
@@ -1170,7 +1216,7 @@ mod tests {
         store.upsert_events(&[make_event("d1", "m", 2000, "opus", 246)]).await.unwrap();
         store.upsert_events(&[make_event("d1", "m", 1000, "opus", 8)]).await.unwrap();
 
-        let events = store.query_events(0, i64::MAX, UserFilter::All).await.unwrap();
+        let events = store.query_events(0, i64::MAX, UserFilter::All, usize::MAX).await.unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].input_tokens, 246, "older replay must not clobber newer event");
         assert_eq!(events[0].ts_ms, 2000);
@@ -1192,9 +1238,9 @@ mod tests {
         e2.user_id = "bob".to_string();
         store.upsert_events(&[e2]).await.unwrap();
 
-        let alice = store.query_events(0, i64::MAX, UserFilter::Single("alice".into())).await.unwrap();
+        let alice = store.query_events(0, i64::MAX, UserFilter::Single("alice".into()), usize::MAX).await.unwrap();
         assert!(alice.is_empty(), "old user's inline index entry must be cleared on reassignment");
-        let bob = store.query_events(0, i64::MAX, UserFilter::Single("bob".into())).await.unwrap();
+        let bob = store.query_events(0, i64::MAX, UserFilter::Single("bob".into()), usize::MAX).await.unwrap();
         assert_eq!(bob.len(), 1);
         assert_eq!(bob[0].input_tokens, 250);
     }
@@ -1215,9 +1261,9 @@ mod tests {
 
         store.delete_device_events("d1").await.unwrap();
 
-        let all = store.query_events(0, i64::MAX, UserFilter::All).await.unwrap();
+        let all = store.query_events(0, i64::MAX, UserFilter::All, usize::MAX).await.unwrap();
         assert!(all.is_empty(), "event orphaned by dedup cleanup must still be deleted");
-        let alice = store.query_events(0, i64::MAX, UserFilter::Single("alice".into())).await.unwrap();
+        let alice = store.query_events(0, i64::MAX, UserFilter::Single("alice".into()), usize::MAX).await.unwrap();
         assert!(alice.is_empty(), "per-user index entry must be cleared too");
     }
 
@@ -1254,7 +1300,7 @@ mod tests {
             make_event("d2", "msg_same", 2000, "opus", 200),
         ]).await.unwrap();
 
-        let events = store.query_events(0, i64::MAX, UserFilter::All).await.unwrap();
+        let events = store.query_events(0, i64::MAX, UserFilter::All, usize::MAX).await.unwrap();
         assert_eq!(events.len(), 2);
     }
 

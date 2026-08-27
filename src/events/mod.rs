@@ -61,12 +61,20 @@ pub trait EventStore: Send + Sync + 'static {
     /// if an event with the same key already exists, it is replaced.
     async fn upsert_events(&self, events: &[ServerEvent]) -> Result<()>;
 
-    /// Query events in [since_ms, until_ms) matching the user filter.
+    /// Query events in [since_ms, until_ms) matching the user filter,
+    /// returning at most `limit` of them.
+    ///
+    /// `limit` is a hard resource bound, not a pagination cursor: the store
+    /// stops reading once it has that many rows, so peak memory is bounded by
+    /// the caller rather than by how much history the account happens to
+    /// hold. Callers that need to know whether anything was cut off should
+    /// ask for `limit + 1` and compare.
     async fn query_events(
         &self,
         since_ms: i64,
         until_ms: i64,
         filter: UserFilter,
+        limit: usize,
     ) -> Result<Vec<ServerEvent>>;
 
     /// Delete all events for a specific device (used on schema mismatch reset).

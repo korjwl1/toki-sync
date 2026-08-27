@@ -233,8 +233,31 @@ pub async fn toki_query(
     // Build user filter from scope
     let user_filter = resolve_user_filter(&state, &claims.sub, requested_scope).await?;
 
-    let all_events = state.events.query_events(since_ms, until_ms, user_filter)
-        .await.map_err(AppError::bad_gateway)?;
+    // Hard ceiling on how many events one request may pull into memory.
+    //
+    // Without it a bare `toki query events --remote` — which resolves to
+    // start_ms = 0, end_ms = now — asks the store for an account's entire
+    // history and buffers all of it, then a JSON copy of all of it, then the
+    // serialized body. The Fjall path grew to gigabytes; the ClickHouse path
+    // hard-failed at ureq's 10 MiB response ceiling with an opaque 502. Ask
+    // for one row past the cap so truncation is detectable rather than
+    // presented as a complete answer.
+    const MAX_QUERY_EVENTS: usize = 200_000;
+
+    let mut all_events = state
+        .events
+        .query_events(since_ms, until_ms, user_filter, MAX_QUERY_EVENTS + 1)
+        .await
+        .map_err(AppError::bad_gateway)?;
+    let events_truncated = all_events.len() > MAX_QUERY_EVENTS;
+    if events_truncated {
+        all_events.truncate(MAX_QUERY_EVENTS);
+        tracing::warn!(
+            "toki query read the {MAX_QUERY_EVENTS}-event ceiling for user {};              the response is flagged truncated",
+            claims.sub
+        );
+    }
+    let all_events = all_events;
     let pricing = state.pricing.read().await.clone();
     let include_cost = !params.no_cost;
 
@@ -248,6 +271,7 @@ pub async fn toki_query(
             tz.as_ref(),
             &pricing,
             include_cost,
+            events_truncated,
         )?;
         return Ok((
             StatusCode::OK,
@@ -281,6 +305,7 @@ fn raw_events_to_toki_json(
     tz: Option<&chrono_tz::Tz>,
     pricing: &crate::pricing::PricingTable,
     include_cost: bool,
+    truncated: bool,
 ) -> Result<Vec<u8>, AppError> {
     use std::collections::{BTreeMap, HashMap};
 
@@ -298,7 +323,8 @@ fn raw_events_to_toki_json(
     }
 
     let mut providers = serde_json::Map::new();
-    let mut price_cache: HashMap<&str, Option<&crate::pricing::ModelPricing>> = HashMap::new();
+    let mut price_cache: HashMap<&str, Option<std::borrow::Cow<'_, crate::pricing::ModelPricing>>> =
+        HashMap::new();
     for (provider, mut provider_events) in by_provider {
         provider_events.sort_by_key(|event| event.ts_ms);
         let rows: Vec<serde_json::Value> = provider_events
@@ -347,7 +373,12 @@ fn raw_events_to_toki_json(
         );
     }
 
-    serde_json::to_vec(&serde_json::json!({ "providers": providers }))
+    let mut output = serde_json::json!({ "providers": providers });
+    if truncated {
+        output["truncated"] = serde_json::json!(true);
+    }
+
+    serde_json::to_vec(&output)
         .map_err(|e| AppError::internal(anyhow::anyhow!("json serialize: {e}")))
 }
 
@@ -559,7 +590,8 @@ fn aggregate_events_to_toki_json(
     // Resolve each distinct model once, then accumulate its event cost into
     // the selected bucket. Looking up the final group label as a model made
     // every non-model grouping silently lose cost.
-    let mut price_cache: HashMap<&str, Option<&crate::pricing::ModelPricing>> = HashMap::new();
+    let mut price_cache: HashMap<&str, Option<std::borrow::Cow<'_, crate::pricing::ModelPricing>>> =
+        HashMap::new();
     // Set when the bucket cap forces us to drop new (bucket, group) combinations
     // so the response can flag partial data.
     let mut truncated = false;
@@ -736,6 +768,17 @@ fn parse_toki_bound_ms(
     is_end: bool,
     tz: Option<&chrono_tz::Tz>,
 ) -> Result<i64, AppError> {
+    // Unix milliseconds. The daemon reads a 13-digit all-digit value as
+    // milliseconds (`toki/src/query.rs`); reading the same string as seconds
+    // here put the two paths tens of thousands of years apart, silently and
+    // with no error — a remote query just came back empty.
+    if s.len() == 13 && s.bytes().all(|b| b.is_ascii_digit()) {
+        return s.parse::<i64>().map_err(|_| AppError {
+            status: StatusCode::BAD_REQUEST,
+            message: format!("time is out of range: '{s}'"),
+        });
+    }
+
     let seconds = parse_toki_time(s, is_end, tz)?;
     let millis = seconds.checked_mul(1000).ok_or_else(|| AppError {
         status: StatusCode::BAD_REQUEST,
@@ -764,7 +807,10 @@ fn parse_toki_time(
     if let Ok(ts) = s.parse::<i64>() {
         // Eight- and fourteen-digit values are compact local dates, not Unix
         // seconds; keep parity with the local daemon's detection order.
-        if s.len() != 8 && s.len() != 14 {
+        // Thirteen digits are milliseconds and are handled by the caller, so
+        // anything longer than ten digits here is out of the daemon's accepted
+        // vocabulary and must be rejected rather than read as seconds.
+        if s.len() != 8 && s.len() != 14 && s.len() <= 13 {
             return Ok(ts);
         }
     }
@@ -1699,6 +1745,7 @@ mod tests {
             Some(&kst),
             &pricing,
             true,
+            false,
         ).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&out).unwrap();
         let rows = value["providers"]["codex"].as_array().unwrap();
@@ -1716,6 +1763,7 @@ mod tests {
             Some("codex"),
             Some(&kst),
             &pricing,
+            false,
             false,
         ).unwrap();
         let no_cost: serde_json::Value = serde_json::from_slice(&no_cost).unwrap();
@@ -1754,6 +1802,78 @@ mod tests {
         let err = parse_timezone(Some("Mars/Olympus_Mons")).unwrap_err();
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
         assert!(err.message.contains("invalid timezone"));
+    }
+
+    #[test]
+    fn test_unix_milliseconds_bound_matches_the_daemon() {
+        // The daemon reads a 13-digit value as milliseconds. Before this was
+        // mirrored here the server read it as seconds and multiplied by 1000,
+        // putting `--end 1787842799999` in roughly the year 58600 and
+        // returning an empty result with no error.
+        let kst: chrono_tz::Tz = "Asia/Seoul".parse().unwrap();
+        let from_ms = parse_toki_bound_ms("1787842799999", true, Some(&kst)).unwrap();
+        assert_eq!(from_ms, 1_787_842_799_999);
+
+        // Ten-digit values stay seconds, and the two spellings of the same
+        // instant must agree.
+        let from_secs = parse_toki_bound_ms("1787842799", true, Some(&kst)).unwrap();
+        assert_eq!(from_secs, 1_787_842_799_000);
+    }
+
+    #[test]
+    fn test_numeric_bound_longer_than_thirteen_digits_is_rejected() {
+        // The daemon's vocabulary stops at 13 digits; accepting more here as
+        // seconds is how an out-of-range bound became a silent empty answer.
+        let err = parse_toki_bound_ms("17878427999990", true, None).unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_fast_mode_model_is_priced_like_the_daemon() {
+        // The daemon's claude_code parser emits fast-mode events under a
+        // `<base>-fast` model name and prices them at the base rate times the
+        // fast multiplier. LiteLLM publishes no `-fast` row, so before the
+        // server learned the same fallback these events resolved to no price
+        // and contributed **zero** cost — invisible under `by (project)`,
+        // where the bucket also holds priced non-fast events.
+        let table = crate::pricing::PricingTable::new(std::collections::HashMap::from([(
+            "claude-opus-5".to_string(),
+            crate::pricing::ModelPricing {
+                input_cost_per_token: 1.0,
+                output_cost_per_token: 10.0,
+                cache_creation_input_token_cost: Some(2.0),
+                cache_read_input_token_cost: Some(0.1),
+            },
+        )]));
+
+        let base = table.get("claude-opus-5").expect("base model priced");
+        assert_eq!(base.input_cost_per_token, 1.0);
+
+        let fast = table.get("claude-opus-5-fast").expect("fast variant priced");
+        assert_eq!(fast.input_cost_per_token, 2.0);
+        assert_eq!(fast.output_cost_per_token, 20.0);
+        assert_eq!(fast.cache_creation_input_token_cost, Some(4.0));
+        assert_eq!(fast.cache_read_input_token_cost, Some(0.2));
+
+        // A `-fast` suffix on a model with no multiplier stays unpriced
+        // rather than silently inheriting the base rate.
+        assert!(table.get("claude-sonnet-9-fast").is_none());
+    }
+
+    #[test]
+    fn test_missing_cache_read_rate_does_not_price_cached_input_at_zero() {
+        // Several real LiteLLM rows (gpt-5-pro, gpt-5.2-pro) carry a null
+        // cache_read cost. The codex schema moves cached tokens out of the
+        // input bucket, so a 0.0 fallback deletes most of the bill: cached
+        // input is routinely 90%+ of a codex prompt.
+        let price = crate::pricing::ModelPricing {
+            input_cost_per_token: 3.0,
+            output_cost_per_token: 5.0,
+            cache_creation_input_token_cost: None,
+            cache_read_input_token_cost: None,
+        };
+        // 100 cached-input tokens must not be free.
+        assert_eq!(price.cost(0, 0, 0, 100), 300.0);
     }
 
     #[test]
