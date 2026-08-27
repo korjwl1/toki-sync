@@ -1,6 +1,6 @@
 [package]
 name = "toki-sync"
-version = "2.1.0"
+version = "2.2.0"
 edition = "2021"
 description = "toki multi-device token usage sync server"
 license = "MIT"
@@ -28,7 +28,7 @@ async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bincode = "1"
-toki-sync-protocol = { git = "https://github.com/korjwl1/toki-sync-protocol.git", tag = "v1.0.0" }
+toki-sync-protocol = { git = "https://github.com/korjwl1/toki-sync-protocol.git", tag = "v1.1.0" }
 toml = "1"
 
 # Auth
@@ -71,18 +71,3 @@ tempfile = "3"
 # the endpoint tests exercise routing, extractors and auth rather than calling
 # handler functions directly.
 tower = { version = "0.5", features = ["util"] }
-
-# Local override for feature-branch development of the protocol crate.
-#
-# It is load-bearing right now, not a convenience: this branch uses
-# SyncWindows (0x24) and WireWindow, which exist only after v1.0.0. Dropping
-# the patch before the next tag exists will not compile.
-#
-# Release process, in this order:
-#   1. tag toki-sync-protocol v1.1.0 (its Cargo version already says 1.1.0)
-#   2. re-pin `tag = "v1.1.0"` above, here and in the other repo
-#   3. drop this patch section
-#   4. release the daemon before the monitor — the monitor reads windows the
-#      daemon has to be emitting first
-[patch."https://github.com/korjwl1/toki-sync-protocol.git"]
-toki-sync-protocol = { path = "../toki_sync_protocol" }

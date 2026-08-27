@@ -35,19 +35,18 @@ DuckDNS 이름을 서버로 향하게 하는 것은 가능합니다. 동적 주�
 
 이 명령은 DNS만 갱신하며 toki-sync를 설정하거나 인증서를 발급하지 않습니다.
 
-## 공개 이미지와 소스 빌드
+## 공개 이미지 또는 소스 빌드
 
-현재 toki-sync 브랜치는 형제 protocol patch가 활성화되어 번들 Dockerfile로 빌드할
-수 없습니다. 저장소 Compose 파일을 사용한다면 공개 server 이미지를 pull하고 source
-build를 금지하세요.
+공개 server 이미지를 사용하거나 릴리즈 태그가 고정된 소스를 빌드하세요.
 
 ```bash
 docker compose pull toki-sync-server
-docker compose up -d --no-build
+# 또는: docker compose build toki-sync-server
+docker compose up -d
 ```
 
-custom TLS proxy가 번들 `caddy` 서비스라면 먼저 그 서비스만
-`docker compose build caddy`로 빌드한 뒤 `up --no-build`를 실행합니다. 실제 인증서
+custom TLS proxy가 번들 `caddy` 서비스라면 필요에 따라
+`docker compose build caddy`로 빌드합니다. 실제 인증서
 chain을 검증하지 않았다면 DuckDNS/Let's Encrypt 구성이라고 보고하지 마세요.
 
 관리 콘솔 경로는 `/admin`이며 `/dashboard` 경로는 없습니다. 원격 사용량 쿼리는

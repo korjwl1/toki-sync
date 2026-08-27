@@ -7,7 +7,6 @@ Use this page to map a symptom to a section below. First diagnostic commands for
 | Symptom | Likely cause | Section |
 |---|---|---|
 | Browser/client rejects bundled Caddy certificate | Bundled profile uses Caddy's internal CA | [Bundled Caddy certificate is untrusted](#bundled-caddy-certificate-is-untrusted) |
-| `docker build .` cannot find `toki_sync_protocol` | Active sibling protocol patch is outside Docker context | [Source Docker build fails](#source-docker-build-fails) |
 | `toki settings sync enable` hangs or times out | Server down, port 9090 blocked, wrong host | [`toki settings sync enable` times out](#toki-settings-sync-enable-times-out) |
 | TLS handshake fails, "certificate error" on connect | Self-signed without `--insecure`, DNS not propagated | ["connection refused" or "certificate error"](#connection-refused-or-certificate-error) |
 | Remote query/monitor shows no usage | No device connected, daemon not running, sync stalled | [Remote query shows no data](#remote-query-shows-no-data) |
@@ -25,15 +24,6 @@ The current Caddyfile defaults `TLS_MODE` to `internal`; it does not use
 `DUCKDNS_TOKEN` or obtain a public Let's Encrypt certificate. Use `--insecure`
 only on a trusted LAN, or use a separately validated public TLS proxy. See the
 [DuckDNS status guide](deploy-caddy-duckdns.md).
-
-## Source Docker build fails
-
-The active Cargo patch expects `../toki_sync_protocol`, which `docker build .`
-cannot see. Until protocol v1.1.0 is tagged/re-pinned and the patch is removed,
-use `docker compose pull toki-sync-server` followed by
-`docker compose up --no-build`, or build Rust locally with sibling repositories.
-
----
 
 ## `toki settings sync enable` times out
 

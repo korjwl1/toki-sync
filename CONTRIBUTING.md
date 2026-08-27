@@ -16,18 +16,9 @@ The repository does not pin `rust-version` in `Cargo.toml`. That means Cargo
 does not enforce an MSRV; it does **not** mean every edition-2021 compiler can
 build the current dependency graph.
 
-The current branch also requires a sibling protocol checkout:
-
-```text
-parent/
-├── toki_sync/
-└── toki_sync_protocol/
-```
-
-`Cargo.toml` pins the published v1.0.0 protocol but temporarily patches it to
-that sibling because this branch uses `SyncWindows` and `WireWindow`. The
-sibling crate says 1.1.0, while the remote repository currently has no v1.1.0
-tag. Without the sibling checkout, this branch does not compile.
+`Cargo.toml` pins the published `toki-sync-protocol` v1.1.0 tag. A sibling
+protocol checkout is optional and should only be enabled explicitly for local
+cross-repository development.
 
 ### Build and run
 
@@ -52,15 +43,10 @@ PostgreSQL or ClickHouse integration suite, and no migration test against a
 pre-existing ClickHouse deployment. A green unit suite must not be reported as
 validation of those two optional backends.
 
-`docker build .` is also not a valid check on this branch: Docker's build
-context excludes the sibling protocol checkout required by the active Cargo
-patch. The release sequence is:
-
-1. tag `toki-sync-protocol` v1.1.0;
-2. update the protocol tag in this repository and the client repository;
-3. remove both local patch sections;
-4. build and test the release image;
-5. release toki-sync before consumers that depend on its windows capability.
+`docker build .` is part of release validation now that the v1.1.0 protocol tag
+is pinned. The PostgreSQL and ClickHouse validation boundary above still
+applies. Release toki-sync before consumers that depend on its windows
+capability.
 
 ## Pull requests
 

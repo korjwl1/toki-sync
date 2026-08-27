@@ -229,8 +229,5 @@ frame/handler, parsing/aggregation, pricing, Fjall, 임시 SQLite를 사용한 H
 경로를 포함합니다. 실제 PostgreSQL/ClickHouse 통합 테스트, Compose 통합 테스트,
 실제 ClickHouse migration 테스트는 0개입니다.
 
-Cargo 패키지와 최신 저장소 태그는 2.1.0입니다. 이 브랜치는 형제 patch를 통해
-`toki-sync-protocol` 1.1.0 source를 사용하지만 최신 protocol tag는 v1.0.0입니다.
-따라서 sibling이 build context 밖에 있어 현재 `docker build .`이 실패합니다. 이
-브랜치를 릴리즈 가능한 Docker source tree로 취급하기 전에 protocol v1.1.0 태그,
-consumer 갱신, local patch 제거, 이미지 build/test가 필요합니다.
+2.2.0 Cargo 패키지는 공개된 `toki-sync-protocol` v1.1.0 태그를 고정하며 sibling
+patch 없이 빌드됩니다. Docker 소스 빌드는 릴리즈 검증에 포함됩니다.

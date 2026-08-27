@@ -261,7 +261,7 @@ TOKI_EXTERNAL_URL=https://yourserver.duckdns.org
 DUCKDNS_TOKEN=your-duckdns-token
 
 # 이미지 버전 (선택)
-TOKI_VERSION=2.1.0
+TOKI_VERSION=2.2.0
 ```
 
 > **보안**: `.env`를 커밋하지 마세요. 번들 Caddyfile은 현재 내부 CA를 강제하며

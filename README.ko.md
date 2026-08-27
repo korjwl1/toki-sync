@@ -78,7 +78,7 @@ toki settings sync enable --server <서버-IP> --no-tls
 | 항목 | 값 |
 |---|---|
 | 이미지 | [`korjwl11/toki-sync`](https://hub.docker.com/r/korjwl11/toki-sync) |
-| 소스 패키지 버전 | `2.1.0` |
+| 소스 패키지 버전 | `2.2.0` |
 | 플랫폼 | `linux/amd64`, `linux/arm64` |
 
 예시는 `latest`를 사용합니다. 재현 가능한 배포에서는 레지스트리에 실제 존재하는
@@ -109,14 +109,15 @@ ClickHouse 사이의 기존 데이터는 자동 이전되지 않습니다. 기�
 [`docs/CONFIGURATION.ko.md`](docs/CONFIGURATION.ko.md#clickhouse-업그레이드-주의사항)의
 업그레이드 주의사항도 확인하세요.
 
-### 현재 브랜치를 소스에서 빌드하기
+### 소스에서 빌드하기
 
-현재 브랜치는 아직 공개 태그보다 새로운 protocol 타입을 사용합니다. 그래서
-`Cargo.toml`이 형제 디렉터리 `../toki_sync_protocol`을 로컬 patch로 참조합니다.
-일반적인 `docker build .`은 그 경로를 볼 수 없어 현재 실패합니다. 개발 빌드는 두
-저장소를 형제 경로에 둬야 합니다. 릴리즈/Docker 빌드는
-`toki-sync-protocol` v1.1.0 태그 생성, 의존성 재고정, 로컬 patch 제거가 먼저입니다.
-이미 배포된 이미지는 이 소스 빌드 제약의 영향을 받지 않습니다.
+소스는 공개된 `toki-sync-protocol` v1.1.0 태그를 고정하며 형제 체크아웃이 필요하지
+않습니다.
+
+```bash
+cargo build --release
+docker build -t toki-sync:local .
+```
 
 ---
 

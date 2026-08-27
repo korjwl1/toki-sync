@@ -57,12 +57,8 @@ services:
 ## Step 3: deploy
 
 ```bash
-docker compose pull toki-sync-server
-docker compose up -d --no-build
+docker compose up -d --build
 ```
-
-`--no-build` is required for this source revision because its active Cargo
-protocol patch points outside the Docker build context.
 
 This starts only toki-sync-server with the embedded Fjall event store (no Caddy).
 

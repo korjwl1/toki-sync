@@ -53,10 +53,7 @@ services:
 ## 3단계: 배포
 
 ```bash
-# 현재 source build는 Docker context에서 형제 protocol patch를 해석할 수 없습니다.
-# 공개 이미지를 사용하고 build를 명시적으로 금지합니다.
-docker compose pull toki-sync-server
-docker compose up -d --no-build
+docker compose up -d --build
 ```
 
 ---

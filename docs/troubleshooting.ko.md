@@ -10,17 +10,6 @@
 `--insecure`를 사용하거나 별도로 검증한 공개 TLS proxy 뒤에 두세요.
 [DuckDNS 상태 가이드](deploy-caddy-duckdns.ko.md)를 참고하세요.
 
-## 소스 Docker 빌드 실패
-
-활성 Cargo patch는 `../toki_sync_protocol`을 요구하지만 `docker build .`은 이를 볼 수
-없습니다. protocol v1.1.0 태그/re-pin과 patch 제거 전에는 다음처럼 공개 이미지를
-사용하거나 두 repository를 형제로 두고 Rust를 로컬 빌드하세요.
-
-```bash
-docker compose pull toki-sync-server
-docker compose up -d --no-build
-```
-
 ## `toki settings sync enable` 타임아웃
 
 - 서버 상태: `docker compose ps`

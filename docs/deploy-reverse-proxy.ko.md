@@ -57,12 +57,8 @@ services:
 ## 3단계: 배포
 
 ```bash
-docker compose pull toki-sync-server
-docker compose up -d --no-build
+docker compose up -d --build
 ```
-
-현재 source revision의 활성 Cargo protocol patch가 Docker build context 밖을
-가리키므로 `--no-build`가 필요합니다.
 
 toki-sync-server와 내장 Fjall 이벤트 스토어만 시작됩니다 (Caddy 없음).
 

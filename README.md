@@ -78,7 +78,7 @@ an external reverse proxy for production.
 | Field | Value |
 |---|---|
 | Image | [`korjwl11/toki-sync`](https://hub.docker.com/r/korjwl11/toki-sync) |
-| Source package version | `2.1.0` |
+| Source package version | `2.2.0` |
 | Platforms | `linux/amd64`, `linux/arm64` |
 
 The examples use `latest`. For reproducible deployments, pin a Docker tag that
@@ -109,15 +109,15 @@ it. Data is not migrated automatically between Fjall and ClickHouse. Existing
 ClickHouse installations also need the upgrade warning in
 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md#clickhouse-upgrade-warning).
 
-### Building this branch from source
+### Building from source
 
-The current branch uses protocol types that are newer than the latest published
-`toki-sync-protocol` tag. `Cargo.toml` therefore contains a sibling-directory
-patch to `../toki_sync_protocol`. A normal `docker build .` cannot see that
-path and currently fails. Development builds require both repositories as
-siblings; release/Docker builds require `toki-sync-protocol` v1.1.0 to be tagged,
-the dependency to be re-pinned, and the local patch to be removed. Published
-images do not have this source-build limitation.
+The source pins the published `toki-sync-protocol` v1.1.0 tag and does not
+require a sibling checkout:
+
+```bash
+cargo build --release
+docker build -t toki-sync:local .
+```
 
 ---
 

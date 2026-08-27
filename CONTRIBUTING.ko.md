@@ -16,18 +16,8 @@
 강제하지 않는다는 뜻이지, edition 2021을 지원하는 모든 컴파일러에서 현재 의존성
 그래프가 빌드된다는 뜻은 아닙니다.
 
-현재 브랜치는 protocol 형제 체크아웃도 필요합니다.
-
-```text
-parent/
-├── toki_sync/
-└── toki_sync_protocol/
-```
-
-`Cargo.toml`은 공개된 protocol v1.0.0을 고정하지만, 이 브랜치가 `SyncWindows`와
-`WireWindow`를 사용하므로 임시로 위 형제 체크아웃을 patch합니다. 형제 crate의
-버전은 1.1.0이지만 원격 저장소에는 아직 v1.1.0 태그가 없습니다. 형제 체크아웃이
-없으면 이 브랜치는 컴파일되지 않습니다.
+`Cargo.toml`은 공개된 `toki-sync-protocol` v1.1.0 태그를 고정합니다. protocol 형제
+체크아웃은 저장소 간 로컬 개발 때만 명시적으로 활성화하면 됩니다.
 
 ### 빌드 및 실행
 
@@ -51,15 +41,9 @@ cargo run -- --config config/toki-sync.toml
 ClickHouse 배포를 대상으로 한 마이그레이션 테스트도 없습니다. 단위 테스트 통과를
 두 선택 백엔드의 검증으로 보고하면 안 됩니다.
 
-`docker build .`도 이 브랜치에서는 유효한 검증 명령이 아닙니다. Docker 빌드
-컨텍스트가 활성 Cargo patch에 필요한 형제 protocol 체크아웃을 제외합니다. 릴리즈
-순서는 다음과 같습니다.
-
-1. `toki-sync-protocol` v1.1.0 태그 생성
-2. 이 저장소와 클라이언트 저장소의 protocol 태그 갱신
-3. 두 로컬 patch 제거
-4. 릴리즈 이미지 빌드 및 테스트
-5. windows 기능을 소비하는 앱보다 toki-sync를 먼저 릴리즈
+v1.1.0 protocol 태그가 고정되었으므로 `docker build .`도 릴리즈 검증에 포함합니다.
+위 PostgreSQL/ClickHouse 검증 범위는 그대로 적용됩니다. windows 기능을 소비하는
+앱보다 toki-sync를 먼저 릴리즈합니다.
 
 ## Pull request
 

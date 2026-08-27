@@ -810,8 +810,7 @@ monitor settings channel. Older servers return `404`.
 
 Port 9090 uses a custom binary protocol (bincode serialization), not HTTP. The
 protocol is implemented in `toki-sync-protocol` and is not intended for direct
-use. The current source branch requires protocol 1.1.0 types via a local patch;
-only v1.0.0 is tagged remotely at the time of this documentation update.
+use. The source pins the published protocol v1.1.0 tag.
 
 | Frame field | Size | Meaning |
 |---|---|---|

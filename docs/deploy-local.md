@@ -53,10 +53,7 @@ services:
 ## Step 3: deploy
 
 ```bash
-# The current source build cannot resolve the sibling protocol patch from the
-# Docker build context. Use the published image and explicitly disable builds.
-docker compose pull toki-sync-server
-docker compose up -d --no-build
+docker compose up -d --build
 ```
 
 ---

@@ -1,12 +1,9 @@
 # Deployment guide
 
-Pick a scenario based on your infrastructure. The current source checkout has
-two important constraints:
+Pick a scenario based on your infrastructure. The bundled Caddy profile has an
+important constraint:
 
-1. `docker build .` fails while the protocol 1.1.0 sibling patch is active; use
-   a published toki-sync image with `docker compose pull` and `--no-build`, or
-   wait for the protocol tag/re-pin release work.
-2. The bundled Caddyfile forces Caddy's internal CA. `DUCKDNS_TOKEN` is unused,
+1. The bundled Caddyfile forces Caddy's internal CA. `DUCKDNS_TOKEN` is unused,
    so the repository does not currently provide automatic public DuckDNS/
    Let's Encrypt certificates.
 

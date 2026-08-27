@@ -40,19 +40,18 @@ it separately, for example:
 
 This updates DNS only; it does not configure toki-sync or issue a certificate.
 
-## Published image versus source build
+## Published image or source build
 
-The current toki-sync branch cannot be built by the bundled Dockerfile while
-its sibling protocol patch is active. If using the repository Compose file,
-pull the published server image and prohibit a source build:
+Use the published server image or build the release-pinned source:
 
 ```bash
 docker compose pull toki-sync-server
-docker compose up -d --no-build
+# Alternatively: docker compose build toki-sync-server
+docker compose up -d
 ```
 
-If your custom TLS proxy is the bundled `caddy` service, build only that service
-first (`docker compose build caddy`), then run `up --no-build`. Do not describe
+If your custom TLS proxy is the bundled `caddy` service, build that service as
+needed (`docker compose build caddy`). Do not describe
 that result as DuckDNS/Let's Encrypt unless the certificate chain has actually
 been verified.
 

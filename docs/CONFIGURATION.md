@@ -261,7 +261,7 @@ TOKI_EXTERNAL_URL=https://yourserver.duckdns.org
 DUCKDNS_TOKEN=your-duckdns-token
 
 # Image version (optional)
-TOKI_VERSION=2.1.0
+TOKI_VERSION=2.2.0
 ```
 
 > **Security**: never commit `.env`. The bundled Caddyfile currently forces its
@@ -287,7 +287,6 @@ environment expansion.
 
 The current 116-test suite covers configuration parsing, SQLite-backed HTTP
 paths, and Fjall. PostgreSQL and ClickHouse compile but have no live integration
-tests here. The repository's Docker source build is also blocked until protocol
-v1.1.0 is tagged and the temporary sibling patch is removed. Treat optional
-backends and real migrations as unverified until exercised on disposable
-instances resembling production.
+tests here. Docker source builds are validated separately against the published
+protocol v1.1.0 tag. Treat optional backends and real migrations as unverified
+until exercised on disposable instances resembling production.

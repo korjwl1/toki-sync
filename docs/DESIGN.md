@@ -249,9 +249,6 @@ paths with temporary SQLite. There are zero live PostgreSQL and ClickHouse
 integration tests, no Compose integration test, and no real ClickHouse migration
 test.
 
-The Cargo package and latest repository tag are 2.1.0. This branch additionally
-uses `toki-sync-protocol` 1.1.0 source through a sibling patch, while the latest
-protocol tag is v1.0.0. Consequently `docker build .` currently fails because
-the sibling is outside its build context. Tag protocol v1.1.0, update consumers,
-remove local patches, and build/test the image before treating this branch as a
-releasable Docker source tree.
+The 2.2.0 Cargo package pins the published `toki-sync-protocol` v1.1.0 tag and
+builds without a sibling patch. Docker source builds are part of release
+validation.
