@@ -467,6 +467,153 @@ range 쿼리는 요청당 2000개 버킷으로 상한이 걸립니다 — 해당
 
 ---
 
+## 모니터 설정 동기화 (JWT 필수)
+
+toki_monitor의 설정과 대시보드 정의를 위한 **선택적(opt-in)** 채널입니다. TCP 동기화
+프로토콜과 의도적으로 분리되어 있습니다. 그 프로토콜은 toki가 수집한 사용량 데이터만
+운반하며, 모니터를 쓰지 않는 toki 사용자는 이 엔드포인트를 전혀 건드리지 않습니다.
+
+페이로드는 **불투명(opaque)** 합니다. 서버는 받은 바이트를 그대로 저장하고 그대로
+돌려줍니다. 대시보드를 파싱하지 않으므로, 모니터의 정의와 어긋나는 서버 측 정의가
+생길 여지가 없습니다. 따라서 `value`는 JSON 객체가 아니라 **문자열**입니다. 클라이언트가
+직접 직렬화한 문자열을 보내면 바이트 단위로 동일하게 되돌아옵니다.
+
+사용 전에 `GET /api/v1/capabilities`에서 `monitor_settings_v1`을 확인하세요. 구버전
+서버는 이 경로를 404로 응답하는데, 이는 저장된 항목이 없는 상태와 구분되지 않습니다.
+
+**키**는 ASCII 영숫자와 `.`, `_`, `-`, `:` 로 이루어진 1~128자입니다
+(예: `dashboard:main`, `prefs.theme`). 그 외는 `422`입니다.
+
+**제한**
+
+| 제한 | 값 | 초과 시 |
+|------|-----|---------|
+| 요청 본문 | 2 MiB | `413` (본문을 버퍼링하기 전에 거부) |
+| `value` 하나 | 256 KiB | `413` |
+| 사용자당 항목 수 | 512 | `507` |
+| 사용자당 총 바이트 | 8 MiB | `507` |
+| 사용자당 쓰기 | 60회 / 60초 | `429` (`Retry-After` 포함) |
+
+읽기에는 제한이 없습니다. 백오프를 통보받은 클라이언트도 현재 상태는 읽을 수 있어야
+하기 때문입니다. `PUT`과 `DELETE`는 모두 쓰기 예산을 소모합니다.
+
+### `GET /me/monitor/index`
+
+페이로드를 **제외한** 저장 목록과 잔여 용량을 반환합니다. 보유 중인 `version`과 비교해
+변경된 항목만 내려받으면 됩니다.
+
+**응답** `200 OK`
+
+```json
+{
+  "entries": [
+    { "key": "dashboard:main", "version": 3, "updated_at": 1756200000, "size_bytes": 4210 }
+  ],
+  "quota": {
+    "max_entries": 512,
+    "max_value_bytes": 262144,
+    "max_total_bytes": 8388608,
+    "used_entries": 1,
+    "used_bytes": 4210
+  }
+}
+```
+
+### `GET /me/monitor/settings`
+
+저장된 모든 항목을 페이로드까지 포함해 반환합니다.
+
+**응답** `200 OK`
+
+```json
+{
+  "entries": [
+    { "key": "dashboard:main", "value": "{\"panels\":[]}", "version": 3, "updated_at": 1756200000 }
+  ]
+}
+```
+
+### `GET /me/monitor/settings/:key`
+
+항목 하나를 반환합니다.
+
+**응답** `200 OK`
+
+```json
+{ "key": "dashboard:main", "value": "{\"panels\":[]}", "version": 3, "updated_at": 1756200000 }
+```
+
+해당 키가 없으면 `404`입니다.
+
+### `PUT /me/monitor/settings/:key`
+
+항목 하나를 저장하거나 교체합니다.
+
+**요청**
+
+```json
+{ "value": "{\"panels\":[]}", "if_version": 3 }
+```
+
+`if_version`은 선택 항목입니다. 지정하면 저장된 버전이 일치할 때만 쓰기가 반영됩니다.
+`0`은 "항목이 없어야 함"(생성 전용)을 뜻합니다.
+
+**응답** `200 OK`
+
+```json
+{
+  "key": "dashboard:main",
+  "version": 4,
+  "updated_at": 1756200100,
+  "previous_version": 3,
+  "created": false
+}
+```
+
+**동시 쓰기.** 두 기기가 같은 항목을 편집하는 것은 오류가 아니라 정상적인 경우입니다.
+규칙은 윈도우 병합과 동일하게 **서버 시각 기준 last-write-wins** 이지만, 클라이언트가
+자신이 이겼는지 모른 채 남겨지는 일은 없습니다.
+
+- `if_version`을 **지정**하고 졌다면 → `409 Conflict`, 아무것도 기록되지 않습니다.
+
+  ```json
+  {
+    "error": "version conflict: the stored entry moved since if_version was read",
+    "key": "dashboard:main",
+    "current_version": 5,
+    "current_updated_at": 1756200090
+  }
+  ```
+
+  다시 조회해 병합한 뒤 `current_version`으로 재시도하세요.
+
+- `if_version`을 **지정하지 않으면** → 쓰기는 항상 반영되지만, `previous_version`이
+  무엇을 덮어썼는지 알려줍니다. 그 값이 내가 조회했던 버전과 다르면 그 사이에 다른
+  기기가 기록했고 방금 그것을 덮어쓴 것입니다. 새 항목이면 `previous_version`은
+  `null`, `created`는 `true`입니다.
+
+`version`은 1에서 시작해 쓰기마다 증가합니다. 삭제 후 다시 만들면 1부터 시작하므로,
+버전 1은 언제나 "새 항목"을 의미합니다.
+
+**오류**
+
+| 상태 | 상황 |
+|------|------|
+| `413 Payload Too Large` | `value`가 256 KiB 초과, 또는 요청 본문이 2 MiB 초과 |
+| `422 Unprocessable Entity` | 허용되지 않는 형태의 키 |
+| `429 Too Many Requests` | 쓰기 예산 소진. 본문에 `retry_after` 포함 |
+| `507 Insufficient Storage` | 사용자당 용량 초과. 본문에 `quota`(`entries` \| `bytes`), `used`, `limit` 포함 |
+
+### `DELETE /me/monitor/settings/:key`
+
+항목 하나를 삭제합니다. 툼스톤이 아니라 행 자체가 제거됩니다.
+
+**응답** `204 No Content`. 해당 키가 없으면 `404`입니다.
+
+계정을 삭제하면 모니터 설정도 함께 삭제되므로, 방치된 계정이 행을 남기지 않습니다.
+
+---
+
 ## 관리자 엔드포인트 (JWT 필수, admin 역할)
 
 모든 관리자 엔드포인트는 `admin` 역할을 가진 사용자의 JWT가 필요합니다.

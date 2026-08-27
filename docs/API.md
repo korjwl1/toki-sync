@@ -467,6 +467,156 @@ List team memberships for the authenticated user.
 
 ---
 
+## Monitor settings sync (JWT required)
+
+An **opt-in** channel for toki_monitor's own configuration and dashboard
+definitions. It is deliberately separate from the TCP sync protocol: that
+protocol carries toki's collected usage data and only that. A toki user who does
+not run the monitor never touches these endpoints.
+
+Payloads are **opaque**. The server stores the exact bytes it is given and hands
+the same bytes back — it never parses a dashboard, so there is no second
+server-side idea of what a dashboard is to drift out of step with the monitor's.
+`value` is therefore a **string**, not a JSON object: stringify your own
+structure and it round-trips byte for byte.
+
+Probe `GET /api/v1/capabilities` for `monitor_settings_v1` before using these —
+an older server 404s the routes, which looks the same as an empty store.
+
+**Keys** are 1–128 characters of ASCII letters, digits, `.`, `_`, `-`, `:`
+(e.g. `dashboard:main`, `prefs.theme`). Anything else is `422`.
+
+**Limits**
+
+| Limit | Value | Exceeded |
+|-------|-------|----------|
+| Request body | 2 MiB | `413` (refused before the body is buffered) |
+| One `value` | 256 KiB | `413` |
+| Entries per user | 512 | `507` |
+| Bytes per user | 8 MiB | `507` |
+| Writes per user | 60 / 60s | `429` with `Retry-After` |
+
+Reads are not rate limited: a client told to back off still has to be able to
+read the current state. `PUT` and `DELETE` both count against the write budget.
+
+### `GET /me/monitor/index`
+
+What this user has stored, **without** the payloads, plus quota headroom. Compare
+`version` against what you already hold and fetch only the entries that moved.
+
+**Response** `200 OK`
+
+```json
+{
+  "entries": [
+    { "key": "dashboard:main", "version": 3, "updated_at": 1756200000, "size_bytes": 4210 }
+  ],
+  "quota": {
+    "max_entries": 512,
+    "max_value_bytes": 262144,
+    "max_total_bytes": 8388608,
+    "used_entries": 1,
+    "used_bytes": 4210
+  }
+}
+```
+
+### `GET /me/monitor/settings`
+
+Everything this user has stored, payloads included.
+
+**Response** `200 OK`
+
+```json
+{
+  "entries": [
+    { "key": "dashboard:main", "value": "{\"panels\":[]}", "version": 3, "updated_at": 1756200000 }
+  ]
+}
+```
+
+### `GET /me/monitor/settings/:key`
+
+One entry.
+
+**Response** `200 OK`
+
+```json
+{ "key": "dashboard:main", "value": "{\"panels\":[]}", "version": 3, "updated_at": 1756200000 }
+```
+
+`404` if this user has no entry under that key.
+
+### `PUT /me/monitor/settings/:key`
+
+Store or replace one entry.
+
+**Request**
+
+```json
+{ "value": "{\"panels\":[]}", "if_version": 3 }
+```
+
+`if_version` is optional. When present the write only lands if the stored
+version matches; `0` means "expect no entry" (create-only).
+
+**Response** `200 OK`
+
+```json
+{
+  "key": "dashboard:main",
+  "version": 4,
+  "updated_at": 1756200100,
+  "previous_version": 3,
+  "created": false
+}
+```
+
+**Concurrent writes.** Two devices editing the same entry is the expected case,
+not an error. The rule is **last-write-wins on the server clock**, the same rule
+the window merge uses — but a client is never left guessing whether it won:
+
+- Wrote **with** `if_version` and lost → `409 Conflict`, nothing written:
+
+  ```json
+  {
+    "error": "version conflict: the stored entry moved since if_version was read",
+    "key": "dashboard:main",
+    "current_version": 5,
+    "current_updated_at": 1756200090
+  }
+  ```
+
+  Re-fetch, merge, retry against `current_version`.
+
+- Wrote **without** `if_version` → the write always lands, but
+  `previous_version` says what it replaced. If that is not the version you
+  fetched, another device wrote in between and you just overwrote it.
+  `previous_version` is `null` (and `created` is `true`) for a new entry.
+
+`version` starts at 1 and increments per write. Deleting and re-creating a key
+starts over at 1, so version 1 always means "this entry is new".
+
+**Errors**
+
+| Status | When |
+|--------|------|
+| `413 Payload Too Large` | `value` over 256 KiB, or a request body over 2 MiB |
+| `422 Unprocessable Entity` | key outside the allowed shape |
+| `429 Too Many Requests` | write budget exhausted; body carries `retry_after` |
+| `507 Insufficient Storage` | per-user quota; body carries `quota` (`entries` \| `bytes`), `used`, `limit` |
+
+### `DELETE /me/monitor/settings/:key`
+
+Delete one entry. The row is removed, not tombstoned.
+
+**Response** `204 No Content`, or `404` if this user has no entry under that key.
+
+Deleting an account cascades to its monitor settings, so an abandoned account
+leaves nothing behind.
+
+---
+
 ## Admin endpoints (JWT required, admin role)
 
 All admin endpoints require a JWT from a user with the `admin` role.

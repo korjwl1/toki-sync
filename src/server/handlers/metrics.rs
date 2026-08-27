@@ -1109,12 +1109,25 @@ fn parse_toki_virtual_query(query: &str) -> Result<ParsedQuery, String> {
 pub async fn capabilities() -> axum::Json<serde_json::Value> {
     axum::Json(serde_json::json!({
         "sync_windows_v1": true,
+        // The opt-in monitor settings channel under /me/monitor. A monitor
+        // pointed at an older server has to find out here: those servers 404
+        // the routes, which is indistinguishable from an empty store.
+        "monitor_settings_v1": true,
     }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Clients probe this before using optional features, so a flag going
+    /// missing is a silent downgrade, not a visible break.
+    #[tokio::test]
+    async fn capabilities_advertises_the_optional_channels() {
+        let axum::Json(caps) = capabilities().await;
+        assert_eq!(caps["sync_windows_v1"], true);
+        assert_eq!(caps["monitor_settings_v1"], true);
+    }
 
     #[test]
     fn test_parse_scope_self() {
