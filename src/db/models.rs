@@ -155,3 +155,15 @@ pub enum MonitorWriteOutcome {
         limit: i64,
     },
 }
+
+/// What a monitor-setting delete actually did. Deletes support the same CAS
+/// rule as writes so an edit made after the deleting client fetched the index
+/// cannot be erased silently.
+pub enum MonitorDeleteOutcome {
+    Deleted,
+    NotFound,
+    VersionMismatch {
+        current_version: i64,
+        current_updated_at: i64,
+    },
+}

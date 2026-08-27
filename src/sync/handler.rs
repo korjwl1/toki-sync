@@ -425,17 +425,6 @@ pub async fn handle_connection(
             }
 
             MsgType::SyncWindows => {
-                // Keyed by USER and shared across connections: a per-connection
-                // throttle is reset by reconnecting, so a peer holding one valid
-                // JWT could loop connect -> upload -> disconnect and grow stored
-                // rows without bound (every distinct limit_id/account tuple is a
-                // new key, and retention only removes OLD anchors).
-                if !windows_rate.allow(&user_id, &provider, &device_id) {
-                    tracing::debug!("sync_windows throttled for user={user_id} device={device_id}");
-                    let err = SyncErrPayload { reason: "windows sync throttled".to_string() };
-                    write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?).await?;
-                    continue;
-                }
                 match crate::server::http::is_user_active_cached(&active_cache, &*db, &user_id).await {
                     Ok(true) => {}
                     Ok(false) => {
@@ -485,6 +474,22 @@ pub async fn handle_connection(
                     let err = SyncErrPayload {
                         reason: format!("invalid provider name: {:?}", win.provider),
                     };
+                    write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?).await?;
+                    continue;
+                }
+                // The payload provider may deliberately differ from the auth
+                // provider. Rate-limit the identity that will actually be
+                // written; using the auth value here lets reconnects cycle
+                // arbitrary auth-provider strings to get fresh limiter keys
+                // while repeatedly writing the same payload provider.
+                // The limiter is shared across connections so reconnecting
+                // cannot reset it either.
+                if !windows_rate.allow(&user_id, &win.provider, &device_id) {
+                    tracing::debug!(
+                        "sync_windows throttled for user={user_id} device={device_id} provider={}",
+                        win.provider
+                    );
+                    let err = SyncErrPayload { reason: "windows sync throttled".to_string() };
                     write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?).await?;
                     continue;
                 }

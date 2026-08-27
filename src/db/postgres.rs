@@ -1161,8 +1161,17 @@ impl DatabaseRepo for PostgresRepo {
         let now = chrono::Utc::now().timestamp();
         let mut tx = self.pool.begin().await.context("begin monitor upsert tx")?;
 
-        // FOR UPDATE so two devices racing on the SAME key serialise here
-        // rather than both reading the pre-write version.
+        // A monitor row cannot be locked before it exists. Lock the guaranteed
+        // parent row instead, serialising every settings mutation for this
+        // user. This closes both absent-row create races and quota races across
+        // different keys; the key-row lock below then documents the narrower
+        // invariant and protects existing rows too.
+        let _: Option<String> = sqlx::query_scalar("SELECT id FROM users WHERE id = $1 FOR UPDATE")
+            .bind(user_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("upsert_monitor_setting: lock user")?;
+
         let current: Option<(i64, i64, i64)> = sqlx::query_as(
             "SELECT version, updated_at, size_bytes FROM monitor_settings
              WHERE user_id = $1 AND key = $2 FOR UPDATE",
@@ -1249,15 +1258,61 @@ impl DatabaseRepo for PostgresRepo {
         })
     }
 
-    async fn delete_monitor_setting(&self, user_id: &str, key: &str) -> Result<bool> {
-        let affected = sqlx::query("DELETE FROM monitor_settings WHERE user_id = $1 AND key = $2")
+    async fn delete_monitor_setting(
+        &self,
+        user_id: &str,
+        key: &str,
+        if_version: Option<i64>,
+    ) -> Result<MonitorDeleteOutcome> {
+        let mut tx = self.pool.begin().await.context("begin monitor delete tx")?;
+        let _: Option<String> = sqlx::query_scalar("SELECT id FROM users WHERE id = $1 FOR UPDATE")
+            .bind(user_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("delete_monitor_setting: lock user")?;
+
+        let affected = if let Some(expected) = if_version {
+            sqlx::query(
+                "DELETE FROM monitor_settings WHERE user_id = $1 AND key = $2 AND version = $3",
+            )
             .bind(user_id)
             .bind(key)
-            .execute(&self.pool)
+            .bind(expected)
+            .execute(&mut *tx)
             .await
-            .context("delete_monitor_setting")?
-            .rows_affected();
-        Ok(affected > 0)
+        } else {
+            sqlx::query("DELETE FROM monitor_settings WHERE user_id = $1 AND key = $2")
+                .bind(user_id)
+                .bind(key)
+                .execute(&mut *tx)
+                .await
+        }
+        .context("delete_monitor_setting")?
+        .rows_affected();
+
+        let outcome = if affected > 0 {
+            MonitorDeleteOutcome::Deleted
+        } else {
+            let current: Option<(i64, i64)> = sqlx::query_as(
+                "SELECT version, updated_at FROM monitor_settings WHERE user_id = $1 AND key = $2",
+            )
+            .bind(user_id)
+            .bind(key)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("delete_monitor_setting: read current")?;
+            match current {
+                Some((current_version, current_updated_at)) if if_version.is_some() => {
+                    MonitorDeleteOutcome::VersionMismatch {
+                        current_version,
+                        current_updated_at,
+                    }
+                }
+                _ => MonitorDeleteOutcome::NotFound,
+            }
+        };
+        tx.commit().await.context("commit monitor delete")?;
+        Ok(outcome)
     }
 
     async fn count_active_admins_except(&self, username: &str) -> Result<i64> {

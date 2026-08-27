@@ -102,7 +102,12 @@ pub trait DatabaseRepo: Send + Sync {
         if_version: Option<i64>,
         quota: MonitorQuota,
     ) -> Result<MonitorWriteOutcome>;
-    async fn delete_monitor_setting(&self, user_id: &str, key: &str) -> Result<bool>;
+    async fn delete_monitor_setting(
+        &self,
+        user_id: &str,
+        key: &str,
+        if_version: Option<i64>,
+    ) -> Result<MonitorDeleteOutcome>;
 
     // User active status
     async fn set_user_active(&self, user_id: &str, active: bool) -> Result<bool>;

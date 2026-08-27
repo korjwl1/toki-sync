@@ -1286,15 +1286,55 @@ impl DatabaseRepo for SqliteRepo {
         })
     }
 
-    async fn delete_monitor_setting(&self, user_id: &str, key: &str) -> Result<bool> {
-        let affected = sqlx::query("DELETE FROM monitor_settings WHERE user_id = ? AND key = ?")
+    async fn delete_monitor_setting(
+        &self,
+        user_id: &str,
+        key: &str,
+        if_version: Option<i64>,
+    ) -> Result<MonitorDeleteOutcome> {
+        let mut tx = self.pool.begin().await.context("begin monitor delete tx")?;
+        let affected = if let Some(expected) = if_version {
+            sqlx::query(
+                "DELETE FROM monitor_settings WHERE user_id = ? AND key = ? AND version = ?",
+            )
             .bind(user_id)
             .bind(key)
-            .execute(&self.pool)
+            .bind(expected)
+            .execute(&mut *tx)
             .await
-            .context("delete_monitor_setting")?
-            .rows_affected();
-        Ok(affected > 0)
+        } else {
+            sqlx::query("DELETE FROM monitor_settings WHERE user_id = ? AND key = ?")
+                .bind(user_id)
+                .bind(key)
+                .execute(&mut *tx)
+                .await
+        }
+        .context("delete_monitor_setting")?
+        .rows_affected();
+
+        let outcome = if affected > 0 {
+            MonitorDeleteOutcome::Deleted
+        } else {
+            let current: Option<(i64, i64)> = sqlx::query_as(
+                "SELECT version, updated_at FROM monitor_settings WHERE user_id = ? AND key = ?",
+            )
+            .bind(user_id)
+            .bind(key)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("delete_monitor_setting: read current")?;
+            match current {
+                Some((current_version, current_updated_at)) if if_version.is_some() => {
+                    MonitorDeleteOutcome::VersionMismatch {
+                        current_version,
+                        current_updated_at,
+                    }
+                }
+                _ => MonitorDeleteOutcome::NotFound,
+            }
+        };
+        tx.commit().await.context("commit monitor delete")?;
+        Ok(outcome)
     }
 
     async fn count_active_admins_except(&self, username: &str) -> Result<i64> {

@@ -18,14 +18,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
 use serde::Deserialize;
 
-use crate::db::models::{MonitorQuota, MonitorWriteOutcome};
+use crate::db::models::{MonitorDeleteOutcome, MonitorQuota, MonitorWriteOutcome};
 
 use super::super::http::{authenticate, AppError, AppState};
 
@@ -179,6 +179,9 @@ pub async fn me_monitor_index(
         .collect();
 
     Ok(Json(serde_json::json!({
+        // Capability gate for older clients/servers. A client must not send a
+        // conditional delete to a server that may ignore the query parameter.
+        "delete_cas": true,
         "entries": entries,
         "quota": {
             "max_entries": MAX_ENTRIES,
@@ -332,10 +335,17 @@ pub async fn me_monitor_put(
 
 // ─── DELETE /me/monitor/settings/{key} ──────────────────────────────────────
 
+#[derive(Deserialize)]
+pub struct DeleteSettingRequest {
+    #[serde(default)]
+    pub if_version: Option<i64>,
+}
+
 pub async fn me_monitor_delete(
     headers: HeaderMap,
     State(state): State<AppState>,
     Path(key): Path<String>,
+    Query(query): Query<DeleteSettingRequest>,
 ) -> Result<Response, AppError> {
     let claims = authenticate(&state, &headers).await?;
     validate_key(&key)?;
@@ -344,16 +354,28 @@ pub async fn me_monitor_delete(
         return Ok(too_many_writes(retry_after));
     }
 
-    let deleted = state
+    let outcome = state
         .db
-        .delete_monitor_setting(&claims.sub, &key)
+        .delete_monitor_setting(&claims.sub, &key, query.if_version)
         .await
         .map_err(AppError::internal)?;
 
-    if !deleted {
-        return Err(AppError::not_found("monitor setting not found"));
-    }
-    Ok(StatusCode::NO_CONTENT.into_response())
+    Ok(match outcome {
+        MonitorDeleteOutcome::Deleted => StatusCode::NO_CONTENT.into_response(),
+        MonitorDeleteOutcome::NotFound => {
+            return Err(AppError::not_found("monitor setting not found"));
+        }
+        MonitorDeleteOutcome::VersionMismatch { current_version, current_updated_at } => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "version conflict: the stored entry moved since if_version was read",
+                "key": key,
+                "current_version": current_version,
+                "current_updated_at": current_updated_at,
+            })),
+        )
+            .into_response(),
+    })
 }
 
 #[cfg(test)]
@@ -708,6 +730,46 @@ mod tests {
         .await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(v["version"], 3);
+    }
+
+    /// Deletion is a write too: a device holding an old index must not erase
+    /// an edit that landed after that index was fetched.
+    #[tokio::test]
+    async fn a_conditional_delete_is_refused_instead_of_erasing_a_newer_edit() {
+        let h = Harness::new(&["alice"]).await;
+        h.put(
+            "/me/monitor/settings/k",
+            "alice",
+            serde_json::json!({ "value": "base" }),
+        )
+        .await;
+
+        let (_, index) = h.get("/me/monitor/index", "alice").await;
+        assert_eq!(index["delete_cas"], true);
+        let fetched_version = index["entries"][0]["version"].as_i64().unwrap();
+
+        h.put(
+            "/me/monitor/settings/k",
+            "alice",
+            serde_json::json!({ "value": "newer edit" }),
+        )
+        .await;
+
+        let (status, conflict) = h
+            .delete(
+                &format!("/me/monitor/settings/k?if_version={fetched_version}"),
+                "alice",
+            )
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(conflict["current_version"], 2);
+        let (_, stored) = h.get("/me/monitor/settings/k", "alice").await;
+        assert_eq!(stored["value"], "newer edit");
+
+        let (status, _) = h
+            .delete("/me/monitor/settings/k?if_version=2", "alice")
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
     }
 
     /// `if_version: 0` is create-only, so a client can publish a new dashboard
