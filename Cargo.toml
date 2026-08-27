@@ -65,6 +65,10 @@ dirs = "6"
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3"
+# `util` brings ServiceExt::oneshot, which drives the real router in-process so
+# the endpoint tests exercise routing, extractors and auth rather than calling
+# handler functions directly.
+tower = { version = "0.5", features = ["util"] }
 
 # Local override for feature-branch development of the protocol crate.
 #
