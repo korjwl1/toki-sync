@@ -3,4 +3,5 @@ pub mod auth;
 pub mod dashboard;
 pub mod me;
 pub mod metrics;
+pub mod monitor;
 pub mod teams;

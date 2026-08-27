@@ -163,6 +163,9 @@ async fn main() -> Result<()> {
         trust_proxy: config.server.trust_proxy,
         pricing: Arc::new(tokio::sync::RwLock::new(pricing)),
         active_cache: active_cache.clone(),
+        monitor_rate: Arc::new(
+            crate::server::handlers::monitor::MonitorWriteRateLimiterInner::new(),
+        ),
     };
 
     // -- Periodic pricing refresh (every 6 hours) ------------------------------

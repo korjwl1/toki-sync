@@ -14,7 +14,7 @@ use crate::auth::{BruteForceGuard, JwtManager};
 use crate::auth::oidc::{OidcDiscovery, OidcStateStore};
 use crate::db::DatabaseRepo;
 
-use super::handlers::{admin, auth, dashboard, me, metrics, teams};
+use super::handlers::{admin, auth, dashboard, me, metrics, monitor, teams};
 
 /// Dynamic settings that check DB first, then fall back to config file values.
 #[derive(Clone)]
@@ -90,6 +90,10 @@ pub struct AppState {
     /// authenticated requests reject deactivated accounts without a DB hit per
     /// request. Shared with the TCP sync handler. See `is_user_active_cached`.
     pub active_cache: ActiveCache,
+    /// Per-user write budget for the monitor settings channel. Shared across
+    /// connections so reconnecting cannot reset it, exactly as the sync path's
+    /// window limiter is. See `handlers::monitor`.
+    pub monitor_rate: monitor::MonitorWriteRateLimiter,
 }
 
 pub async fn get_oidc_discovery(state: &AppState) -> Result<OidcDiscovery, AppError> {
@@ -150,6 +154,18 @@ pub fn build_router(state: AppState) -> Router {
         .route("/me/devices/{device_id}/name", axum::routing::patch(me::me_rename_device))
         .route("/me/password", axum::routing::patch(me::me_change_password))
         .route("/me/teams", get(teams::me_teams))
+        // Monitor settings sync: opt-in, user-scoped, opaque blobs. Separate
+        // from the toki sync protocol on purpose -- see `handlers::monitor`.
+        .route("/me/monitor/index", get(monitor::me_monitor_index))
+        .route("/me/monitor/settings", get(monitor::me_monitor_list))
+        .route(
+            "/me/monitor/settings/{key}",
+            get(monitor::me_monitor_get)
+                .put(monitor::me_monitor_put)
+                .delete(monitor::me_monitor_delete)
+                // Reject an oversized body before it is buffered, not after.
+                .layer(axum::extract::DefaultBodyLimit::max(monitor::MAX_REQUEST_BODY)),
+        )
         // Admin
         .route("/admin/users", get(admin::admin_list_users).post(admin::admin_create_user))
         .route("/admin/users/{user_id}", delete(admin::admin_delete_user))
