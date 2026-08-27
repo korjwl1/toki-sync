@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -18,13 +19,51 @@ pub struct ModelPricing {
 }
 
 impl ModelPricing {
+    /// Rate to charge cached-input tokens at when LiteLLM publishes no
+    /// `cache_read_input_token_cost` for the model. Mirrors the daemon's
+    /// `ModelPricing::cache_read_rate` — a zero fallback would silently price
+    /// cached input at nothing, and for the codex schema (which moves cached
+    /// tokens out of the input bucket) that deletes most of the bill.
+    fn cache_read_rate(&self) -> f64 {
+        self.cache_read_input_token_cost
+            .unwrap_or(self.input_cost_per_token)
+    }
+
     /// Calculate cost from token counts.
     pub fn cost(&self, input: u64, output: u64, cache_create: u64, cache_read: u64) -> f64 {
         (input as f64) * self.input_cost_per_token
             + (output as f64) * self.output_cost_per_token
             + (cache_create as f64) * self.cache_creation_input_token_cost.unwrap_or(0.0)
-            + (cache_read as f64) * self.cache_read_input_token_cost.unwrap_or(0.0)
+            + (cache_read as f64) * self.cache_read_rate()
     }
+
+    /// Scale every rate by `mul`. Used to derive a `-fast` model's pricing
+    /// from its base model.
+    fn scaled(&self, mul: f64) -> ModelPricing {
+        ModelPricing {
+            input_cost_per_token: self.input_cost_per_token * mul,
+            output_cost_per_token: self.output_cost_per_token * mul,
+            cache_creation_input_token_cost: self.cache_creation_input_token_cost.map(|c| c * mul),
+            cache_read_input_token_cost: self.cache_read_input_token_cost.map(|c| c * mul),
+        }
+    }
+}
+
+/// Fast-mode price multipliers, keyed by base model name.
+///
+/// This MUST stay in step with the daemon's per-provider `FAST_MULTIPLIER`
+/// tables (`toki/src/providers/*/mod.rs`). The daemon's claude_code parser
+/// writes fast-mode events under a `<base>-fast` model name, and that name is
+/// what reaches this server. LiteLLM publishes no `-fast` rows, so without
+/// this table `get` misses and the event contributes **no cost at all** —
+/// silently, and invisibly under `by (project)` / `by (device_id)` grouping
+/// where the bucket also holds priced non-fast events.
+const FAST_MULTIPLIER: &[(&str, f64)] = &[("claude-opus-5", 2.0), ("claude-opus-4-8", 2.0)];
+
+fn fast_multiplier(base: &str) -> Option<f64> {
+    FAST_MULTIPLIER
+        .iter()
+        .find_map(|(k, v)| (*k == base).then_some(*v))
 }
 
 /// Cached pricing table. Exact model name match only.
@@ -46,8 +85,20 @@ impl PricingTable {
         self.prices.len()
     }
 
-    pub fn get(&self, model: &str) -> Option<&ModelPricing> {
-        self.prices.get(model)
+    /// Look up effective pricing for a model name.
+    ///
+    /// Resolution order mirrors the daemon's `PricingTable::get`:
+    /// 1. exact match in the LiteLLM data (takes precedence if LiteLLM ever
+    ///    starts publishing `-fast` rows);
+    /// 2. `<base>-fast` fallback: the base model's rates scaled by the
+    ///    per-model multiplier.
+    pub fn get(&self, model: &str) -> Option<Cow<'_, ModelPricing>> {
+        if let Some(p) = self.prices.get(model) {
+            return Some(Cow::Borrowed(p));
+        }
+        let base = model.strip_suffix("-fast")?;
+        let mul = fast_multiplier(base)?;
+        Some(Cow::Owned(self.prices.get(base)?.scaled(mul)))
     }
 }
 
