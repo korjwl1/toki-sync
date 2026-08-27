@@ -238,6 +238,30 @@ impl SqliteRepo {
         .await
         .context("migrate: create server_settings")?;
 
+        // Migration: monitor_settings table (opt-in monitor config channel).
+        //
+        // `size_bytes` is denormalised on purpose: the index endpoint must be
+        // able to report how big an entry is WITHOUT reading the payload, which
+        // is the whole reason that endpoint exists, and the per-user byte quota
+        // needs a SUM that does not drag every blob through the query.
+        //
+        // ON DELETE CASCADE is what keeps an abandoned account from leaving
+        // rows behind forever: deleting the user takes its entries with it.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS monitor_settings (
+                user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                key        TEXT NOT NULL,
+                value      TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                version    INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (user_id, key)
+            )",
+        )
+        .execute(&self.pool)
+        .await
+        .context("migrate: create monitor_settings")?;
+
         // Migration: add active column to users
         let _ = sqlx::query("ALTER TABLE users ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
             .execute(&self.pool)
@@ -1104,6 +1128,171 @@ impl DatabaseRepo for SqliteRepo {
             .execute(&self.pool)
             .await
             .context("set_user_active")?
+            .rows_affected();
+        Ok(affected > 0)
+    }
+
+    // ── Monitor settings ───────────────────────────────────────────────
+
+    async fn list_monitor_settings(&self, user_id: &str) -> Result<Vec<MonitorSetting>> {
+        let rows: Vec<(String, String, i64, i64)> = sqlx::query_as(
+            "SELECT key, value, version, updated_at FROM monitor_settings WHERE user_id = ? ORDER BY key",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("list_monitor_settings")?;
+        Ok(rows
+            .into_iter()
+            .map(|(key, value, version, updated_at)| MonitorSetting { key, value, version, updated_at })
+            .collect())
+    }
+
+    async fn list_monitor_setting_index(&self, user_id: &str) -> Result<Vec<MonitorSettingMeta>> {
+        let rows: Vec<(String, i64, i64, i64)> = sqlx::query_as(
+            "SELECT key, version, updated_at, size_bytes FROM monitor_settings WHERE user_id = ? ORDER BY key",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("list_monitor_setting_index")?;
+        Ok(rows
+            .into_iter()
+            .map(|(key, version, updated_at, size_bytes)| MonitorSettingMeta { key, version, updated_at, size_bytes })
+            .collect())
+    }
+
+    async fn get_monitor_setting(&self, user_id: &str, key: &str) -> Result<Option<MonitorSetting>> {
+        let row: Option<(String, i64, i64)> = sqlx::query_as(
+            "SELECT value, version, updated_at FROM monitor_settings WHERE user_id = ? AND key = ?",
+        )
+        .bind(user_id)
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await
+        .context("get_monitor_setting")?;
+        Ok(row.map(|(value, version, updated_at)| MonitorSetting {
+            key: key.to_string(),
+            value,
+            version,
+            updated_at,
+        }))
+    }
+
+    async fn monitor_settings_usage(&self, user_id: &str) -> Result<MonitorUsage> {
+        let (entries, total_bytes): (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM monitor_settings WHERE user_id = ?",
+        )
+        .bind(user_id)
+        .fetch_one(&self.pool)
+        .await
+        .context("monitor_settings_usage")?;
+        Ok(MonitorUsage { entries, total_bytes })
+    }
+
+    async fn upsert_monitor_setting(
+        &self,
+        user_id: &str,
+        key: &str,
+        value: &str,
+        if_version: Option<i64>,
+        quota: MonitorQuota,
+    ) -> Result<MonitorWriteOutcome> {
+        let size = value.len() as i64;
+        let now = chrono::Utc::now().timestamp();
+        let mut tx = self.pool.begin().await.context("begin monitor upsert tx")?;
+
+        let current: Option<(i64, i64, i64)> = sqlx::query_as(
+            "SELECT version, updated_at, size_bytes FROM monitor_settings WHERE user_id = ? AND key = ?",
+        )
+        .bind(user_id)
+        .bind(key)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("upsert_monitor_setting: read current")?;
+
+        // CAS. `if_version: 0` means "expect nothing stored", so a create-only
+        // write has a way to say so.
+        if let Some(expected) = if_version {
+            let actual = current.as_ref().map_or(0, |(v, _, _)| *v);
+            if actual != expected {
+                tx.rollback().await.ok();
+                return Ok(MonitorWriteOutcome::VersionMismatch {
+                    current_version: current.as_ref().map(|(v, _, _)| *v),
+                    current_updated_at: current.as_ref().map(|(_, u, _)| *u),
+                });
+            }
+        }
+
+        let (count, total): (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM monitor_settings WHERE user_id = ?",
+        )
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await
+        .context("upsert_monitor_setting: usage")?;
+
+        // Measure what the store WOULD hold after this write, so replacing an
+        // entry with a smaller one is never refused for being over quota.
+        let existing_size = current.as_ref().map_or(0, |(_, _, s)| *s);
+        let new_count = if current.is_some() { count } else { count + 1 };
+        let new_total = total - existing_size + size;
+
+        if new_count > quota.max_entries {
+            tx.rollback().await.ok();
+            return Ok(MonitorWriteOutcome::QuotaExceeded {
+                what: "entries",
+                used: new_count,
+                limit: quota.max_entries,
+            });
+        }
+        if new_total > quota.max_total_bytes {
+            tx.rollback().await.ok();
+            return Ok(MonitorWriteOutcome::QuotaExceeded {
+                what: "bytes",
+                used: new_total,
+                limit: quota.max_total_bytes,
+            });
+        }
+
+        // The new version is computed in SQL, not here: if a racing writer
+        // landed between our read and this statement the increment still runs
+        // off the row that is actually stored, so versions never repeat.
+        let version: i64 = sqlx::query_scalar(
+            "INSERT INTO monitor_settings (user_id, key, value, size_bytes, version, updated_at)
+             VALUES (?, ?, ?, ?, 1, ?)
+             ON CONFLICT(user_id, key) DO UPDATE SET
+                 value = excluded.value,
+                 size_bytes = excluded.size_bytes,
+                 version = monitor_settings.version + 1,
+                 updated_at = excluded.updated_at
+             RETURNING version",
+        )
+        .bind(user_id)
+        .bind(key)
+        .bind(value)
+        .bind(size)
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await
+        .context("upsert_monitor_setting: write")?;
+
+        tx.commit().await.context("commit monitor upsert")?;
+
+        Ok(MonitorWriteOutcome::Written {
+            version,
+            updated_at: now,
+            previous_version: current.map(|(v, _, _)| v),
+        })
+    }
+
+    async fn delete_monitor_setting(&self, user_id: &str, key: &str) -> Result<bool> {
+        let affected = sqlx::query("DELETE FROM monitor_settings WHERE user_id = ? AND key = ?")
+            .bind(user_id)
+            .bind(key)
+            .execute(&self.pool)
+            .await
+            .context("delete_monitor_setting")?
             .rows_affected();
         Ok(affected > 0)
     }

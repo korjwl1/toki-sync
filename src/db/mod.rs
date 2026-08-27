@@ -86,6 +86,24 @@ pub trait DatabaseRepo: Send + Sync {
     async fn set_server_setting(&self, key: &str, value: &str) -> Result<()>;
     async fn list_server_settings(&self) -> Result<Vec<(String, String)>>;
 
+    // Monitor settings (opt-in monitor config / dashboard channel)
+    async fn list_monitor_settings(&self, user_id: &str) -> Result<Vec<MonitorSetting>>;
+    async fn list_monitor_setting_index(&self, user_id: &str) -> Result<Vec<MonitorSettingMeta>>;
+    async fn get_monitor_setting(&self, user_id: &str, key: &str) -> Result<Option<MonitorSetting>>;
+    async fn monitor_settings_usage(&self, user_id: &str) -> Result<MonitorUsage>;
+    /// Upsert one entry. The CAS (`if_version`) and the quota check both happen
+    /// inside the write transaction; see [`MonitorWriteOutcome`] for what the
+    /// caller has to distinguish.
+    async fn upsert_monitor_setting(
+        &self,
+        user_id: &str,
+        key: &str,
+        value: &str,
+        if_version: Option<i64>,
+        quota: MonitorQuota,
+    ) -> Result<MonitorWriteOutcome>;
+    async fn delete_monitor_setting(&self, user_id: &str, key: &str) -> Result<bool>;
+
     // User active status
     async fn set_user_active(&self, user_id: &str, active: bool) -> Result<bool>;
     async fn count_active_admins_except(&self, username: &str) -> Result<i64>;
