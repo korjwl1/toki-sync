@@ -2,7 +2,9 @@
 
 For servers that already have nginx, Traefik, or another proxy handling TLS.
 
-> Different setup? See [Caddy + DuckDNS](deploy-caddy-duckdns.md) for a fresh server with auto TLS, [self-signed TLS](deploy-self-signed.md) for IP-only servers, or [local / LAN](deploy-local.md) for development.
+> For an IP-only trusted LAN use [internal-CA TLS](deploy-self-signed.md); for
+> development use [local / LAN](deploy-local.md). The bundled DuckDNS scenario
+> is [not turnkey public TLS](deploy-caddy-duckdns.md) in this revision.
 
 ---
 
@@ -55,8 +57,12 @@ services:
 ## Step 3: deploy
 
 ```bash
-docker compose up -d
+docker compose pull toki-sync-server
+docker compose up -d --no-build
 ```
+
+`--no-build` is required for this source revision because its active Cargo
+protocol patch points outside the Docker build context.
 
 This starts only toki-sync-server with the embedded Fjall event store (no Caddy).
 
@@ -74,7 +80,7 @@ Forward two types of traffic to toki-sync:
 ### nginx
 
 ```nginx
-# HTTP API + dashboard
+# HTTP API + administration console
 server {
     listen 443 ssl;
     server_name yourserver.example.com;

@@ -6,7 +6,9 @@
 # bind = "0.0.0.0"
 tcp_port = 9090
 http_port = 9091
-# external_url = "https://myserver.duckdns.org"  # For JWT issuer + OIDC redirects
+external_url = "${TOKI_EXTERNAL_URL}" # JWT issuer + OIDC redirects; empty is allowed for local use
+# trust_proxy = false
+# max_concurrent_writes = 10
 
 [auth]
 jwt_secret = "${JWT_SECRET}"
@@ -15,14 +17,19 @@ jwt_secret = "${JWT_SECRET}"
 # registration_mode = "closed"       # "open" | "approval" | "closed"
 
 [storage]
+backend = "sqlite"
 sqlite_path = "/data/toki_sync.db"
 
 [events]
 # backend = "fjall"                  # Default: embedded, no external dependencies
 # fjall_path = "/data/events.fjall"
+# dedup_retention_secs = 2592000       # Fjall dedup-index retention; events remain
 # backend = "clickhouse"             # Optional: external ClickHouse
 # clickhouse_url = "http://clickhouse:8123"
 
 [log]
 level = "info"
 # json = true                        # JSON log format (for log aggregators)
+
+[features]
+# max_query_scope = "self"           # "self" | "team" | "all"

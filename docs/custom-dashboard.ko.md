@@ -1,173 +1,140 @@
 # 커스텀 대시보드
 
-toki-sync API 위에 자체 UI를 만들어 토큰 사용량을 시각화하는 방법을 설명합니다.
+toki-sync의 인증된 가상 쿼리 엔드포인트를 이용해 클라이언트를 구축합니다. 서버는
+`/api/v1/query`, `/api/v1/query_range`, PromQL 프록시 또는 VictoriaMetrics 설정을
+제공하지 않습니다. 현재 구현된 사용량 쿼리 경로는
+`GET /api/v1/toki/query` 하나입니다.
 
-## 개요
+## 아키텍처
 
-toki-sync는 JWT 인증과 스코프 기반 접근 제어가 포함된 쿼리 API를 제공합니다. 모든 쿼리는 toki-sync를 통해 전달되며 사용자 수준의 데이터 격리를 시행합니다. VictoriaMetrics가 설정된 경우(선택) PromQL 표현식에 라벨 필터를 주입하여 전달하는 PromQL 프록시도 사용 가능합니다.
-
-두 가지 방식이 있습니다.
-
-- **Tier 1: 직접 연결** — 프론트엔드가 toki-sync API와 직접 통신.
-- **Tier 2: 커스텀 백엔드** — 자체 백엔드가 프론트엔드와 toki-sync 사이를 중개 (선택적으로 VictoriaMetrics 직접 접근).
-
-## Tier 1: 직접 연결
-
-아키텍처: `프론트엔드 -> toki-sync API`
-
-가장 간단한 방식입니다. 프론트엔드가 toki-sync에 인증하고 데이터를 직접 조회합니다.
-
-### 인증
-
-1. 자격 증명을 POST하여 JWT를 획득합니다.
-
-   ```http
-   POST /login
-   Content-Type: application/json
-
-   {"username": "alice", "password": "..."}
-   ```
-
-   응답에 `access_token`과 `refresh_token`이 포함됩니다.
-
-2. 이후 모든 요청에 JWT를 포함합니다.
-
-   ```http
-   Authorization: Bearer <access_token>
-   ```
-
-3. 만료된 토큰 갱신.
-
-   ```http
-   POST /token/refresh
-   Content-Type: application/json
-
-   {"refresh_token": "<refresh_token>"}
-   ```
-
-### 쿼리 엔드포인트
-
-**즉시 쿼리:**
-
-```http
-GET /api/v1/query?query=<promql>&time=<unix_ts>&scope=<scope>
+```text
+브라우저 또는 커스텀 백엔드
+    |  Authorization: Bearer <access token>
+    v
+toki-sync /api/v1/toki/query
+    |
+    +-- Fjall 또는 ClickHouse EventStore
 ```
 
-**범위 쿼리:**
+브라우저 전용 UI는 `POST /login`으로 토큰을 받고 refresh token이 로그나 URL에
+들어가지 않게 하세요. 여러 데이터 소스를 결합하거나 프런트엔드에서 인증 정보를
+분리하려면 커스텀 백엔드가 더 안전합니다. 사용자의 access token을 toki-sync에
+전달할 수 있지만 사용자 대신 더 넓은 scope를 만들어내면 안 됩니다.
+
+## 인증
 
 ```http
-GET /api/v1/query_range?query=<promql>&start=<unix_ts>&end=<unix_ts>&step=<duration>&scope=<scope>
+POST /login
+Content-Type: application/json
+
+{"username":"alice","password":"..."}
 ```
 
-### Scope 파라미터
+반환된 access token을 사용합니다.
 
-`scope` 파라미터는 누구의 데이터가 보이는지를 제어합니다.
+```http
+Authorization: Bearer <access_token>
+```
 
-| Scope | 설명 | 요구사항 |
+만료된 토큰 쌍은 `POST /token/refresh`로 회전합니다. 정확한 요청/응답 계약은
+[API.ko.md](API.ko.md)를 참고하세요.
+
+## 쿼리
+
+instant 집계는 `step`을 생략합니다.
+
+```http
+GET /api/v1/toki/query?query=sum%20by%20(model)(usage)&start=1787788800&end=1787875200&scope=self
+```
+
+차트는 `step`을 지정합니다.
+
+```http
+GET /api/v1/toki/query?query=sum%20by%20(model)(usage)&start=20260801&end=20260827&step=1d&tz=Asia%2FSeoul&scope=self
+```
+
+지원하는 쿼리 구성요소는 다음과 같습니다.
+
+- metric: `usage`(또는 이전 이름 `toki_tokens_total`), `cost`, `events`
+- 선택적 `sum(...)`, `increase(...)` wrapper
+- `provider="..."` 동등 필터 하나
+- `model`, `project`, `device_id` 중 한 grouping 차원(`type`은 함께 쓸 수 있지만
+  토큰 종류는 필드로 출력됨)
+- bare `windows` (`scope=self`만 지원)
+
+쿼리 안 range selector는 문법만 검사하며 실제 스캔과 버킷은 HTTP의 `start`, `end`,
+`step`이 결정합니다. 지원하지 않는 PromQL 함수, 임의 라벨, 정규식 matcher,
+`offset`, `sessions`, `projects`는 `400`을 반환합니다.
+
+## Scope
+
+| Scope | 데이터 | 조건 |
 |---|---|---|
-| `self` (기본값) | 인증된 사용자 본인 데이터 | 항상 허용 |
-| `team:<TEAM_ID>` | 지정된 팀의 모든 멤버 | 아래 참고 |
-| `all` | 모든 사용자 (조직 전체) | `max_query_scope = "all"` |
+| `self` | 인증된 사용자의 이벤트 | 항상 가능 |
+| `team:<team_id>` | 한 팀의 현재 멤버 | 비관리자는 팀 멤버여야 하며 서버 최대 scope가 `team` 또는 `all` |
+| `all` | 모든 사용자 | 비관리자는 서버 최대 scope가 `all` |
 
-`team:<TEAM_ID>`는 `max_query_scope`가 `"team"` 또는 `"all"`이어야 하며, 인증된 사용자가 해당 팀의 멤버여야 합니다. 관리자 사용자는 스코프 제한을 모두 우회하며 항상 전체 데이터를 볼 수 있습니다.
+관리자는 설정된 최대 scope를 우회하지만 요청한 scope는 계속 결과를 좁힙니다. 관리자가
+`self`를 요청하면 본인 데이터만 받습니다.
 
-### PromQL 쿼리 예시
+## 응답 처리
 
-**내 총 토큰 사용량:**
+집계는 toki의 provider-grouped JSON 형태입니다.
 
-```http
-GET /api/v1/query?query=sum(toki_tokens_total)
+```json
+{
+  "providers": {
+    "claude_code": [
+      {
+        "period": "2026-08-01T00:00:00|claude-opus-4-6",
+        "usage_per_models": [
+          {
+            "model": "claude-opus-4-6",
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 50,
+            "total_tokens": 170,
+            "events": 2,
+            "cost_usd": 0.001
+          }
+        ]
+      }
+    ]
+  }
+}
 ```
 
-**모델별 내 사용량 (시계열):**
+`model`이라는 필드가 항상 모델을 담는다고 가정하지 마세요. project 또는 device로
+그룹화하면 로컬 클라이언트 호환성을 위해 선택한 그룹 키가 그 필드에 들어갑니다.
+Codex 항목은 Claude 캐시 필드 대신 `cached_input_tokens`와
+`reasoning_output_tokens`를 사용합니다.
 
-```http
-GET /api/v1/query_range?query=sum by (model)(increase(toki_tokens_total[1h]))&start=1711584000&end=1711670400&step=3600
-```
+## 반드시 표시해야 하는 제한
 
-**팀 리더보드 (사용자별 토큰):**
+- 시계열 쿼리는 2,000개 시간 버킷으로 제한됩니다.
+- 서버는 요청당 입력 이벤트를 최대 200,000개 읽으며 cursor가 없습니다.
+- bare raw `events`는 최상위 `"truncated": true`를 반환할 수 있습니다.
+- 집계는 현재 200,000개 입력 잘림을 전파하지 않아 넓은 집계가 완전한 것처럼 보일
+  수 있습니다. 제한된 시간 범위를 사용하세요.
+- 집계가 서로 다른 `(bucket, group)` 조합 50,000개를 넘으면
+  `"truncated": true`를 반환합니다.
+- ClickHouse raw 스캔은 이벤트 상한 전에 어댑터의 10 MiB 버퍼 응답 제한으로
+  `502`가 날 수 있습니다. 더 좁은 범위로 재시도하세요.
+- RFC 3339와 dashed date는 원격에서 허용하지 않습니다. epoch 초, 13자리 epoch
+  밀리초, `YYYYMMDD`, `YYYYMMDDhhmmss`를 사용하세요.
+- 서버 범위는 `[start, end)`입니다. 단 날짜 전용 end는 해당 날짜를 포함하도록 다음
+  현지 자정으로 올립니다.
 
-```http
-GET /api/v1/query?query=sum by (user)(toki_tokens_total)&scope=team:TEAM_ID
-```
+넓은 집계에서 `truncated`가 없다는 것을 모든 이벤트가 계산됐다는 증거로 취급하지
+마세요.
 
-**조직 전체 사용량:**
+## 보안 참고
 
-```http
-GET /api/v1/query?query=sum(toki_tokens_total)&scope=all
-```
+- 토큰 수와 메타데이터만 저장하며 prompt와 response는 저장하지 않습니다.
+- 신뢰하지 않는 프런트엔드에서 EventStore DB를 직접 호출하지 마세요.
+- toki-sync 평문 포트를 인터넷에 노출하지 마세요. 신뢰하는 리버스 프록시에서 HTTP
+  9091과 TCP 9090의 TLS를 모두 종단하세요.
+- 내장 `/admin` 페이지는 관리 콘솔이며 사용량 차트 UI가 아닙니다.
 
-**시간별 사용량 (시간당 증가율):**
-
-```http
-GET /api/v1/query_range?query=sum(increase(toki_tokens_total[1h]))&start=...&end=...&step=3600
-```
-
-**프로바이더별 사용량:**
-
-```http
-GET /api/v1/query_range?query=sum by (provider)(increase(toki_tokens_total[1h]))&start=...&end=...&step=3600
-```
-
-## Tier 2: 커스텀 백엔드
-
-아키텍처: `프론트엔드 -> 자체 백엔드 -> toki-sync (사용자/팀 정보 + 이벤트 데이터)`
-
-`self`/`team`/`all` 이상의 세밀한 접근 제어가 필요하거나, toki-sync 데이터를 다른 데이터 소스와 결합하려는 경우 이 방식을 사용합니다.
-
-### 동작 방식
-
-1. 자체 백엔드가 toki-sync JWT를 통해 사용자를 인증합니다 (동일한 JWT 시크릿으로 토큰 검증)
-2. 자체 백엔드가 toki-sync API에서 사용자/팀 정보를 가져옵니다:
-   - `GET /me/teams` -- 사용자의 팀 목록
-   - `GET /admin/users` -- 모든 사용자 목록 (관리자 전용)
-   - `GET /admin/teams/:team_id/members` -- 팀 멤버 목록 (관리자 전용)
-3. 자체 백엔드가 toki-sync API 엔드포인트에서 이벤트 데이터를 쿼리합니다
-4. 자체 백엔드가 프론트엔드에 데이터를 반환하기 전에 자체 권한 로직을 적용합니다
-
-### VictoriaMetrics 직접 쿼리 (선택)
-
-`[backend].vm_url`로 VictoriaMetrics가 설정된 경우, 내부 네트워크에서 직접 쿼리할 수도 있습니다.
-
-```http
-GET http://victoriametrics:8428/api/v1/query_range?query=...&start=...&end=...&step=...
-```
-
-VictoriaMetrics에 직접 쿼리할 때는 접근 제어를 시행하기 위해 `user="..."` 또는 `user=~"..."` 레이블 필터를 직접 주입해야 합니다. VictoriaMetrics가 별도로 배포된 경우에만 사용 가능합니다.
-
-## 사용 가능한 레이블
-
-모든 toki 메트릭에는 다음 레이블이 포함됩니다:
-
-| 레이블 | 설명 | 예시 값 |
-|--------|------|---------|
-| `user` | 사용자 ID (UUID) | `550e8400-e29b-41d4-a716-446655440000` |
-| `device` | 디바이스 ID (UUID) | `6ba7b810-9dad-11d1-80b4-00c04fd430c8` |
-| `model` | AI 모델 이름 | `claude-sonnet-4-20250514`, `gpt-4o` |
-| `provider` | 프로바이더/도구 이름 | `claude_code`, `cursor`, `chatgpt` |
-| `session` | 세션 식별자 | `session-abc123` |
-| `project` | 프로젝트 이름 | `my-app` |
-| `type` | 토큰 유형 | `input`, `output`, `cache_create`, `cache_read` |
-
-## 토큰 유형
-
-`type` 레이블은 서로 다른 토큰 범주를 구분합니다:
-
-- `input` -- 모델에 전송된 토큰 (프롬프트 토큰)
-- `output` -- 모델이 생성한 토큰 (완성 토큰)
-- `cache_create` -- 프롬프트 캐시에 기록된 토큰
-- `cache_read` -- 프롬프트 캐시에서 읽은 토큰
-
-**예시: 비용 관련 토큰만 (input + output):**
-
-```promql
-sum(toki_tokens_total{type=~"input|output"})
-```
-
-## 중요 사항
-
-- `scope=all`은 서버 관리자가 서버 설정에서 `max_query_scope`를 `all`로 설정해야 합니다
-- `scope=team:ID`는 `max_query_scope`가 `team` 또는 `all`이어야 합니다
-- 프롬프트나 응답은 절대 저장되지 않습니다 -- 토큰 수와 메타데이터만 저장됩니다
-- 관리자 사용자는 스코프 설정에 관계없이 항상 전체 접근 권한을 가집니다
-- 팀 전용 엔드포인트 `GET /api/v1/teams/:team_id/query_range`는 `scope=team:ID`의 대안으로 계속 사용 가능합니다
+전체 파라미터와 응답 형태는 [API.ko.md](API.ko.md)를 참고하세요.

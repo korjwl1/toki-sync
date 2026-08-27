@@ -8,10 +8,26 @@ For the Korean version, see [CONTRIBUTING.ko.md](CONTRIBUTING.ko.md).
 
 ### Prerequisites
 
-- Rust toolchain (stable). The project targets Rust 2021 edition; the latest stable release is recommended.
+- Rust toolchain (stable). The project targets Rust 2021 edition. The current
+  branch is verified with Rust/Cargo 1.92.0; no lower MSRV is claimed.
 - Docker and Docker Compose v2 (only required if you want to run the full container stack locally).
 
-The repository does not pin a `rust-version` in `Cargo.toml`; any stable toolchain that supports edition 2021 should build.
+The repository does not pin `rust-version` in `Cargo.toml`. That means Cargo
+does not enforce an MSRV; it does **not** mean every edition-2021 compiler can
+build the current dependency graph.
+
+The current branch also requires a sibling protocol checkout:
+
+```text
+parent/
+├── toki_sync/
+└── toki_sync_protocol/
+```
+
+`Cargo.toml` pins the published v1.0.0 protocol but temporarily patches it to
+that sibling because this branch uses `SyncWindows` and `WireWindow`. The
+sibling crate says 1.1.0, while the remote repository currently has no v1.1.0
+tag. Without the sibling checkout, this branch does not compile.
 
 ### Build and run
 
@@ -26,6 +42,25 @@ To run the server against a local SQLite + Fjall stack, copy the example config 
 cp config/toki-sync.toml.example config/toki-sync.toml
 cargo run -- --config config/toki-sync.toml
 ```
+
+### Current validation boundary
+
+At commit `5804fc2`, `cargo test` lists 116 tests. They cover the parser,
+protocol framing, pricing, HTTP routing/auth paths, monitor settings through a
+real temporary SQLite database, and Fjall. There is currently no live
+PostgreSQL or ClickHouse integration suite, and no migration test against a
+pre-existing ClickHouse deployment. A green unit suite must not be reported as
+validation of those two optional backends.
+
+`docker build .` is also not a valid check on this branch: Docker's build
+context excludes the sibling protocol checkout required by the active Cargo
+patch. The release sequence is:
+
+1. tag `toki-sync-protocol` v1.1.0;
+2. update the protocol tag in this repository and the client repository;
+3. remove both local patch sections;
+4. build and test the release image;
+5. release toki-sync before consumers that depend on its windows capability.
 
 ## Pull requests
 
@@ -80,4 +115,4 @@ Found a bug? Have a feature idea? Open an issue using the templates in `.github/
 
 ## License
 
-By contributing, you agree that your contributions are licensed under [FSL-1.1-Apache-2.0](LICENSE).
+By contributing, you agree that your contributions are licensed under the [MIT License](LICENSE).

@@ -1,173 +1,141 @@
 # Custom dashboards
 
-Build a custom UI on top of the toki-sync API to visualize token usage data.
+Build a client against toki-sync's authenticated virtual-query endpoint. The
+server does not expose `/api/v1/query`, `/api/v1/query_range`, a PromQL proxy,
+or a VictoriaMetrics configuration. The only usage-query route currently
+implemented is `GET /api/v1/toki/query`.
 
-## Overview
+## Architecture
 
-toki-sync provides a query API with JWT authentication and scope-based access control. All queries go through toki-sync, which enforces user-level data isolation. When VictoriaMetrics is configured (optional), a PromQL proxy is also available that injects label filters into PromQL expressions before forwarding.
-
-There are two approaches:
-
-- **Tier 1: direct connection** — frontend talks directly to the toki-sync API.
-- **Tier 2: custom backend** — your backend mediates between frontend and toki-sync, optionally with direct VictoriaMetrics access.
-
-## Tier 1: direct connection
-
-Architecture: `Frontend -> toki-sync API`
-
-This is the simplest approach. Your frontend authenticates with toki-sync and queries data directly.
-
-### Authentication
-
-1. Obtain a JWT by posting credentials:
-
-   ```http
-   POST /login
-   Content-Type: application/json
-
-   {"username": "alice", "password": "..."}
-   ```
-
-   Response includes `access_token` and `refresh_token`.
-
-2. Include the JWT on all subsequent requests:
-
-   ```http
-   Authorization: Bearer <access_token>
-   ```
-
-3. Refresh expired tokens:
-
-   ```http
-   POST /token/refresh
-   Content-Type: application/json
-
-   {"refresh_token": "<refresh_token>"}
-   ```
-
-### Query endpoints
-
-**Instant query:**
-
-```http
-GET /api/v1/query?query=<promql>&time=<unix_ts>&scope=<scope>
+```text
+Browser or backend
+    |  Authorization: Bearer <access token>
+    v
+toki-sync /api/v1/toki/query
+    |
+    +-- Fjall or ClickHouse EventStore
 ```
 
-**Range query:**
+For a browser-only UI, obtain tokens from `POST /login` and keep the refresh
+token out of logs and URLs. A custom backend is safer when you need to combine
+data sources or keep credentials out of frontend storage. It can forward the
+user's access token to toki-sync; do not mint wider queries on behalf of a user.
+
+## Authentication
 
 ```http
-GET /api/v1/query_range?query=<promql>&start=<unix_ts>&end=<unix_ts>&step=<duration>&scope=<scope>
+POST /login
+Content-Type: application/json
+
+{"username":"alice","password":"..."}
 ```
 
-### Scope parameter
+Use the returned access token:
 
-The `scope` parameter controls whose data is visible.
+```http
+Authorization: Bearer <access_token>
+```
 
-| Scope | Description | Requirement |
+Rotate an expired token pair with `POST /token/refresh`. See [API.md](API.md)
+for the exact request/response contracts.
+
+## Querying
+
+An instant aggregate omits `step`:
+
+```http
+GET /api/v1/toki/query?query=sum%20by%20(model)(usage)&start=1787788800&end=1787875200&scope=self
+```
+
+A chart supplies `step`:
+
+```http
+GET /api/v1/toki/query?query=sum%20by%20(model)(usage)&start=20260801&end=20260827&step=1d&tz=Asia%2FSeoul&scope=self
+```
+
+Supported query building blocks are:
+
+- metrics: `usage` (or legacy `toki_tokens_total`), `cost`, and `events`;
+- optional `sum(...)` and `increase(...)` wrappers;
+- a single equality filter, `provider="..."`;
+- one grouping dimension: `model`, `project`, or `device_id` (`type` may be
+  present alongside it but token kinds are emitted as fields);
+- bare `windows`, with `scope=self` only.
+
+The range selector inside a query is syntax-checked, but the HTTP `start`,
+`end`, and `step` parameters control the actual scan and buckets. Unsupported
+PromQL functions, arbitrary labels, regex matchers, `offset`, `sessions`, and
+`projects` return `400`.
+
+## Scope
+
+| Scope | Data | Requirement |
 |---|---|---|
-| `self` (default) | The authenticated user's data | Always allowed |
-| `team:<TEAM_ID>` | All members of the team | See below |
-| `all` | All users (organization-wide) | `max_query_scope = "all"` |
+| `self` | Authenticated user's events | Always available |
+| `team:<team_id>` | Current members of one team | Non-admin must be a member and server maximum must allow `team` or `all` |
+| `all` | All users | Non-admin requires server maximum `all` |
 
-`team:<TEAM_ID>` requires `max_query_scope` to be `"team"` or `"all"`, and the authenticated user must be a member of the team. Admin users bypass all scope restrictions and always see all data regardless of the `scope` parameter or server configuration.
+Admins bypass the configured maximum, but the requested scope still narrows the
+result. An admin requesting `self` receives only their own data.
 
-### Example PromQL queries
+## Response handling
 
-**My total token usage:**
+Aggregates use toki's provider-grouped JSON shape:
 
-```http
-GET /api/v1/query?query=sum(toki_tokens_total)
+```json
+{
+  "providers": {
+    "claude_code": [
+      {
+        "period": "2026-08-01T00:00:00|claude-opus-4-6",
+        "usage_per_models": [
+          {
+            "model": "claude-opus-4-6",
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 50,
+            "total_tokens": 170,
+            "events": 2,
+            "cost_usd": 0.001
+          }
+        ]
+      }
+    ]
+  }
+}
 ```
 
-**My usage by model (time series):**
+Do not assume the field named `model` always contains a model: for project or
+device grouping it contains that selected group key for local-client
+compatibility. Codex entries use `cached_input_tokens` and
+`reasoning_output_tokens` instead of the Claude cache field names.
 
-```http
-GET /api/v1/query_range?query=sum by (model)(increase(toki_tokens_total[1h]))&start=1711584000&end=1711670400&step=3600
-```
+## Limits you must surface
 
-**Team leaderboard (tokens per user):**
+- Time-series queries are limited to 2,000 time buckets.
+- The server reads at most 200,000 input events per request; there is no cursor.
+- Bare raw `events` can return top-level `"truncated": true`.
+- Aggregates currently do not propagate the 200,000-input truncation flag, so a
+  wide aggregate may look complete when it is not. Use bounded time windows.
+- Aggregation reports `"truncated": true` if it exceeds 50,000 distinct
+  `(bucket, group)` combinations.
+- ClickHouse raw scans may return `502` at the adapter's 10 MiB buffered response
+  limit before the event ceiling. Retry with a narrower range.
+- RFC 3339 and dashed dates are not accepted remotely. Use epoch seconds,
+  13-digit epoch milliseconds, `YYYYMMDD`, or `YYYYMMDDhhmmss`.
+- The server range is `[start, end)`, except a date-only end is promoted to the
+  next local midnight so that date is included.
 
-```http
-GET /api/v1/query?query=sum by (user)(toki_tokens_total)&scope=team:TEAM_ID
-```
+Treat an absent `truncated` field as inconclusive for wide aggregates, not proof
+that every matching event was counted.
 
-**Organization total usage:**
+## Security notes
 
-```http
-GET /api/v1/query?query=sum(toki_tokens_total)&scope=all
-```
+- Only token counts and metadata are stored; prompts and responses are not.
+- Never call the EventStore database directly from an untrusted frontend.
+- Do not expose toki-sync's plain ports to the Internet. Terminate TLS for both
+  HTTP 9091 and TCP 9090 in a trusted reverse proxy.
+- The built-in `/admin` page is an administration console, not a usage chart UI.
 
-**Usage over time (hourly rate):**
-
-```http
-GET /api/v1/query_range?query=sum(increase(toki_tokens_total[1h]))&start=...&end=...&step=3600
-```
-
-**Usage by provider:**
-
-```http
-GET /api/v1/query_range?query=sum by (provider)(increase(toki_tokens_total[1h]))&start=...&end=...&step=3600
-```
-
-## Tier 2: custom backend
-
-Architecture: `Frontend -> Your Backend -> toki-sync (user/team info + event data)`
-
-Use this approach when you need fine-grained access control beyond `self`/`team`/`all`, or when you want to combine toki-sync data with other data sources.
-
-### How it works
-
-1. Your backend authenticates users via toki-sync JWT (verify the token using the same JWT secret)
-2. Your backend fetches user/team info from toki-sync API:
-   - `GET /me/teams` -- list the user's teams
-   - `GET /admin/users` -- list all users (admin only)
-   - `GET /admin/teams/:team_id/members` -- list team members (admin only)
-3. Your backend queries toki-sync API endpoints for event data
-4. Your backend applies its own permission logic before returning data to the frontend
-
-### Direct VictoriaMetrics query (optional)
-
-If VictoriaMetrics is configured as the `[backend].vm_url`, you can also query it directly on your internal network:
-
-```http
-GET http://victoriametrics:8428/api/v1/query_range?query=...&start=...&end=...&step=...
-```
-
-When querying VictoriaMetrics directly, you are responsible for injecting `user="..."` or `user=~"..."` label filters to enforce access control. This is only available when VictoriaMetrics is deployed separately.
-
-## Available labels
-
-All toki metrics include these labels:
-
-| Label | Description | Example values |
-|-------|-------------|----------------|
-| `user` | User ID (UUID) | `550e8400-e29b-41d4-a716-446655440000` |
-| `device` | Device ID (UUID) | `6ba7b810-9dad-11d1-80b4-00c04fd430c8` |
-| `model` | AI model name | `claude-sonnet-4-20250514`, `gpt-4o` |
-| `provider` | Provider/tool name | `claude_code`, `cursor`, `chatgpt` |
-| `session` | Session identifier | `session-abc123` |
-| `project` | Project name | `my-app` |
-| `type` | Token type | `input`, `output`, `cache_create`, `cache_read` |
-
-## Token types
-
-The `type` label distinguishes different token categories:
-
-- `input` -- tokens sent to the model (prompt tokens)
-- `output` -- tokens generated by the model (completion tokens)
-- `cache_create` -- tokens written to prompt cache
-- `cache_read` -- tokens read from prompt cache
-
-**Example: total cost-relevant tokens (input + output only):**
-
-```promql
-sum(toki_tokens_total{type=~"input|output"})
-```
-
-## Important notes
-
-- `scope=all` requires the server administrator to set `max_query_scope` to `all` in server settings
-- `scope=team:ID` requires `max_query_scope` to be `team` or `all`
-- No prompts or responses are ever stored -- only token counts and metadata
-- Admin users always have full access regardless of scope settings
-- The team-specific endpoint `GET /api/v1/teams/:team_id/query_range` remains available as an alternative to `scope=team:ID`
+For full parameters and response shapes, see [API.md](API.md).

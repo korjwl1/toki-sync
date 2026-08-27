@@ -188,10 +188,12 @@ Returns server authentication configuration (registration mode, OIDC availabilit
 ```json
 {
   "registration_mode": "open",
-  "oidc_enabled": true,
-  "server_version": "0.2.0"
+  "oidc_enabled": true
 }
 ```
+
+The public auth-info response does not expose the server version. Admins can
+read the Cargo package version from `GET /admin/server-info`.
 
 ---
 
@@ -321,7 +323,8 @@ OIDC callback handler. Exchanges the authorization code for tokens and creates/f
 
 ## Query (JWT required)
 
-Queries are served directly from the EventStore. The same interface as the local toki daemon's REPORT protocol — toki virtual queries (`usage{}`, `events{}`, `cost{}`) and the daemon's JSON output format.
+Queries are served directly from the EventStore. This is a deliberately limited
+subset of toki's virtual-query language, not a general PromQL endpoint.
 
 ### `GET /api/v1/toki/query`
 
@@ -331,15 +334,25 @@ Single endpoint covering both instant (stat) and range (chart) queries. When `st
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
-| `query` | Yes | Toki virtual query: `usage{}`, `events{}`, or `cost{}`. Group-by via `by (model)` or `by (project)` |
-| `start` | No | Epoch seconds, `YYYYMMDD`, or `YYYYMMDDhhmmss`. Defaults to `0` |
+| `query` | Yes | `usage`/`toki_tokens_total`, `cost`, `events`, or bare `windows`; optional `sum`, `increase`, provider equality filter, and one of `model`, `project`, `device_id` groupings |
+| `start` | No | Epoch seconds, 13-digit epoch milliseconds, `YYYYMMDD`, or `YYYYMMDDhhmmss`. Defaults to `0` |
 | `end` | No | Same formats as `start`. Defaults to now |
 | `step` | No | Bucket size (e.g., `3600`, `1h`, `1d`, `1w`). Omit for instant query |
 | `scope` | No | `self` (default), `team:<team_id>`, or `all`. Subject to server's `max_query_scope` |
 | `tz` | No | IANA timezone name for bucket formatting (e.g., `Asia/Seoul`). Defaults to UTC |
 | `start_of_week` | No | Week start for `step=1w` (`mon`-`sun`). Default `mon` |
+| `no_cost` | No | Boolean query value; when true, suppress cost calculation |
 
-Range queries are capped at 2000 buckets per request — the server rejects steps that would exceed this for the given range.
+The server uses a half-open `[start, end)` range. A date-only `end=YYYYMMDD`
+is converted to the following local midnight, so the full date is included.
+Numeric second/millisecond and `YYYYMMDDhhmmss` end bounds are exact and
+exclusive. RFC 3339 and dashed dates are currently rejected with `400`; the
+remote API does not yet accept every time spelling understood by local toki.
+
+Range queries are capped at 2,000 time buckets. Only `provider="value"` with
+the `=` operator is accepted as a label filter. Regex/negative matchers,
+`offset`, `avg`, `count`, `sessions`, `projects`, and arbitrary PromQL are
+rejected rather than approximated. Bare `windows` supports `scope=self` only.
 
 **Response** `200 OK`
 
@@ -367,7 +380,31 @@ Range queries are capped at 2000 buckets per request — the server rejects step
 }
 ```
 
-`period` is `<ISO timestamp>|<group key>`. Codex provider entries use `cached_input_tokens` and `reasoning_output_tokens` in place of the cache fields. `cost_usd` is only present for `cost{}` queries or when a pricing entry matches the model.
+`period` is `<ISO timestamp>|<group key>`. Codex provider entries use
+`cached_input_tokens` and `reasoning_output_tokens` in place of the Claude cache
+fields. Unless `no_cost=true`, usage/cost buckets and raw events include
+`cost_usd` where the model has a known price; aggregated `events` is a count and
+does not include cost.
+
+### Query ceilings and partial results
+
+- A request reads at most 200,000 events. This is a hard ceiling, not pagination.
+- Bare raw `events` responses add top-level `"truncated": true` when that event
+  ceiling is reached. Direct API clients must inspect it; the current toki CLI
+  adapter discards this top-level flag.
+- Aggregated queries are subject to the same 200,000-input ceiling, but the
+  current response does **not** report when that input scan was cut off. Totals
+  can therefore be partial. Narrow the time range until pagination or explicit
+  aggregate truncation propagation is implemented.
+- Aggregation additionally caps distinct `(bucket, group)` combinations at
+  50,000 and reports `"truncated": true` when that cap is reached.
+- The ClickHouse adapter buffers its `JSONEachRow` result through ureq's 10 MiB
+  string reader. A wide raw query can fail with `502` before reaching 200,000
+  events. The server does not currently provide a cursor or response-size-safe
+  streaming path.
+- Fjall team scans visit members sequentially. At the event ceiling, earlier
+  members can consume the full allowance, so a truncated team result is not a
+  globally time-ordered sample.
 
 **Errors**
 
@@ -388,13 +425,16 @@ List all devices registered under the authenticated user.
 **Response** `200 OK`
 
 ```json
-[
-  {
-    "device_id": "550e8400-e29b-...",
-    "device_name": "macbook-pro",
-    "last_seen": "2026-03-28T10:30:00Z"
-  }
-]
+{
+  "devices": [
+    {
+      "id": "550e8400-e29b-...",
+      "name": "macbook-pro",
+      "device_key": "stable-client-key",
+      "last_seen_at": 1774693800
+    }
+  ]
+}
 ```
 
 ---
@@ -403,11 +443,7 @@ List all devices registered under the authenticated user.
 
 Remove a device from the authenticated user's account.
 
-**Response** `200 OK`
-
-```json
-{ "deleted": true }
-```
+**Response** `204 No Content`.
 
 ---
 
@@ -421,11 +457,7 @@ Rename a device.
 { "name": "work-laptop" }
 ```
 
-**Response** `200 OK`
-
-```json
-{ "updated": true }
-```
+**Response** `204 No Content`.
 
 ---
 
@@ -442,11 +474,7 @@ Change the authenticated user's password.
 }
 ```
 
-**Response** `200 OK`
-
-```json
-{ "updated": true }
-```
+**Response** `204 No Content`. All of the user's refresh tokens are revoked.
 
 ---
 
@@ -457,12 +485,15 @@ List team memberships for the authenticated user.
 **Response** `200 OK`
 
 ```json
-[
-  {
-    "team_id": "team-uuid",
-    "team_name": "engineering"
-  }
-]
+{
+  "teams": [
+    {
+      "team_id": "team-uuid",
+      "team_name": "engineering",
+      "role": "member"
+    }
+  ]
+}
 ```
 
 ---
@@ -508,6 +539,7 @@ What this user has stored, **without** the payloads, plus quota headroom. Compar
 
 ```json
 {
+  "delete_cas": true,
   "entries": [
     { "key": "dashboard:main", "version": 3, "updated_at": 1756200000, "size_bytes": 4210 }
   ],
@@ -610,6 +642,11 @@ starts over at 1, so version 1 always means "this entry is new".
 
 Delete one entry. The row is removed, not tombstoned.
 
+Optional query parameter `if_version=<n>` performs compare-and-swap deletion.
+If the stored version differs, the server returns the same `409` version detail
+shape as a conditional `PUT`. Probe the index's `delete_cas` flag before using
+this with an older server.
+
 **Response** `204 No Content`, or `404` if this user has no entry under that key.
 
 Deleting an account cascades to its monitor settings, so an abandoned account
@@ -656,7 +693,7 @@ Allowed `:key` values: `registration_mode`, `oidc_issuer`, `oidc_client_id`, `oi
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/admin/server-info` | Server version, uptime, connected devices count, database stats |
+| `GET` | `/admin/server-info` | Registration/OIDC state, relational storage backend, and Cargo package version |
 
 ---
 
@@ -747,16 +784,34 @@ Allowed `:key` values: `registration_mode`, `oidc_issuer`, `oidc_client_id`, `oi
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/` | Redirects to `/admin` |
-| `GET` | `/admin` | Admin dashboard (HTML/JS SPA) |
+| `GET` | `/admin` | Administration console (HTML/JS SPA) |
 | `GET` | `/login` | Login page (HTML) |
 
-The dashboard authenticates via JWT stored in browser `localStorage`. After OIDC login, tokens are passed via URL fragment (`#access_token=...`).
+The built-in page manages users, devices, teams, registration, OIDC, and query
+scope. It is not a token-usage chart dashboard. It authenticates via JWT stored
+in browser `localStorage`; after OIDC login, tokens are passed via URL fragment.
+
+---
+
+## Capability discovery
+
+`GET /api/v1/capabilities` is public and currently returns:
+
+```json
+{ "sync_windows_v1": true, "monitor_settings_v1": true }
+```
+
+Clients must probe this before sending optional protocol messages or using the
+monitor settings channel. Older servers return `404`.
 
 ---
 
 ## TCP sync protocol reference (port 9090)
 
-Port 9090 uses a custom binary protocol (bincode serialization), not HTTP. The protocol is implemented in the `toki-sync-protocol` crate and is not intended for direct use — connect via the toki CLI (`toki settings sync enable`).
+Port 9090 uses a custom binary protocol (bincode serialization), not HTTP. The
+protocol is implemented in `toki-sync-protocol` and is not intended for direct
+use. The current source branch requires protocol 1.1.0 types via a local patch;
+only v1.0.0 is tagged remotely at the time of this documentation update.
 
 | Frame field | Size | Meaning |
 |---|---|---|

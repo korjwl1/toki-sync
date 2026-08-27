@@ -1,138 +1,64 @@
-# Scenario A: Caddy + DuckDNS
+# Scenario A: DuckDNS with public TLS
 
-Best for fresh servers without an existing reverse proxy. Caddy handles TLS certificates automatically via Let's Encrypt, and DuckDNS provides a free domain name pointing to your server.
+This scenario is **not turnkey in the current repository revision**. DuckDNS
+can provide a hostname, but the bundled Caddyfile explicitly uses Caddy's
+internal CA:
 
-> Different setup? See [existing reverse proxy](deploy-reverse-proxy.md) if you already run nginx/Traefik, [self-signed TLS](deploy-self-signed.md) for IP-only servers, or [local / LAN](deploy-local.md) for development.
+```caddyfile
+{$TOKI_DOMAIN:localhost} {
+    tls {$TLS_MODE:internal}
+    reverse_proxy toki-sync-server:9091
+}
+```
 
----
+`TLS_MODE` is not set by `docker-compose.yml`, so the default `internal` is
+always selected. `DUCKDNS_TOKEN` is passed into the container but neither the
+Caddy image nor the Caddyfile includes/uses a DuckDNS DNS provider. Following
+the previous version of this guide therefore produced an untrusted certificate,
+not a Let's Encrypt certificate.
 
-## Prerequisites
+## Safe choices
 
-- **Docker** and **Docker Compose v2** installed on your server
-- A server with a public IP address
-- Ports **443** and **9090** available (not blocked by firewall)
+- Recommended: use [an existing/public reverse proxy](deploy-reverse-proxy.md)
+  that already obtains a trusted certificate and can proxy both HTTPS :443 and
+  TLS TCP :9090.
+- For a trusted LAN/home lab, use the documented
+  [internal-CA mode](deploy-self-signed.md) with toki's `--insecure` option.
+- If you maintain a custom Caddy build/config, remove the forced internal CA,
+  arrange a supported ACME challenge and certificate for both listeners, and
+  validate it independently. That customization is outside the tested contents
+  of this repository.
 
----
+## DuckDNS hostname only
 
-## Step 1: get a DuckDNS domain
-
-1. Go to [https://www.duckdns.org](https://www.duckdns.org)
-2. Sign in with Google, GitHub, Twitter, or Reddit
-3. **Create a subdomain** — type a name (e.g., `myserver`) and click "add domain". This gives you `myserver.duckdns.org`
-4. **Copy your token** — it is displayed at the top of the page after login. It looks like `a1b2c3d4-e5f6-7890-abcd-ef1234567890`
-5. **Point to your server IP** — on the DuckDNS page, enter your server's public IP next to your subdomain and click "update ip"
-
-### Dynamic IP?
-
-If your server IP changes (e.g., home internet connection), set up auto-update so DuckDNS always points to the current IP.
-
-**Option 1: cron job** (simplest)
+You may still point a DuckDNS name at the server. For a dynamic address, update
+it separately, for example:
 
 ```bash
-# Add to crontab (crontab -e) — updates every 5 minutes
 */5 * * * * curl -s "https://www.duckdns.org/update?domains=myserver&token=YOUR_TOKEN&ip=" > /dev/null
 ```
 
-**Option 2: Docker container** (runs alongside toki-sync)
+This updates DNS only; it does not configure toki-sync or issue a certificate.
+
+## Published image versus source build
+
+The current toki-sync branch cannot be built by the bundled Dockerfile while
+its sibling protocol patch is active. If using the repository Compose file,
+pull the published server image and prohibit a source build:
 
 ```bash
-docker run -d --name duckdns-updater --restart unless-stopped \
-  -e SUBDOMAINS=myserver \
-  -e TOKEN=YOUR_TOKEN \
-  lscr.io/linuxserver/duckdns:latest
+docker compose pull toki-sync-server
+docker compose up -d --no-build
 ```
 
----
+If your custom TLS proxy is the bundled `caddy` service, build only that service
+first (`docker compose build caddy`), then run `up --no-build`. Do not describe
+that result as DuckDNS/Let's Encrypt unless the certificate chain has actually
+been verified.
 
-## Step 2: clone and configure
+The administration console is at `/admin`; there is no `/dashboard` route.
+Remote usage queries use:
 
 ```bash
-git clone https://github.com/korjwl1/toki-sync.git
-cd toki-sync
-
-cp .env.example .env
-cp config/toki-sync.toml.example config/toki-sync.toml
+toki query --remote 'sum by (model)(toki_tokens_total)'
 ```
-
-Edit `.env` with your values:
-
-```bash
-# Admin password — you'll use this to log in from toki clients
-TOKI_ADMIN_PASSWORD=your-strong-password
-
-# JWT signing secret — generate a random one:
-JWT_SECRET=$(openssl rand -base64 32)
-
-# Your DuckDNS domain (must match what you created in Step 1)
-TOKI_EXTERNAL_URL=https://myserver.duckdns.org
-
-# Your DuckDNS token (from Step 1)
-DUCKDNS_TOKEN=a1b2c3d4-e5f6-7890-abcd-ef1234567890
-```
-
----
-
-## Step 3: deploy
-
-```bash
-docker compose --profile caddy up -d
-```
-
-This starts two containers:
-
-| Container | Purpose | Ports |
-|-----------|---------|-------|
-| **toki-sync-server** | Sync protocol + auth API + embedded event store (Fjall) | TCP :9090, HTTP :9091 (internal) |
-| **Caddy** | TLS termination | :443 (HTTPS), :9090 (TLS TCP) |
-
----
-
-## Step 4: verify
-
-```bash
-# Check all containers are running
-docker compose --profile caddy ps
-
-# Check the server health endpoint
-curl https://myserver.duckdns.org/health
-# Should return: {"status":"ok"}
-```
-
-Open the dashboard in your browser: `https://myserver.duckdns.org/dashboard`
-
----
-
-## Step 5: connect a device
-
-On any machine with [toki](https://github.com/korjwl1/toki) installed:
-
-```bash
-toki settings sync enable --server myserver.duckdns.org
-# Opens browser for authentication (device code flow)
-
-toki settings sync status
-# Should show: connected
-
-toki settings sync devices
-# Lists all registered devices
-```
-
-Repeat on each machine you want to sync.
-
-To disconnect a device later:
-
-```bash
-toki settings sync disable              # Prompts to delete remote data
-toki settings sync disable --delete     # Delete this device's data from server
-toki settings sync disable --keep       # Keep remote data, only disable locally
-```
-
----
-
-## What happens next
-
-- The toki daemon batches token usage events and syncs them automatically
-- If a device goes offline, events accumulate locally and delta-sync on reconnect
-- View aggregated data at `https://myserver.duckdns.org/dashboard`
-- Query from CLI: `toki report query --remote 'sum by (model)(toki_tokens_total)'`
-- View in [Toki Monitor](https://github.com/korjwl1/toki-monitor): toggle Local/Server mode in the dashboard toolbar

@@ -3,7 +3,9 @@ name = "toki-sync"
 version = "2.1.0"
 edition = "2021"
 description = "toki multi-device token usage sync server"
-license = "FSL-1.1-Apache-2.0"
+license = "MIT"
+repository = "https://github.com/korjwl1/toki-sync"
+homepage = "https://github.com/korjwl1/toki-sync"
 
 [[bin]]
 name = "toki-sync"

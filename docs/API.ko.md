@@ -188,10 +188,12 @@ Authorization: Bearer <access_token>
 ```json
 {
   "registration_mode": "open",
-  "oidc_enabled": true,
-  "server_version": "0.2.0"
+  "oidc_enabled": true
 }
 ```
+
+공개 auth-info 응답은 서버 버전을 노출하지 않습니다. 관리자는
+`GET /admin/server-info`에서 Cargo 패키지 버전을 확인할 수 있습니다.
 
 ---
 
@@ -321,7 +323,8 @@ OIDC 콜백 핸들러. 인가 코드를 토큰으로 교환하고 사용자를 �
 
 ## 쿼리 (JWT 필수)
 
-쿼리는 EventStore에서 직접 제공됩니다. 로컬 toki 데몬의 REPORT 프로토콜과 동일한 인터페이스 — toki 가상 쿼리(`usage{}`, `events{}`, `cost{}`)와 데몬의 JSON 출력 형식을 사용합니다.
+쿼리는 EventStore에서 직접 제공됩니다. 일반 PromQL 엔드포인트가 아니라 toki 가상
+쿼리 언어의 의도적으로 제한된 부분집합입니다.
 
 ### `GET /api/v1/toki/query`
 
@@ -331,15 +334,25 @@ instant(스탯)와 range(차트) 쿼리를 모두 처리하는 단일 엔드포�
 
 | 파라미터 | 필수 | 설명 |
 |----------|------|------|
-| `query` | 필수 | Toki 가상 쿼리: `usage{}`, `events{}`, `cost{}`. `by (model)` 또는 `by (project)`로 그룹핑 |
-| `start` | - | epoch 초, `YYYYMMDD`, `YYYYMMDDhhmmss` 형식. 기본값 `0` |
+| `query` | 필수 | `usage`/`toki_tokens_total`, `cost`, `events`, 또는 bare `windows`; 선택적 `sum`, `increase`, provider 동등 필터, `model`/`project`/`device_id` 중 하나로 그룹핑 |
+| `start` | - | epoch 초, 13자리 epoch 밀리초, `YYYYMMDD`, `YYYYMMDDhhmmss`. 기본값 `0` |
 | `end` | - | `start`와 같은 형식. 기본값은 현재 시각 |
 | `step` | - | 버킷 크기 (예: `3600`, `1h`, `1d`, `1w`). instant 쿼리는 생략 |
 | `scope` | - | `self`(기본), `team:<team_id>`, `all`. 서버의 `max_query_scope`에 의해 제한 |
 | `tz` | - | 버킷 포매팅용 IANA 타임존 (예: `Asia/Seoul`). 기본 UTC |
 | `start_of_week` | - | `step=1w`일 때 주 시작 요일 (`mon`-`sun`). 기본 `mon` |
+| `no_cost` | - | boolean 쿼리 값. true이면 비용 계산 생략 |
 
-range 쿼리는 요청당 2000개 버킷으로 상한이 걸립니다 — 해당 범위에서 이를 초과하는 step은 서버가 거부합니다.
+서버 범위는 반열린 `[start, end)`입니다. 날짜 전용 `end=YYYYMMDD`는 다음 현지
+자정으로 변환되어 해당 날짜 전체를 포함합니다. 숫자 초/밀리초와
+`YYYYMMDDhhmmss` end는 정확한 배타 경계입니다. RFC 3339와 dashed date는 현재
+`400`으로 거부됩니다. 원격 API는 로컬 toki가 이해하는 모든 시간 표기를 아직
+지원하지 않습니다.
+
+range 쿼리는 2,000개 시간 버킷으로 제한됩니다. 라벨 필터는
+`provider="value"`의 `=` 연산자만 허용합니다. 정규식/부정 matcher, `offset`,
+`avg`, `count`, `sessions`, `projects`, 임의 PromQL은 근사하지 않고 거부합니다.
+bare `windows`는 `scope=self`만 지원합니다.
 
 **응답** `200 OK`
 
@@ -367,7 +380,27 @@ range 쿼리는 요청당 2000개 버킷으로 상한이 걸립니다 — 해당
 }
 ```
 
-`period`는 `<ISO 타임스탬프>|<그룹 키>`입니다. Codex 프로바이더 항목은 캐시 필드 자리에 `cached_input_tokens`와 `reasoning_output_tokens`를 사용합니다. `cost_usd`는 `cost{}` 쿼리이거나 모델에 매칭되는 pricing 항목이 있을 때만 포함됩니다.
+`period`는 `<ISO 타임스탬프>|<그룹 키>`입니다. Codex 항목은 Claude 캐시 필드 대신
+`cached_input_tokens`와 `reasoning_output_tokens`를 사용합니다. `no_cost=true`가
+아니면 usage/cost 버킷과 raw 이벤트는 모델 가격을 알 때 `cost_usd`를 포함합니다.
+집계 `events`는 개수이므로 비용을 포함하지 않습니다.
+
+### 쿼리 상한과 부분 결과
+
+- 요청 하나는 최대 200,000개 이벤트를 읽습니다. pagination이 아닌 하드 상한입니다.
+- bare raw `events`는 이벤트 상한에 닿으면 최상위에 `"truncated": true`를
+  추가합니다. API 직접 사용자는 이를 검사해야 하며 현재 toki CLI 어댑터는 이
+  최상위 플래그를 버립니다.
+- 집계 쿼리도 입력 200,000개 상한을 적용하지만 현재 응답은 입력 스캔이 잘렸다는
+  사실을 표시하지 않습니다. 합계가 부분값일 수 있으므로 pagination 또는 명시적
+  전파가 구현되기 전까지 시간 범위를 좁히세요.
+- 집계는 별도로 `(bucket, group)` 조합을 50,000개로 제한하며 이 상한에 닿으면
+  `"truncated": true`를 반환합니다.
+- ClickHouse 어댑터는 `JSONEachRow` 결과를 ureq의 10 MiB 문자열 reader로
+  버퍼링합니다. 넓은 raw 쿼리는 200,000개 전에 `502`로 실패할 수 있습니다. 현재
+  cursor 또는 응답 크기에 안전한 streaming 경로가 없습니다.
+- Fjall team 스캔은 멤버를 순서대로 방문합니다. 이벤트 상한에 닿으면 앞선 멤버가
+  허용량을 모두 쓸 수 있어 잘린 팀 결과는 전역 시간순 표본이 아닙니다.
 
 **에러**
 
@@ -388,13 +421,16 @@ range 쿼리는 요청당 2000개 버킷으로 상한이 걸립니다 — 해당
 **응답** `200 OK`
 
 ```json
-[
-  {
-    "device_id": "550e8400-e29b-...",
-    "device_name": "macbook-pro",
-    "last_seen": "2026-03-28T10:30:00Z"
-  }
-]
+{
+  "devices": [
+    {
+      "id": "550e8400-e29b-...",
+      "name": "macbook-pro",
+      "device_key": "stable-client-key",
+      "last_seen_at": 1774693800
+    }
+  ]
+}
 ```
 
 ---
@@ -403,11 +439,7 @@ range 쿼리는 요청당 2000개 버킷으로 상한이 걸립니다 — 해당
 
 인증된 사용자의 디바이스를 제거합니다.
 
-**응답** `200 OK`
-
-```json
-{ "deleted": true }
-```
+**응답** `204 No Content`.
 
 ---
 
@@ -421,11 +453,7 @@ range 쿼리는 요청당 2000개 버킷으로 상한이 걸립니다 — 해당
 { "name": "work-laptop" }
 ```
 
-**응답** `200 OK`
-
-```json
-{ "updated": true }
-```
+**응답** `204 No Content`.
 
 ---
 
@@ -442,11 +470,7 @@ range 쿼리는 요청당 2000개 버킷으로 상한이 걸립니다 — 해당
 }
 ```
 
-**응답** `200 OK`
-
-```json
-{ "updated": true }
-```
+**응답** `204 No Content`. 사용자의 모든 refresh token이 폐기됩니다.
 
 ---
 
@@ -457,12 +481,15 @@ range 쿼리는 요청당 2000개 버킷으로 상한이 걸립니다 — 해당
 **응답** `200 OK`
 
 ```json
-[
-  {
-    "team_id": "team-uuid",
-    "team_name": "engineering"
-  }
-]
+{
+  "teams": [
+    {
+      "team_id": "team-uuid",
+      "team_name": "engineering",
+      "role": "member"
+    }
+  ]
+}
 ```
 
 ---
@@ -506,6 +533,7 @@ toki_monitor의 설정과 대시보드 정의를 위한 **선택적(opt-in)** �
 
 ```json
 {
+  "delete_cas": true,
   "entries": [
     { "key": "dashboard:main", "version": 3, "updated_at": 1756200000, "size_bytes": 4210 }
   ],
@@ -608,6 +636,10 @@ toki_monitor의 설정과 대시보드 정의를 위한 **선택적(opt-in)** �
 
 항목 하나를 삭제합니다. 툼스톤이 아니라 행 자체가 제거됩니다.
 
+선택 쿼리 파라미터 `if_version=<n>`으로 compare-and-swap 삭제를 수행합니다. 저장된
+버전이 다르면 조건부 `PUT`과 같은 버전 상세 형태의 `409`를 반환합니다. 이전 서버에
+사용하기 전 index의 `delete_cas` 플래그를 확인하세요.
+
 **응답** `204 No Content`. 해당 키가 없으면 `404`입니다.
 
 계정을 삭제하면 모니터 설정도 함께 삭제되므로, 방치된 계정이 행을 남기지 않습니다.
@@ -653,7 +685,7 @@ toki_monitor의 설정과 대시보드 정의를 위한 **선택적(opt-in)** �
 
 | 메서드 | 경로 | 설명 |
 |--------|------|------|
-| `GET` | `/admin/server-info` | 서버 버전, 가동 시간, 연결된 디바이스 수, 데이터베이스 통계 |
+| `GET` | `/admin/server-info` | 가입/OIDC 상태, 관계형 스토리지 백엔드, Cargo 패키지 버전 |
 
 ---
 
@@ -744,16 +776,34 @@ toki_monitor의 설정과 대시보드 정의를 위한 **선택적(opt-in)** �
 | 메서드 | 경로 | 설명 |
 |--------|------|------|
 | `GET` | `/` | `/admin`으로 리다이렉트 |
-| `GET` | `/admin` | 관리자 대시보드 (HTML/JS SPA) |
+| `GET` | `/admin` | 관리 콘솔 (HTML/JS SPA) |
 | `GET` | `/login` | 로그인 페이지 (HTML) |
 
-대시보드는 브라우저 `localStorage`에 저장된 JWT로 인증합니다. OIDC 로그인 후에는 URL 프래그먼트(`#access_token=...`)를 통해 토큰이 전달됩니다.
+내장 페이지는 사용자, 디바이스, 팀, 가입, OIDC, 쿼리 scope를 관리합니다. 토큰 사용량
+차트 대시보드는 아닙니다. 브라우저 `localStorage`의 JWT로 인증하며 OIDC 로그인 후
+토큰은 URL 프래그먼트로 전달됩니다.
+
+---
+
+## 기능 탐색
+
+공개 `GET /api/v1/capabilities`는 현재 다음을 반환합니다.
+
+```json
+{ "sync_windows_v1": true, "monitor_settings_v1": true }
+```
+
+클라이언트는 선택 protocol 메시지를 보내거나 monitor 설정 채널을 사용하기 전에 이를
+확인해야 합니다. 이전 서버는 `404`를 반환합니다.
 
 ---
 
 ## TCP 동기화 프로토콜 레퍼런스 (포트 9090)
 
-포트 9090은 HTTP가 아닌 커스텀 바이너리 프로토콜(bincode 직렬화)을 사용합니다. 프로토콜은 `toki-sync-protocol` crate에 구현되어 있으며 직접 사용하기 위한 것이 아닙니다 — toki CLI(`toki settings sync enable`)로 연결하세요.
+포트 9090은 HTTP가 아닌 커스텀 바이너리 프로토콜(bincode 직렬화)을 사용합니다.
+protocol은 `toki-sync-protocol`에 구현되어 있으며 직접 사용하기 위한 것이 아닙니다.
+현재 소스 브랜치는 로컬 patch를 통해 protocol 1.1.0 타입을 요구하지만 이 문서 갱신
+시점의 원격 태그는 v1.0.0뿐입니다.
 
 | 프레임 필드 | 크기 | 의미 |
 |---|---|---|

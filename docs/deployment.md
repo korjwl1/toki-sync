@@ -1,22 +1,33 @@
 # Deployment guide
 
-Pick one scenario based on your existing infrastructure, then follow the linked guide. All scenarios use the same `docker-compose.yml`; they differ in which profile is enabled and how TLS is handled.
+Pick a scenario based on your infrastructure. The current source checkout has
+two important constraints:
+
+1. `docker build .` fails while the protocol 1.1.0 sibling patch is active; use
+   a published toki-sync image with `docker compose pull` and `--no-build`, or
+   wait for the protocol tag/re-pin release work.
+2. The bundled Caddyfile forces Caddy's internal CA. `DUCKDNS_TOKEN` is unused,
+   so the repository does not currently provide automatic public DuckDNS/
+   Let's Encrypt certificates.
 
 ## Decision flow
 
 - Do you already run nginx, Traefik, or another reverse proxy? → [Scenario B: existing reverse proxy](deploy-reverse-proxy.md).
 - Do you have a public IP but no domain? → [Scenario C: self-signed TLS](deploy-self-signed.md).
-- Do you want a free domain with automatic Let's Encrypt? → [Scenario A: Caddy + DuckDNS](deploy-caddy-duckdns.md).
+- Do you want DuckDNS + public Let's Encrypt? → [Scenario A status and required external TLS work](deploy-caddy-duckdns.md); it is not turnkey in this revision.
 - Are you just running it on localhost for development? → [Scenario D: local / LAN](deploy-local.md).
 
 ## Comparison
 
 | Scenario | TLS | Domain | Reverse proxy | Best for |
 |---|---|---|---|---|
-| [A — Caddy + DuckDNS](deploy-caddy-duckdns.md) | Auto (Let's Encrypt) | Free DuckDNS subdomain | Built-in Caddy | Fresh public server, no existing proxy |
+| [A — Caddy + DuckDNS](deploy-caddy-duckdns.md) | Not wired in bundled Caddy | Free DuckDNS subdomain | Corrected/custom proxy required | Not turnkey in this revision |
 | [B — Existing reverse proxy](deploy-reverse-proxy.md) | Handled by your proxy | Your own domain | nginx, Traefik, etc. | Servers that already terminate TLS |
-| [C — Self-signed TLS](deploy-self-signed.md) | Self-signed (Caddy `tls internal`) | None (IP only) | Built-in Caddy | Home lab, LAN-only deployments |
+| [C — Self-signed TLS](deploy-self-signed.md) | Internal-CA cert (Caddy `tls internal`) | IP/host | Built-in Caddy | Home lab, LAN-only deployments |
 | [D — Local / LAN](deploy-local.md) | None | None | None | Development and testing only |
+
+The server process always speaks plain TCP/HTTP on its bound ports. Never
+publish Scenario D directly to the Internet.
 
 ## Operating the deployment
 

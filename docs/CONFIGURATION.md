@@ -1,6 +1,10 @@
 # toki-sync configuration reference
 
-Server configuration lives in `config/toki-sync.toml`. Environment variables are expanded using `${VAR_NAME}` syntax — if the variable is unset, it expands to an empty string.
+The binary defaults to `./config.toml`; `--config <path>` takes precedence over
+`TOKI_SYNC_CONFIG`. The bundled Compose service sets `TOKI_SYNC_CONFIG` to
+`/etc/toki-sync/config.toml` and mounts `config/toki-sync.toml` there.
+Environment variables are expanded using `${VAR_NAME}` syntax; an unset
+referenced variable expands to an empty string.
 
 ## Example config
 
@@ -9,6 +13,7 @@ Server configuration lives in `config/toki-sync.toml`. Environment variables are
 # bind = "0.0.0.0"
 tcp_port = 9090
 http_port = 9091
+# external_url = "${TOKI_EXTERNAL_URL}"
 # trust_proxy = false
 # max_concurrent_writes = 10
 
@@ -22,11 +27,13 @@ jwt_secret = "${JWT_SECRET}"
 # registration_mode = "closed"
 
 [storage]
+backend = "sqlite"
 db_path = "/data/toki_sync.db"
 
 [events]
 backend = "fjall"
 fjall_path = "/data/events.fjall"
+# dedup_retention_secs = 2592000
 # backend = "clickhouse"
 # clickhouse_url = "http://clickhouse:8123"
 
@@ -47,7 +54,7 @@ json = true
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `bind` | string | `0.0.0.0` | Network interface to bind |
-| `http_port` | integer | `9091` | HTTP API port (REST, dashboard, query endpoint) |
+| `http_port` | integer | `9091` | HTTP API port (REST, admin console, query endpoint) |
 | `tcp_port` | integer | `9090` | TCP sync protocol port (toki daemon connections) |
 | `external_url` | string | *(empty)* | Public URL for JWT `iss` and OIDC redirect URI. See below |
 | `max_concurrent_writes` | integer | `10` | Maximum parallel event store batch writes |
@@ -162,12 +169,13 @@ postgres_url = "postgres://toki:password@db:5432/toki_sync"
 |-----|------|---------|-------------|
 | `backend` | string | `fjall` | Event store backend: `fjall` (embedded, no external dependencies) or `clickhouse` (external ClickHouse server) |
 | `fjall_path` | string | `/data/events.fjall` | Fjall database directory path. Used when `backend = "fjall"` |
-| `clickhouse_url` | string | `http://clickhouse:8123` | ClickHouse HTTP endpoint. Used when `backend = "clickhouse"` |
+| `clickhouse_url` | string | *(empty)* | ClickHouse HTTP endpoint. Required when `backend = "clickhouse"` |
+| `dedup_retention_secs` | integer | `2592000` | Fjall dedup-index retention in seconds (30 days). Event rows themselves are not deleted |
 
 ### Fjall vs ClickHouse
 
-- **Fjall** (default): embedded LSM-tree storage. Zero external dependencies. Data deduplication via `idx_msg` unique index on `msg_id`. Recommended for personal use and small teams.
-- **ClickHouse**: external column-oriented database. Better query performance for large datasets. Data deduplication via `ReplacingMergeTree` engine. Recommended for large teams or when advanced analytics are needed.
+- **Fjall** (default): embedded LSM-tree storage. Current dedup key is `(device_id, provider, msg_id)`.
+- **ClickHouse**: external column-oriented database using `ReplacingMergeTree(ts_ms)`. It is implemented, but this repository has no live ClickHouse integration tests.
 
 ```toml
 # Fjall (default — no external dependencies)
@@ -181,7 +189,28 @@ backend = "clickhouse"
 clickhouse_url = "http://clickhouse:8123"
 ```
 
-In Docker Compose, enable ClickHouse with `docker compose --profile clickhouse up -d`. The default URL (`http://clickhouse:8123`) works out of the box with the included ClickHouse service.
+Set both values above, then run `docker compose --profile clickhouse up -d`.
+The profile alone only starts ClickHouse; toki-sync otherwise keeps using Fjall.
+Changing backends does not copy existing events.
+
+### ClickHouse upgrade warning
+
+A fresh `toki_events` table uses
+`ORDER BY (device_id, provider, msg_id)`. Older deployments may still use
+`ORDER BY (device_id, msg_id)`. Startup uses `CREATE TABLE IF NOT EXISTS`, so it
+does not rewrite the old sorting key; Claude Code and Codex rows sharing a
+device/message ID can then collapse. Check before upgrading:
+
+```sql
+SELECT sorting_key
+FROM system.tables
+WHERE database = currentDatabase() AND name = 'toki_events';
+```
+
+There is no automatic `toki_events` sort-key migration in this release. Back
+up and plan a table rebuild/full re-sync before using an old table with mixed
+providers. The separate `toki_windows.updated_at` migration is automatic, but
+has not been tested here against a live ClickHouse instance.
 
 ---
 
@@ -214,10 +243,10 @@ Environment variables are used in two ways:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `TOKI_ADMIN_PASSWORD` | Yes | Admin account password. Created automatically on first server start |
-| `JWT_SECRET` | Yes | JWT signing key. Generate: `openssl rand -base64 32` |
-| `TOKI_EXTERNAL_URL` | Yes | Public URL (e.g., `https://yourserver.duckdns.org`). Used for JWT `iss` and OIDC redirects |
-| `DUCKDNS_TOKEN` | Caddy profile only | DuckDNS API token for Let's Encrypt DNS-01 challenge |
+| `TOKI_ADMIN_PASSWORD` | Initial setup | Creates the built-in `admin` only if absent; later changes do not change its password |
+| `JWT_SECRET` | Production | JWT signing key when TOML references `${JWT_SECRET}`. Generate: `openssl rand -base64 32` |
+| `TOKI_EXTERNAL_URL` | Deployment-dependent | Expanded only when TOML references it; Compose also passes it to Caddy as `TOKI_DOMAIN` |
+| `DUCKDNS_TOKEN` | No current effect | Present in examples/Compose, but the bundled Caddy build and Caddyfile do not use a DuckDNS DNS module |
 | `TOKI_VERSION` | No | Docker image tag (default: `latest`) |
 
 ### `.env` Example
@@ -232,10 +261,11 @@ TOKI_EXTERNAL_URL=https://yourserver.duckdns.org
 DUCKDNS_TOKEN=your-duckdns-token
 
 # Image version (optional)
-TOKI_VERSION=0.1.0
+TOKI_VERSION=2.1.0
 ```
 
-> **Security**: never commit `.env` to version control. The `.env.example` file is provided as a template.
+> **Security**: never commit `.env`. The bundled Caddyfile currently forces its
+> internal CA; it does not obtain a public Let's Encrypt/DuckDNS certificate.
 
 ---
 
@@ -243,9 +273,21 @@ TOKI_VERSION=0.1.0
 
 The server loads configuration in this order:
 
-1. Read `config/toki-sync.toml` (or the path specified by the `--config` flag)
+1. Select `--config`, then `TOKI_SYNC_CONFIG`, then the default `./config.toml`
 2. Expand `${VAR_NAME}` placeholders with environment variable values
 3. Parse TOML into the configuration struct
 4. Apply defaults for any missing fields
 
-If the config file does not exist, the server uses built-in defaults with `JWT_SECRET` read from the environment (falling back to `change-me-in-production` if unset).
+If the selected file does not exist, the server uses built-in defaults with
+`JWT_SECRET` from the environment, falling back to `change-me-in-production`
+with a warning. An existing file must contain `[auth]` and `jwt_secret` after
+environment expansion.
+
+## Validation status
+
+The current 116-test suite covers configuration parsing, SQLite-backed HTTP
+paths, and Fjall. PostgreSQL and ClickHouse compile but have no live integration
+tests here. The repository's Docker source build is also blocked until protocol
+v1.1.0 is tagged and the temporary sibling patch is removed. Treat optional
+backends and real migrations as unverified until exercised on disposable
+instances resembling production.

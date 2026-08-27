@@ -8,10 +8,26 @@
 
 ### 사전 요구사항
 
-- Rust 툴체인 (stable). 프로젝트는 Rust 2021 edition을 사용하며, 최신 stable 릴리스를 권장합니다.
+- Rust 툴체인 (stable). 프로젝트는 Rust 2021 edition을 사용합니다. 현재 브랜치는
+  Rust/Cargo 1.92.0에서 검증됐으며 그보다 낮은 MSRV는 보장하지 않습니다.
 - Docker 및 Docker Compose v2 (전체 컨테이너 스택을 로컬에서 실행할 때만 필요).
 
-`Cargo.toml`에 `rust-version`은 명시되어 있지 않습니다. edition 2021을 지원하는 모든 stable 툴체인에서 빌드됩니다.
+`Cargo.toml`에 `rust-version`은 명시되어 있지 않습니다. 이는 Cargo가 MSRV를
+강제하지 않는다는 뜻이지, edition 2021을 지원하는 모든 컴파일러에서 현재 의존성
+그래프가 빌드된다는 뜻은 아닙니다.
+
+현재 브랜치는 protocol 형제 체크아웃도 필요합니다.
+
+```text
+parent/
+├── toki_sync/
+└── toki_sync_protocol/
+```
+
+`Cargo.toml`은 공개된 protocol v1.0.0을 고정하지만, 이 브랜치가 `SyncWindows`와
+`WireWindow`를 사용하므로 임시로 위 형제 체크아웃을 patch합니다. 형제 crate의
+버전은 1.1.0이지만 원격 저장소에는 아직 v1.1.0 태그가 없습니다. 형제 체크아웃이
+없으면 이 브랜치는 컴파일되지 않습니다.
 
 ### 빌드 및 실행
 
@@ -26,6 +42,24 @@ cargo test
 cp config/toki-sync.toml.example config/toki-sync.toml
 cargo run -- --config config/toki-sync.toml
 ```
+
+### 현재 검증 범위
+
+커밋 `5804fc2`에서 `cargo test`는 116개 테스트를 나열합니다. 파서, protocol 프레임,
+가격, HTTP 라우팅/인증 경로, 실제 임시 SQLite를 통한 monitor 설정, Fjall을
+검사합니다. 현재 실제 PostgreSQL 또는 ClickHouse 통합 테스트는 없으며, 기존
+ClickHouse 배포를 대상으로 한 마이그레이션 테스트도 없습니다. 단위 테스트 통과를
+두 선택 백엔드의 검증으로 보고하면 안 됩니다.
+
+`docker build .`도 이 브랜치에서는 유효한 검증 명령이 아닙니다. Docker 빌드
+컨텍스트가 활성 Cargo patch에 필요한 형제 protocol 체크아웃을 제외합니다. 릴리즈
+순서는 다음과 같습니다.
+
+1. `toki-sync-protocol` v1.1.0 태그 생성
+2. 이 저장소와 클라이언트 저장소의 protocol 태그 갱신
+3. 두 로컬 patch 제거
+4. 릴리즈 이미지 빌드 및 테스트
+5. windows 기능을 소비하는 앱보다 toki-sync를 먼저 릴리즈
 
 ## Pull request
 
@@ -80,4 +114,4 @@ git commit -s -m "feat: add my change"
 
 ## 라이선스
 
-기여한 코드는 [FSL-1.1-Apache-2.0](LICENSE) 라이선스로 배포됨에 동의합니다.
+기여한 코드는 [MIT 라이선스](LICENSE)로 배포됨에 동의합니다.

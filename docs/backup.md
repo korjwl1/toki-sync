@@ -1,16 +1,22 @@
 # Backup and restore
 
-toki-sync state lives in two Docker volumes: `toki-data` (metadata + Fjall events) and, optionally, `clickhouse-data`. Cold backups (with the server stopped) are simple `tar` archives; data loss is recoverable because clients keep a local event history and will re-sync on reconnect.
+toki-sync state lives in `toki-data`, optionally `clickhouse-data`, and optionally
+`caddy-data`. Clients keep local event history, but event-store loss does **not**
+automatically cause a full upload when the relational cursor survives. Back up
+the event store and cursor database as one recovery set.
 
 ## Data volumes
 
 | Volume | Path | Contents | On loss |
 |---|---|---|---|
 | `toki-data` | `/data` | SQLite (users, devices, cursors) + Fjall event store | Re-login + full re-sync required |
-| `clickhouse-data` | `/var/lib/clickhouse` | ClickHouse event data (only with `--profile clickhouse`) | Recoverable via client re-sync |
-| `caddy-data` | `/data` | Let's Encrypt certificates | Auto-reissue (Let's Encrypt rate limit: 5/week) |
+| `clickhouse-data` | `/var/lib/clickhouse` | ClickHouse events/windows when configured as the backend | Requires cursor reset/full re-sync if restored empty while relational cursors survive |
+| `caddy-data` | `/data` | Caddy internal CA/certificate state in the bundled configuration | Clients may need their trust configuration updated |
 
-With the default Fjall backend, `toki-data` contains both metadata and events. With ClickHouse, event data is stored separately in `clickhouse-data`. If lost, clients perform a full re-sync from their local history on reconnect.
+With Fjall, restore metadata/cursors and events together. With ClickHouse,
+restore `toki-data` and `clickhouse-data` from a consistent point. Starting the
+ClickHouse profile alone does not select it; `[events].backend` must also be
+`clickhouse`.
 
 ---
 
@@ -44,7 +50,9 @@ tar czf toki-sync-backup-$(date +%Y%m%d).tar.gz ./data/
 docker compose --profile caddy up -d
 ```
 
-For a hot backup while the server runs, copy the Fjall directory directly. Fjall uses an LSM-tree structure that is safe to copy live, but stopping the server is the only way to guarantee full consistency.
+This repository has no tested hot-backup procedure spanning SQLite/Fjall or
+PostgreSQL/ClickHouse. Use database-supported coordinated snapshots or stop
+writers for a cold backup.
 
 ---
 
@@ -53,13 +61,18 @@ For a hot backup while the server runs, copy the Fjall directory directly. Fjall
 When using ClickHouse as the event store:
 
 ```bash
-# Use clickhouse-backup tool
+# If clickhouse-backup was installed separately
 docker exec toki-clickhouse clickhouse-backup create backup_$(date +%Y%m%d)
 
-# Or use clickhouse-client to export
+# Or export both tables
 docker exec toki-clickhouse clickhouse-client \
-  --query "SELECT * FROM events FORMAT Native" > events_backup.bin
+  --query "SELECT * FROM toki_events FORMAT Native" > toki_events_backup.bin
+docker exec toki-clickhouse clickhouse-client \
+  --query "SELECT * FROM toki_windows FINAL FORMAT Native" > toki_windows_backup.bin
 ```
+
+Verify/install `clickhouse-backup` before using the first command. Raw exports
+also require a tested schema-and-data restore procedure.
 
 See the [ClickHouse backup documentation](https://clickhouse.com/docs/en/operations/backup) for full details.
 

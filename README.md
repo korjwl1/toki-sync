@@ -6,14 +6,14 @@
 
 <p align="center">
   <b>Self-hosted multi-device Claude Code / Codex usage aggregation server</b><br>
-  Collects AI CLI usage from all your machines into <a href="https://github.com/korjwl1/toki">toki</a>, stores events locally, serves a unified dashboard.
+  Receives usage events from <a href="https://github.com/korjwl1/toki">toki</a>, stores them centrally, and serves authenticated query and administration APIs.
 </p>
 
 <p align="center">
   <a href="https://hub.docker.com/r/korjwl11/toki-sync"><img src="https://img.shields.io/docker/v/korjwl11/toki-sync?sort=semver&label=Docker%20Hub" alt="Docker Hub" /></a>
   <a href="https://hub.docker.com/r/korjwl11/toki-sync"><img src="https://img.shields.io/docker/pulls/korjwl11/toki-sync" alt="Docker Pulls" /></a>
   <a href="https://hub.docker.com/r/korjwl11/toki-sync"><img src="https://img.shields.io/docker/image-size/korjwl11/toki-sync?sort=semver" alt="Docker Image Size" /></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-FSL--1.1--Apache--2.0-blue" alt="License" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License" /></a>
 </p>
 
 <p align="center">
@@ -36,7 +36,7 @@ services:
     restart: unless-stopped
     ports:
       - "9090:9090"   # sync protocol (TCP)
-      - "9091:9091"   # web dashboard + API (HTTP)
+      - "9091:9091"   # admin console + API (HTTP)
     environment:
       TOKI_ADMIN_PASSWORD: ${TOKI_ADMIN_PASSWORD}
       JWT_SECRET: ${JWT_SECRET}
@@ -59,13 +59,17 @@ JWT_SECRET=change-me-run-openssl-rand-base64-32
 ```bash
 docker compose up -d
 
-# On any machine with toki installed (opens browser for authentication)
-toki settings sync enable --server <your-server-ip-or-domain>
+# Direct ports are plain HTTP/TCP; use only on a trusted local network.
+toki settings sync enable --server <your-server-ip> --no-tls
 ```
 
-Done. Token usage now syncs automatically across all your devices.
+Done. Token usage now syncs automatically across all your devices. Do not
+publish this direct-port setup to the Internet; terminate HTTP and TCP TLS with
+an external reverse proxy for production.
 
-> **Want automatic TLS?** See the [Caddy + DuckDNS deployment guide](docs/deploy-caddy-duckdns.md) for HTTPS with a free domain and auto-renewed certificates.
+> **Need public TLS?** Use an [existing reverse proxy](docs/deploy-reverse-proxy.md).
+> The bundled [DuckDNS/Caddy scenario](docs/deploy-caddy-duckdns.md) currently
+> uses an internal CA and is not automatic public TLS.
 
 ---
 
@@ -74,8 +78,12 @@ Done. Token usage now syncs automatically across all your devices.
 | Field | Value |
 |---|---|
 | Image | [`korjwl11/toki-sync`](https://hub.docker.com/r/korjwl11/toki-sync) |
-| Tags | `latest`, `2.0.0` |
+| Source package version | `2.1.0` |
 | Platforms | `linux/amd64`, `linux/arm64` |
+
+The examples use `latest`. For reproducible deployments, pin a Docker tag that
+you have verified exists in the registry; the Cargo package version alone does
+not prove that a matching image has been published.
 
 ### Standalone (default)
 
@@ -83,20 +91,40 @@ Uses **Fjall** (embedded event store) + **SQLite** (metadata). Zero external dep
 
 ### With ClickHouse (optional)
 
-For high-volume deployments, add the `--profile clickhouse` flag:
+Starting the ClickHouse container is only half of the switch. Set the event
+backend in `config/toki-sync.toml`, then enable the Compose profile:
+
+```toml
+[events]
+backend = "clickhouse"
+clickhouse_url = "http://clickhouse:8123"
+```
 
 ```bash
 docker compose --profile clickhouse up -d
 ```
 
-This starts a ClickHouse container alongside toki-sync for scalable event storage. See the full [`docker-compose.yml`](docker-compose.yml) for details.
+This starts ClickHouse alongside toki-sync and directs new event reads/writes to
+it. Data is not migrated automatically between Fjall and ClickHouse. Existing
+ClickHouse installations also need the upgrade warning in
+[`docs/CONFIGURATION.md`](docs/CONFIGURATION.md#clickhouse-upgrade-warning).
+
+### Building this branch from source
+
+The current branch uses protocol types that are newer than the latest published
+`toki-sync-protocol` tag. `Cargo.toml` therefore contains a sibling-directory
+patch to `../toki_sync_protocol`. A normal `docker build .` cannot see that
+path and currently fails. Development builds require both repositories as
+siblings; release/Docker builds require `toki-sync-protocol` v1.1.0 to be tagged,
+the dependency to be re-pinned, and the local patch to be removed. Published
+images do not have this source-build limitation.
 
 ---
 
 ## Who is this for?
 
-- **Multiple machines?** See all your AI token usage in one place -- web dashboard or [Toki Monitor](https://github.com/korjwl1/toki-monitor).
-- **Team dashboard?** Aggregate usage across team members with role-based access.
+- **Multiple machines?** Query all synchronized usage from the CLI or [Toki Monitor](https://github.com/korjwl1/toki-monitor).
+- **Teams?** Aggregate usage across team members with role-based access.
 - **Self-hosted?** Your data stays on your server. No telemetry, no cloud.
 
 ---
@@ -110,14 +138,14 @@ toki daemon  toki daemon  toki daemon
                               v
                       toki-sync server
                       |-- TCP :9090 (sync protocol)
-                      |-- HTTP :9091 (auth + dashboard)
+                      |-- HTTP :9091 (auth + query API + admin console)
                       +-- SQLite (metadata)
                       +-- Fjall (events) or ClickHouse (optional)
 ```
 
-- **toki daemons** maintain persistent TLS connections, batch events (1,000/batch), zstd-compress, and send with ACK-based flow control
+- **toki daemons** maintain persistent connections, batch events (1,000/batch), zstd-compress, and send with ACK-based flow control; TLS is enabled when the deployment supplies a TLS terminator
 - **toki-sync server** authenticates users, stores metadata in SQLite, writes events to the event store
-- **Deduplication** via `msg_id` ensures exactly-once delivery across reconnections
+- **Idempotent upsert** uses `(device_id, provider, msg_id)` on current schemas so retransmission does not double-count
 
 ---
 
@@ -125,18 +153,18 @@ toki daemon  toki daemon  toki daemon
 
 - **Multi-device sync** -- TCP binary protocol, zstd compression, ACK flow control, delta-sync on reconnect
 - **Device code auth** -- browser-based device code flow, OIDC (Google, GitHub, etc.), password login
-- **Web dashboard** -- charts, time range picker, device list, team views
+- **Admin console** -- user, device, team, registration, OIDC, and scope management
 - **Teams** -- aggregate queries across team members with role-based access
 - **Dual storage** -- SQLite (zero-config) or PostgreSQL; Fjall (embedded) or ClickHouse (scale)
-- **PromQL proxy** (optional) -- per-user label injection for VictoriaMetrics compatibility
-- **Security** -- TLS everywhere, brute force protection, refresh token rotation
+- **Authenticated query API** -- the supported toki virtual-query subset for usage, cost, events, and windows
+- **Security** -- brute force protection and refresh-token rotation; TLS is supplied by Caddy or your reverse proxy
 
 ---
 
 ## Privacy and security
 
 - **No prompt access** -- only token counts and metadata (model, session ID, project name). Never prompts or responses.
-- **TLS everywhere** -- all sync traffic encrypted. Caddy handles Let's Encrypt certificates automatically.
+- **TLS by deployment** -- the server listens with plain TCP/HTTP internally. Use the bundled self-signed Caddy profile or a correctly configured external reverse proxy for encrypted public traffic.
 - **Per-user data isolation** -- each user can only query their own data.
 - **Self-hosted** -- no telemetry, no cloud dependencies.
 
@@ -149,12 +177,12 @@ Start with the [deployment guide](docs/deployment.md) to pick a scenario, then r
 | Document | When to read |
 |---|---|
 | [Deployment guide](docs/deployment.md) | Pick a scenario (A/B/C/D) based on your infra |
-| [Architecture and design](docs/DESIGN.md) | Sync protocol, cursor management, security model, scaling |
+| [Architecture and design](docs/DESIGN.md) | Implemented protocol, cursor, storage, limits, and validation status |
 | [Configuration reference](docs/CONFIGURATION.md) | All TOML options, defaults, environment variables |
 | [HTTP API reference](docs/API.md) | All endpoints, request/response examples, authentication |
 | [Custom dashboards](docs/custom-dashboard.md) | Build a custom UI on top of the toki-sync query API |
 | [Backup and restore](docs/backup.md) | Volume layout, hot/cold backup, recovery |
-| [Troubleshooting](docs/troubleshooting.md) | Diagnose connection, TLS, dashboard, and sync issues |
+| [Troubleshooting](docs/troubleshooting.md) | Diagnose connection, TLS, query, storage, and sync issues |
 | [Contributing](CONTRIBUTING.md) | Dev setup, branch naming, commit conventions, DCO |
 
 ---
@@ -177,10 +205,11 @@ toki settings sync disable --keep       # Keep remote data, only disable locally
 
 If toki-sync is useful to you, consider sponsoring to support development.
 
-For commercial use in paid products, please sponsor or [reach out](mailto:korjwl1@gmail.com).
+Commercial use is permitted by the MIT license; sponsorship is optional and
+supports continued maintenance.
 
 ---
 
 ## License
 
-[FSL-1.1-Apache-2.0](LICENSE)
+[MIT](LICENSE)

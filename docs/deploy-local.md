@@ -2,7 +2,8 @@
 
 For development or testing on localhost. Not recommended for production.
 
-> Different setup? See [Caddy + DuckDNS](deploy-caddy-duckdns.md) for production with auto TLS, [existing reverse proxy](deploy-reverse-proxy.md) if you already run one, or [self-signed TLS](deploy-self-signed.md) for IP-only servers.
+> Different setup? Use an [existing reverse proxy](deploy-reverse-proxy.md) for
+> production public TLS, or [internal-CA TLS](deploy-self-signed.md) for a trusted LAN.
 
 ---
 
@@ -52,7 +53,10 @@ services:
 ## Step 3: deploy
 
 ```bash
-docker compose up -d
+# The current source build cannot resolve the sibling protocol patch from the
+# Docker build context. Use the published image and explicitly disable builds.
+docker compose pull toki-sync-server
+docker compose up -d --no-build
 ```
 
 ---

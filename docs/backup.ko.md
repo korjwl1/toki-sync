@@ -1,16 +1,21 @@
 # 백업과 복원
 
-toki-sync의 상태는 두 개의 Docker 볼륨에 있습니다 — `toki-data`(메타데이터 + Fjall 이벤트)와 선택적인 `clickhouse-data`. 콜드 백업(서버 중지 후 백업)은 단순한 `tar` 아카이브로 충분합니다. 데이터를 잃어도 클라이언트가 로컬 이력을 보유하므로 재연결 시 자동 재동기화로 복구됩니다.
+toki-sync 상태는 `toki-data`, 선택적 `clickhouse-data`, 선택적 `caddy-data`에
+있습니다. 클라이언트에 로컬 이벤트 이력이 있어도 관계형 cursor가 남으면 event
+store 손실이 자동 전체 업로드를 유발하지 않습니다. event store와 cursor DB를 한
+복구 세트로 백업하세요.
 
 ## 데이터 볼륨
 
 | 볼륨 | 경로 | 내용 | 손실 시 |
 |---|---|---|---|
 | `toki-data` | `/data` | SQLite (사용자, 디바이스, 커서) + Fjall 이벤트 스토어 | 재로그인 + 전체 재동기화 필요 |
-| `clickhouse-data` | `/var/lib/clickhouse` | ClickHouse 이벤트 데이터 (`--profile clickhouse` 사용 시) | 클라이언트 재동기화로 복구 가능 |
-| `caddy-data` | `/data` | Let's Encrypt 인증서 | 자동 재발급 (Let's Encrypt 한도: 주당 5건의 중복 발급) |
+| `clickhouse-data` | `/var/lib/clickhouse` | backend로 설정된 ClickHouse 이벤트/window | 관계형 cursor를 둔 채 빈 상태로 복원하면 cursor reset/전체 재동기화 필요 |
+| `caddy-data` | `/data` | Caddy 내부 CA/인증서 데이터 | client trust를 다시 설정해야 할 수 있음 |
 
-기본 Fjall 백엔드에서는 `toki-data`에 메타데이터와 이벤트가 모두 포함됩니다. ClickHouse 사용 시 이벤트 데이터는 `clickhouse-data`에 별도로 저장됩니다. 손실되면 클라이언트가 재연결 시 로컬 이력에서 전체 재동기화를 수행합니다.
+Fjall에서는 metadata/cursor와 event를 함께 복원하세요. ClickHouse에서는 같은 시점의
+`toki-data`와 `clickhouse-data`를 복원하세요. ClickHouse profile만 시작해도
+선택되지는 않으며 `[events].backend = "clickhouse"`가 필요합니다.
 
 ---
 
@@ -44,7 +49,9 @@ tar czf toki-sync-backup-$(date +%Y%m%d).tar.gz ./data/
 docker compose --profile caddy up -d
 ```
 
-서버 실행 중에도 핫 백업으로 Fjall 디렉토리를 복사할 수 있습니다. Fjall은 LSM-tree 구조라 실행 중 복사가 안전하지만, 완전한 일관성은 서버를 중지해야만 보장됩니다.
+이 저장소에는 SQLite/Fjall 또는 PostgreSQL/ClickHouse 전체를 포괄하는 검증된 hot
+backup 절차가 없습니다. DB가 지원하는 coordinated snapshot을 사용하거나 cold
+backup을 위해 writer를 중지하세요.
 
 ---
 
@@ -53,13 +60,18 @@ docker compose --profile caddy up -d
 ClickHouse를 이벤트 스토어로 사용하는 경우:
 
 ```bash
-# clickhouse-backup 도구 사용
+# clickhouse-backup을 별도로 설치한 경우
 docker exec toki-clickhouse clickhouse-backup create backup_$(date +%Y%m%d)
 
-# 또는 clickhouse-client로 내보내기
+# 또는 두 테이블 내보내기
 docker exec toki-clickhouse clickhouse-client \
-  --query "SELECT * FROM events FORMAT Native" > events_backup.bin
+  --query "SELECT * FROM toki_events FORMAT Native" > toki_events_backup.bin
+docker exec toki-clickhouse clickhouse-client \
+  --query "SELECT * FROM toki_windows FINAL FORMAT Native" > toki_windows_backup.bin
 ```
+
+첫 명령 전에 `clickhouse-backup`을 확인/설치하세요. raw export에도 검증된 schema/data
+restore 절차가 필요합니다.
 
 자세한 내용은 [ClickHouse 백업 문서](https://clickhouse.com/docs/en/operations/backup)를 참고하세요.
 

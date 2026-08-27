@@ -2,7 +2,9 @@
 
 For servers without a domain name (e.g., home lab on a local IP). Caddy generates a self-signed certificate automatically.
 
-> Picking the wrong scenario? See [Caddy + DuckDNS](deploy-caddy-duckdns.md) for free domain + Let's Encrypt, [existing reverse proxy](deploy-reverse-proxy.md) if you already run nginx/Traefik, or [local / LAN](deploy-local.md) for development.
+> For trusted public TLS use an [existing reverse proxy](deploy-reverse-proxy.md).
+> The bundled [DuckDNS scenario](deploy-caddy-duckdns.md) is not turnkey public
+> TLS in this revision.
 
 ---
 
@@ -23,14 +25,16 @@ cp .env.example .env
 cp config/toki-sync.toml.example config/toki-sync.toml
 ```
 
-Edit `.env` — leave `DUCKDNS_TOKEN` and `TOKI_DOMAIN` unset so Caddy falls back to its self-signed default:
+Edit `.env`. Compose passes `TOKI_EXTERNAL_URL` to Caddy as `TOKI_DOMAIN`; the
+Caddyfile's default `TLS_MODE=internal` makes the resulting certificate
+internal-CA/self-signed:
 
 ```bash
 TOKI_ADMIN_PASSWORD=your-strong-password
 JWT_SECRET=$(openssl rand -base64 32)
 TOKI_EXTERNAL_URL=https://192.168.1.100
 # DUCKDNS_TOKEN is not set
-# TOKI_DOMAIN is not set — Caddy uses tls internal (self-signed)
+# TOKI_DOMAIN is populated from TOKI_EXTERNAL_URL by Compose
 ```
 
 The bundled `caddy/Caddyfile` already supports this mode. The relevant lines are:
@@ -43,7 +47,9 @@ The bundled `caddy/Caddyfile` already supports this mode. The relevant lines are
 }
 ```
 
-When `TOKI_DOMAIN` is unset, the site address defaults to `localhost`, and `TLS_MODE` defaults to `internal` — Caddy generates and serves a self-signed certificate. No edits to the Caddyfile are needed.
+Because `TLS_MODE` is unset, it defaults to `internal`; Caddy generates an
+internal-CA certificate for the configured IP/host. `DUCKDNS_TOKEN` has no
+effect in this revision.
 
 ---
 
@@ -52,13 +58,16 @@ When `TOKI_DOMAIN` is unset, the site address defaults to `localhost`, and `TLS_
 **With Caddy** (self-signed mode):
 
 ```bash
-docker compose --profile caddy up -d
+docker compose pull toki-sync-server
+docker compose build caddy
+docker compose --profile caddy up -d --no-build
 ```
 
 **Without Caddy** (expose ports directly):
 
 ```bash
-docker compose up -d
+docker compose pull toki-sync-server
+docker compose up -d --no-build
 ```
 
 If you skip Caddy, add port mappings to `docker-compose.yml`:

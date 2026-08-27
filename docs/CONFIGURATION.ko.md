@@ -1,6 +1,10 @@
 # toki-sync 설정 레퍼런스
 
-서버 설정은 `config/toki-sync.toml` 파일에 저장됩니다. `${VAR_NAME}` 문법으로 환경변수를 확장할 수 있습니다 — 변수가 설정되지 않으면 빈 문자열로 확장됩니다.
+바이너리 기본 설정 경로는 `./config.toml`입니다. `--config <path>`가
+`TOKI_SYNC_CONFIG`보다 우선합니다. 번들 Compose 서비스는
+`TOKI_SYNC_CONFIG=/etc/toki-sync/config.toml`을 지정하고
+`config/toki-sync.toml`을 그 위치에 마운트합니다. `${VAR_NAME}`으로 참조한 환경
+변수가 설정되지 않으면 빈 문자열로 확장됩니다.
 
 ## 예시 설정
 
@@ -9,6 +13,7 @@
 # bind = "0.0.0.0"
 tcp_port = 9090
 http_port = 9091
+# external_url = "${TOKI_EXTERNAL_URL}"
 # trust_proxy = false
 # max_concurrent_writes = 10
 
@@ -22,11 +27,13 @@ jwt_secret = "${JWT_SECRET}"
 # registration_mode = "closed"
 
 [storage]
+backend = "sqlite"
 db_path = "/data/toki_sync.db"
 
 [events]
 backend = "fjall"
 fjall_path = "/data/events.fjall"
+# dedup_retention_secs = 2592000
 # backend = "clickhouse"
 # clickhouse_url = "http://clickhouse:8123"
 
@@ -47,7 +54,7 @@ json = true
 | 키 | 타입 | 기본값 | 설명 |
 |----|------|--------|------|
 | `bind` | string | `0.0.0.0` | 바인드할 네트워크 인터페이스 |
-| `http_port` | integer | `9091` | HTTP API 포트 (REST, 대시보드, 쿼리 엔드포인트) |
+| `http_port` | integer | `9091` | HTTP API 포트 (REST, 관리 콘솔, 쿼리 엔드포인트) |
 | `tcp_port` | integer | `9090` | TCP 동기화 프로토콜 포트 (toki 데몬 연결) |
 | `external_url` | string | *(빈값)* | JWT `iss`와 OIDC 리다이렉트 URI에 사용되는 공개 URL. 아래 참고 |
 | `max_concurrent_writes` | integer | `10` | 이벤트 스토어 동시 배치 쓰기 최대 수 |
@@ -162,12 +169,13 @@ postgres_url = "postgres://toki:password@db:5432/toki_sync"
 |----|------|--------|------|
 | `backend` | string | `fjall` | 이벤트 스토어 백엔드: `fjall` (내장, 외부 의존성 없음) 또는 `clickhouse` (외부 ClickHouse 서버) |
 | `fjall_path` | string | `/data/events.fjall` | Fjall 데이터베이스 디렉토리 경로. `backend = "fjall"`일 때 사용 |
-| `clickhouse_url` | string | `http://clickhouse:8123` | ClickHouse HTTP 엔드포인트. `backend = "clickhouse"`일 때 사용 |
+| `clickhouse_url` | string | *(빈값)* | ClickHouse HTTP 엔드포인트. `backend = "clickhouse"`이면 필수 |
+| `dedup_retention_secs` | integer | `2592000` | Fjall 중복 제거 인덱스 보존 기간(초, 기본 30일). 이벤트 행 자체는 삭제하지 않음 |
 
 ### Fjall vs ClickHouse
 
-- **Fjall** (기본): 내장 LSM-tree 저장소. 외부 의존성 없음. `msg_id`의 `idx_msg` 고유 인덱스를 통한 데이터 중복 제거. 개인 사용 및 소규모 팀에 권장합니다.
-- **ClickHouse**: 외부 컬럼 지향 데이터베이스. 대용량 데이터셋에서 더 나은 쿼리 성능. `ReplacingMergeTree` 엔진을 통한 데이터 중복 제거. 대규모 팀이나 고급 분석이 필요한 경우 권장합니다.
+- **Fjall** (기본): 내장 LSM-tree 저장소. 현재 중복 제거 키는 `(device_id, provider, msg_id)`입니다.
+- **ClickHouse**: `ReplacingMergeTree(ts_ms)`를 사용하는 외부 컬럼형 데이터베이스입니다. 구현되어 있지만 이 저장소에는 실제 ClickHouse 통합 테스트가 없습니다.
 
 ```toml
 # Fjall (기본 — 외부 의존성 없음)
@@ -181,7 +189,28 @@ backend = "clickhouse"
 clickhouse_url = "http://clickhouse:8123"
 ```
 
-Docker Compose에서 ClickHouse를 사용하려면 `docker compose --profile clickhouse up -d`로 활성화하세요. 기본 URL(`http://clickhouse:8123`)이 포함된 ClickHouse 서비스와 바로 동작합니다.
+위 두 값을 모두 설정한 뒤 `docker compose --profile clickhouse up -d`를 실행하세요.
+프로필만 켜면 ClickHouse만 시작되고 toki-sync는 계속 Fjall을 사용합니다. 백엔드를
+바꿔도 기존 이벤트는 복사되지 않습니다.
+
+### ClickHouse 업그레이드 주의사항
+
+새 `toki_events` 테이블은 `ORDER BY (device_id, provider, msg_id)`를 사용합니다.
+기존 배포는 여전히 `ORDER BY (device_id, msg_id)`일 수 있습니다. 시작 시
+`CREATE TABLE IF NOT EXISTS`를 사용하므로 기존 정렬 키를 다시 만들지 않으며, 같은
+device/message ID를 가진 Claude Code와 Codex 행이 합쳐질 수 있습니다. 업그레이드
+전에 확인하세요.
+
+```sql
+SELECT sorting_key
+FROM system.tables
+WHERE database = currentDatabase() AND name = 'toki_events';
+```
+
+이번 릴리즈에는 자동 `toki_events` 정렬 키 마이그레이션이 없습니다. 기존 테이블에서
+provider를 혼용하기 전에 백업하고 테이블 재구축/전체 재동기화를 계획하세요. 별도의
+`toki_windows.updated_at` 마이그레이션은 자동이지만, 이 저장소 테스트는 실제
+ClickHouse 인스턴스에서 그 경로를 실행하지 않았습니다.
 
 ---
 
@@ -214,10 +243,10 @@ Docker Compose에서 ClickHouse를 사용하려면 `docker compose --profile cli
 
 | 변수 | 필수 | 설명 |
 |------|------|------|
-| `TOKI_ADMIN_PASSWORD` | 필수 | 관리자 계정 비밀번호. 첫 서버 시작 시 자동 생성 |
-| `JWT_SECRET` | 필수 | JWT 서명 키. 생성: `openssl rand -base64 32` |
-| `TOKI_EXTERNAL_URL` | 필수 | 공개 URL (예: `https://yourserver.duckdns.org`). JWT `iss` 및 OIDC 리다이렉트에 사용 |
-| `DUCKDNS_TOKEN` | Caddy 프로필만 | Let's Encrypt DNS-01 챌린지용 DuckDNS API 토큰 |
+| `TOKI_ADMIN_PASSWORD` | 초기 설정 | 내장 `admin`이 없을 때만 생성. 이후 환경 변수 변경은 비밀번호를 바꾸지 않음 |
+| `JWT_SECRET` | 운영 필수 | TOML이 `${JWT_SECRET}`을 참조할 때의 JWT 서명 키. 생성: `openssl rand -base64 32` |
+| `TOKI_EXTERNAL_URL` | 배포에 따라 | TOML이 참조할 때만 확장. Compose는 Caddy의 `TOKI_DOMAIN`으로도 전달 |
+| `DUCKDNS_TOKEN` | 현재 효과 없음 | 예시/Compose에는 있지만 번들 Caddy 빌드와 Caddyfile은 DuckDNS DNS 모듈을 사용하지 않음 |
 | `TOKI_VERSION` | - | Docker 이미지 태그 (기본: `latest`) |
 
 ### `.env` 예시
@@ -232,10 +261,11 @@ TOKI_EXTERNAL_URL=https://yourserver.duckdns.org
 DUCKDNS_TOKEN=your-duckdns-token
 
 # 이미지 버전 (선택)
-TOKI_VERSION=0.1.0
+TOKI_VERSION=2.1.0
 ```
 
-> **보안**: `.env` 파일을 버전 관리에 커밋하지 마세요. `.env.example` 파일이 템플릿으로 제공됩니다.
+> **보안**: `.env`를 커밋하지 마세요. 번들 Caddyfile은 현재 내부 CA를 강제하며
+> 공개 Let's Encrypt/DuckDNS 인증서를 발급하지 않습니다.
 
 ---
 
@@ -243,9 +273,19 @@ TOKI_VERSION=0.1.0
 
 서버는 다음 순서로 설정을 로드합니다.
 
-1. `config/toki-sync.toml` 읽기 (`--config` 플래그로 경로 지정 가능).
+1. `--config`, `TOKI_SYNC_CONFIG`, 기본 `./config.toml` 순으로 경로 선택.
 2. `${VAR_NAME}` 플레이스홀더를 환경 변수 값으로 확장.
 3. TOML을 설정 구조체로 파싱.
 4. 누락된 필드에 기본값 적용.
 
-설정 파일이 없으면 환경 변수에서 `JWT_SECRET`을 읽고 나머지는 내장 기본값을 사용합니다. `JWT_SECRET`이 비어 있으면 `change-me-in-production`으로 대체됩니다.
+선택한 파일이 없으면 서버는 내장 기본값을 사용하고 환경 변수의 `JWT_SECRET`을
+읽습니다. 미설정 시 경고와 함께 `change-me-in-production`을 사용합니다. 파일이
+존재하면 환경 변수 확장 후 `[auth]`와 `jwt_secret`이 있어야 합니다.
+
+## 검증 상태
+
+현재 116개 테스트는 설정 파싱, SQLite 기반 HTTP 경로, Fjall을 검사합니다.
+PostgreSQL과 ClickHouse는 컴파일되지만 이 저장소에는 실제 인스턴스 통합 테스트가
+없습니다. 저장소 Docker 소스 빌드도 protocol v1.1.0 태그와 임시 형제 patch 제거
+전까지 막혀 있습니다. 선택 백엔드와 실제 마이그레이션은 운영과 유사한 폐기 가능한
+인스턴스에서 실행하기 전까지 미검증으로 보세요.

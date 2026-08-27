@@ -2,7 +2,9 @@
 
 이미 nginx, Traefik 등으로 TLS를 처리하고 있는 서버에 적합합니다.
 
-> 다른 환경이면 [Caddy + DuckDNS](deploy-caddy-duckdns.ko.md) (새 서버에 자동 TLS), [자체 서명 TLS](deploy-self-signed.ko.md) (IP 전용 서버), [로컬 / LAN](deploy-local.ko.md) (개발용)을 참고하세요.
+> IP 전용 신뢰 LAN은 [내부 CA TLS](deploy-self-signed.ko.md), 개발은
+> [로컬 / LAN](deploy-local.ko.md)을 참고하세요. 번들 DuckDNS 시나리오는 이번
+> revision에서 [turnkey 공개 TLS가 아닙니다](deploy-caddy-duckdns.ko.md).
 
 ---
 
@@ -55,8 +57,12 @@ services:
 ## 3단계: 배포
 
 ```bash
-docker compose up -d
+docker compose pull toki-sync-server
+docker compose up -d --no-build
 ```
+
+현재 source revision의 활성 Cargo protocol patch가 Docker build context 밖을
+가리키므로 `--no-build`가 필요합니다.
 
 toki-sync-server와 내장 Fjall 이벤트 스토어만 시작됩니다 (Caddy 없음).
 
@@ -74,7 +80,7 @@ toki-sync-server와 내장 Fjall 이벤트 스토어만 시작됩니다 (Caddy �
 ### nginx
 
 ```nginx
-# HTTP API + 대시보드
+# HTTP API + 관리 콘솔
 server {
     listen 443 ssl;
     server_name yourserver.example.com;
