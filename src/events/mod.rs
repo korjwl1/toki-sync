@@ -18,6 +18,10 @@ pub struct ServerEvent {
     pub provider: String,
     pub model: String,
     pub project: String,
+    /// Resolved session identifier. Older persisted rows and ClickHouse rows
+    /// created before this field was retained decode as an empty string.
+    #[serde(default)]
+    pub session: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_creation_input_tokens: u64,

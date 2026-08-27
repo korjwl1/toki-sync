@@ -76,6 +76,7 @@ impl ClickHouseEventStore {
                 provider String,
                 model String,
                 project String,
+                session String,
                 input_tokens UInt64,
                 output_tokens UInt64,
                 cache_creation_input_tokens UInt64,
@@ -85,6 +86,13 @@ impl ClickHouseEventStore {
             ORDER BY (device_id, provider, msg_id)
         ";
         self.execute(ddl).context("create toki_events table")?;
+        // Additive migration for servers created before raw remote events
+        // retained session IDs. Existing rows get ClickHouse's empty-string
+        // default and remain queryable.
+        self.execute(
+            "ALTER TABLE toki_events ADD COLUMN IF NOT EXISTS session String AFTER project",
+        )
+        .context("add toki_events session column")?;
 
         // Version note: ReplacingMergeTree keeps the row with the highest
         // version. observed_ts_ms would TIE whenever a merge changes a row
@@ -318,14 +326,14 @@ impl EventStore for ClickHouseEventStore {
 
         // Build INSERT with VALUES — ClickHouse ReplacingMergeTree handles dedup
         let mut sql = String::from(
-            "INSERT INTO toki_events (device_id, user_id, msg_id, ts_ms, provider, model, project, \
+            "INSERT INTO toki_events (device_id, user_id, msg_id, ts_ms, provider, model, project, session, \
              input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, usage_total) VALUES "
         );
 
         for (i, e) in events.iter().enumerate() {
             if i > 0 { sql.push(','); }
             sql.push_str(&format!(
-                "('{}','{}','{}',{},'{}','{}','{}',{},{},{},{},{})",
+                "('{}','{}','{}',{},'{}','{}','{}','{}',{},{},{},{},{})",
                 Self::escape(&e.device_id),
                 Self::escape(&e.user_id),
                 Self::escape(&e.msg_id),
@@ -333,6 +341,7 @@ impl EventStore for ClickHouseEventStore {
                 Self::escape(&e.provider),
                 Self::escape(&e.model),
                 Self::escape(&e.project),
+                Self::escape(&e.session),
                 e.input_tokens,
                 e.output_tokens,
                 e.cache_creation_input_tokens,
@@ -371,7 +380,7 @@ impl EventStore for ClickHouseEventStore {
         };
 
         let sql = format!(
-            "SELECT device_id, user_id, msg_id, ts_ms, provider, model, project, \
+            "SELECT device_id, user_id, msg_id, ts_ms, provider, model, project, session, \
              input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, usage_total \
              FROM toki_events FINAL \
              WHERE ts_ms >= {since_ms} AND ts_ms < {until_ms} {user_clause} \

@@ -16,7 +16,7 @@ const EVENT_SCHEMA_VERSION: u32 = 2;
 /// Fjall-backed event store with msg_id dedup.
 ///
 /// Replicates the local daemon's dedup pattern (toki/src/db.rs):
-/// - `events` keyspace: sorted by [ts_ms(8 BE)][device_id\0msg_id]
+/// - `events` keyspace: sorted by [ts_ms(8 BE)][device_id\0provider\0msg_id]
 /// - `idx_msg` keyspace: [device_id\0provider\0msg_id] → events_key (dedup lookup)
 /// - `idx_user` keyspace: [user_id\0][ts_ms(8 BE)][device_id\0msg_id] → event value.
 ///   Secondary index so `scope=self`/`scope=team` queries scan only the relevant
@@ -33,6 +33,10 @@ pub struct FjallEventStore {
     events: Keyspace,
     idx_msg: Keyspace,
     idx_user: Keyspace,
+    /// Session strings keyed by the event row key. Kept separate so adding
+    /// session retention does not change the legacy bincode event value and
+    /// remains readable by an older binary after a rollback.
+    sessions: Keyspace,
     /// Rate-limit windows: [user_id\0provider\0limit_id\0account\0][kind u8][window_end_ms i64 BE]
     /// → [version u8][bincode WireWindow]. The version byte decouples the
     /// persisted layout from protocol evolution: unknown (future) versions
@@ -60,6 +64,86 @@ pub struct FjallEventStore {
 }
 
 const WINDOW_VALUE_VERSION: u8 = 1;
+
+/// Exact v1/v2 event value layout. Session is deliberately not added here;
+/// it lives in the additive `sessions` keyspace so the persisted bincode
+/// contract remains rollback-compatible.
+#[derive(serde::Serialize)]
+struct PersistedEventRef<'a> {
+    device_id: &'a str,
+    user_id: &'a str,
+    msg_id: &'a str,
+    ts_ms: i64,
+    provider: &'a str,
+    model: &'a str,
+    project: &'a str,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_creation_input_tokens: u64,
+    cache_read_input_tokens: u64,
+    usage_total: u64,
+}
+
+#[derive(serde::Deserialize)]
+struct PersistedEvent {
+    device_id: String,
+    user_id: String,
+    msg_id: String,
+    ts_ms: i64,
+    provider: String,
+    model: String,
+    project: String,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_creation_input_tokens: u64,
+    cache_read_input_tokens: u64,
+    usage_total: u64,
+}
+
+fn encode_event(event: &ServerEvent) -> Result<Vec<u8>> {
+    Ok(bincode::serialize(&PersistedEventRef {
+        device_id: &event.device_id,
+        user_id: &event.user_id,
+        msg_id: &event.msg_id,
+        ts_ms: event.ts_ms,
+        provider: &event.provider,
+        model: &event.model,
+        project: &event.project,
+        input_tokens: event.input_tokens,
+        output_tokens: event.output_tokens,
+        cache_creation_input_tokens: event.cache_creation_input_tokens,
+        cache_read_input_tokens: event.cache_read_input_tokens,
+        usage_total: event.usage_total,
+    })?)
+}
+
+fn decode_event(bytes: &[u8]) -> Result<ServerEvent> {
+    let event: PersistedEvent = bincode::deserialize(bytes)?;
+    Ok(ServerEvent {
+        device_id: event.device_id,
+        user_id: event.user_id,
+        msg_id: event.msg_id,
+        ts_ms: event.ts_ms,
+        provider: event.provider,
+        model: event.model,
+        project: event.project,
+        session: String::new(),
+        input_tokens: event.input_tokens,
+        output_tokens: event.output_tokens,
+        cache_creation_input_tokens: event.cache_creation_input_tokens,
+        cache_read_input_tokens: event.cache_read_input_tokens,
+        usage_total: event.usage_total,
+    })
+}
+
+fn load_session(sessions: &Keyspace, event_key: &[u8]) -> String {
+    sessions
+        .get(event_key)
+        .ok()
+        .flatten()
+        .and_then(|bytes| String::from_utf8(bytes.to_vec()).ok())
+        .unwrap_or_default()
+}
 
 fn encode_window(w: &toki_sync_protocol::WireWindow) -> Result<Vec<u8>> {
     let body = bincode::serialize(w)?;
@@ -130,6 +214,7 @@ impl FjallEventStore {
         let events = db.keyspace("events", opts).context("open events keyspace")?;
         let idx_msg = db.keyspace("idx_msg", opts).context("open idx_msg keyspace")?;
         let idx_user = db.keyspace("idx_user", opts).context("open idx_user keyspace")?;
+        let sessions = db.keyspace("sessions", opts).context("open sessions keyspace")?;
         let windows = db.keyspace("windows", opts).context("open windows keyspace")?;
 
         // Check schema version — clear data if mismatched
@@ -143,6 +228,7 @@ impl FjallEventStore {
             drop(events);
             drop(idx_msg);
             drop(idx_user);
+            drop(sessions);
             // Kept alive here, this Arc handle into the old FjallDatabase
             // would outlive the remove_dir_all and the recursive reopen.
             drop(windows);
@@ -168,7 +254,7 @@ impl FjallEventStore {
             let mut count = 0u64;
             for guard in events.range(Vec::<u8>::new()..) {
                 let kv = guard.into_inner().context("idx_user backfill scan")?;
-                let ev = bincode::deserialize::<ServerEvent>(&kv.1)
+                let ev = decode_event(&kv.1)
                     .context("idx_user backfill deserialize")?;
                 let user_key = Self::user_idx_key(&ev.user_id, &kv.0);
                 batch.insert(&idx_user, user_key, kv.1.to_vec());
@@ -197,17 +283,25 @@ impl FjallEventStore {
             events,
             idx_msg,
             idx_user,
+            sessions,
             windows,
             windows_lock: Arc::new(Mutex::new(())),
             mutation_lock: Arc::new(Mutex::new(())),
         })
     }
 
-    /// Build the events keyspace key: [ts_ms(8 bytes BE)][device_id\0msg_id]
-    fn event_key(ts_ms: i64, device_id: &str, msg_id: &str) -> Vec<u8> {
-        let mut key = Vec::with_capacity(8 + device_id.len() + 1 + msg_id.len());
+    /// Build the events keyspace key: [ts_ms(8 bytes BE)][device_id\0provider\0msg_id].
+    /// Rows written before provider was added remain readable because scans
+    /// interpret only the timestamp prefix and indexes retain their exact row
+    /// pointer. New writes cannot collide across providers.
+    fn event_key(ts_ms: i64, device_id: &str, provider: &str, msg_id: &str) -> Vec<u8> {
+        let mut key = Vec::with_capacity(
+            8 + device_id.len() + 1 + provider.len() + 1 + msg_id.len(),
+        );
         key.extend_from_slice(&ts_ms.to_be_bytes());
         key.extend_from_slice(device_id.as_bytes());
+        key.push(0);
+        key.extend_from_slice(provider.as_bytes());
         key.push(0);
         key.extend_from_slice(msg_id.as_bytes());
         key
@@ -225,7 +319,7 @@ impl FjallEventStore {
     }
 
     /// Build the idx_user key: [user_id\0][event_key], where event_key is
-    /// [ts_ms(8 BE)][device_id\0msg_id]. The `\0` after user_id delimits it so a
+    /// [ts_ms(8 BE)][device_id\0provider\0msg_id]. The `\0` after user_id delimits it so a
     /// prefix scan for one user can't spill into another whose id shares a prefix.
     fn user_idx_key(user_id: &str, event_key: &[u8]) -> Vec<u8> {
         let mut key = Vec::with_capacity(user_id.len() + 1 + event_key.len());
@@ -241,11 +335,17 @@ fn upsert_one(
     events_ks: &Keyspace,
     idx_msg_ks: &Keyspace,
     idx_user_ks: &Keyspace,
+    sessions_ks: &Keyspace,
     batch: &mut fjall::OwnedWriteBatch,
     event: &ServerEvent,
 ) {
     let idx_key = FjallEventStore::idx_key(&event.device_id, &event.provider, &event.msg_id);
-    let new_event_key = FjallEventStore::event_key(event.ts_ms, &event.device_id, &event.msg_id);
+    let new_event_key = FjallEventStore::event_key(
+        event.ts_ms,
+        &event.device_id,
+        &event.provider,
+        &event.msg_id,
+    );
 
     // Check if previous event exists for this (device_id, provider, msg_id)
     if let Ok(Some(prev_key)) = idx_msg_ks.get(&idx_key) {
@@ -267,19 +367,23 @@ fn upsert_one(
         // user, in which case the inline copy still lives under the old user and
         // must be cleared there (using the incoming user_id would strand it).
         let prev_user_id = events_ks.get(&prev_key).ok().flatten()
-            .and_then(|v| bincode::deserialize::<ServerEvent>(&v).ok())
+            .and_then(|v| decode_event(&v).ok())
             .map(|e| e.user_id)
             .unwrap_or_else(|| event.user_id.clone());
         let prev_user_key = FjallEventStore::user_idx_key(&prev_user_id, &prev_key);
         batch.remove(events_ks, prev_key.to_vec());
         batch.remove(idx_user_ks, prev_user_key);
+        batch.remove(sessions_ks, prev_key.to_vec());
     }
 
     // Insert new event + update both indexes
-    let value = bincode::serialize(event).expect("ServerEvent serialize");
+    let value = encode_event(event).expect("ServerEvent serialize");
     let user_key = FjallEventStore::user_idx_key(&event.user_id, &new_event_key);
     batch.insert(events_ks, new_event_key.clone(), value.clone());
     batch.insert(idx_user_ks, user_key, value);
+    if !event.session.is_empty() {
+        batch.insert(sessions_ks, new_event_key.clone(), event.session.as_bytes().to_vec());
+    }
     batch.insert(idx_msg_ks, idx_key, new_event_key);
 }
 
@@ -292,6 +396,7 @@ fn upsert_one(
 /// producing the same effective `[since, until)` range.
 fn scan_events(
     events_ks: &Keyspace,
+    sessions_ks: &Keyspace,
     since_ms: i64,
     until_ms: i64,
     filter: &UserFilter,
@@ -321,10 +426,11 @@ fn scan_events(
         });
         if ts >= until_ms { break; }
 
-        let event: ServerEvent = match bincode::deserialize(&kv.1) {
+        let mut event = match decode_event(&kv.1) {
             Ok(e) => e,
             Err(_) => continue,
         };
+        event.session = load_session(sessions_ks, key);
 
         // Apply user filter
         match filter {
@@ -350,6 +456,7 @@ fn scan_events(
 /// `until_ms`. Each index value is an inline copy of the event.
 fn scan_user_events(
     idx_user_ks: &Keyspace,
+    sessions_ks: &Keyspace,
     user_id: &str,
     since_ms: i64,
     until_ms: i64,
@@ -377,8 +484,11 @@ fn scan_user_events(
         if ts >= until_ms { break; }
         if ts < since_ms { continue; }
 
-        match bincode::deserialize::<ServerEvent>(&kv.1) {
-            Ok(e) => results.push(e),
+        match decode_event(&kv.1) {
+            Ok(mut e) => {
+                e.session = load_session(sessions_ks, &key[ts_off..]);
+                results.push(e);
+            }
             Err(_) => continue,
         }
     }
@@ -395,6 +505,7 @@ impl EventStore for FjallEventStore {
         let events_ks = self.events.clone();
         let idx_msg_ks = self.idx_msg.clone();
         let idx_user_ks = self.idx_user.clone();
+        let sessions_ks = self.sessions.clone();
         let mutation_lock = self.mutation_lock.clone();
         let events = events.to_vec();
 
@@ -423,7 +534,14 @@ impl EventStore for FjallEventStore {
 
             let mut batch = db.batch();
             for event in winner.values() {
-                upsert_one(&events_ks, &idx_msg_ks, &idx_user_ks, &mut batch, event);
+                upsert_one(
+                    &events_ks,
+                    &idx_msg_ks,
+                    &idx_user_ks,
+                    &sessions_ks,
+                    &mut batch,
+                    event,
+                );
             }
             batch.commit().context("fjall batch commit")?;
             Ok(())
@@ -440,6 +558,7 @@ impl EventStore for FjallEventStore {
     ) -> Result<Vec<ServerEvent>> {
         let events_ks = self.events.clone();
         let idx_user_ks = self.idx_user.clone();
+        let sessions_ks = self.sessions.clone();
 
         tokio::task::spawn_blocking(move || {
             // User-scoped queries use the per-user index so they touch only the
@@ -447,16 +566,24 @@ impl EventStore for FjallEventStore {
             // keyspace (no user narrowing possible).
             let results = match &filter {
                 UserFilter::Single(uid) => {
-                    scan_user_events(&idx_user_ks, uid, since_ms, until_ms)
+                    scan_user_events(&idx_user_ks, &sessions_ks, uid, since_ms, until_ms)
                 }
                 UserFilter::Multiple(uids) => {
                     let mut out = Vec::new();
                     for uid in uids {
-                        out.extend(scan_user_events(&idx_user_ks, uid, since_ms, until_ms));
+                        out.extend(scan_user_events(
+                            &idx_user_ks,
+                            &sessions_ks,
+                            uid,
+                            since_ms,
+                            until_ms,
+                        ));
                     }
                     out
                 }
-                UserFilter::All => scan_events(&events_ks, since_ms, until_ms, &filter),
+                UserFilter::All => {
+                    scan_events(&events_ks, &sessions_ks, since_ms, until_ms, &filter)
+                }
             };
             Ok(results)
         })
@@ -521,6 +648,7 @@ impl EventStore for FjallEventStore {
         let events_ks = self.events.clone();
         let idx_msg_ks = self.idx_msg.clone();
         let idx_user_ks = self.idx_user.clone();
+        let sessions_ks = self.sessions.clone();
         let mutation_lock = self.mutation_lock.clone();
         let device_id = device_id.to_string();
 
@@ -542,7 +670,7 @@ impl EventStore for FjallEventStore {
                     Ok(kv) => kv,
                     Err(_) => continue,
                 };
-                let ev = match bincode::deserialize::<ServerEvent>(&kv.1) {
+                let ev = match decode_event(&kv.1) {
                     Ok(e) => e,
                     Err(_) => continue,
                 };
@@ -550,6 +678,7 @@ impl EventStore for FjallEventStore {
 
                 batch.remove(&idx_user_ks, FjallEventStore::user_idx_key(&ev.user_id, &kv.0));
                 batch.remove(&idx_msg_ks, FjallEventStore::idx_key(&ev.device_id, &ev.provider, &ev.msg_id));
+                batch.remove(&sessions_ks, kv.0.to_vec());
                 batch.remove(&events_ks, kv.0.to_vec());
             }
 
@@ -745,6 +874,7 @@ mod tests {
             provider: "claude_code".to_string(),
             model: model.to_string(),
             project: "test".to_string(),
+            session: String::new(),
             input_tokens: input,
             output_tokens: 0,
             cache_creation_input_tokens: 0,
@@ -811,6 +941,25 @@ mod tests {
 
         let events = store.query_events(0, i64::MAX, UserFilter::All).await.unwrap();
         assert_eq!(events.len(), 2, "distinct codex hashes must not be collapsed");
+    }
+
+    #[tokio::test]
+    async fn test_same_device_message_and_timestamp_stay_distinct_across_providers() {
+        let dir = TempDir::new().unwrap();
+        let store = FjallEventStore::open(dir.path()).unwrap();
+        let claude = make_event("d1", "shared-msg", 1000, "opus", 100);
+        let mut codex = make_event("d1", "shared-msg", 1000, "gpt-5", 200);
+        codex.provider = "codex".to_string();
+
+        store.upsert_events(&[claude, codex]).await.unwrap();
+        let rows = store
+            .query_events(0, i64::MAX, UserFilter::All)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2, "provider is part of the logical event key");
+        let providers: std::collections::HashSet<_> =
+            rows.iter().map(|event| event.provider.as_str()).collect();
+        assert_eq!(providers, std::collections::HashSet::from(["claude_code", "codex"]));
     }
 
     #[tokio::test]
@@ -928,8 +1077,13 @@ mod tests {
         {
             let db = fjall::Database::builder(dir.path()).open().unwrap();
             let events = db.keyspace("events", || fjall::KeyspaceCreateOptions::default()).unwrap();
-            let key = FjallEventStore::event_key(ev.ts_ms, &ev.device_id, &ev.msg_id);
-            let val = bincode::serialize(&ev).unwrap();
+            // Legacy rows omit provider from the event key. A mixed-format
+            // database must remain readable and backfillable after upgrade.
+            let mut key = ev.ts_ms.to_be_bytes().to_vec();
+            key.extend_from_slice(ev.device_id.as_bytes());
+            key.push(0);
+            key.extend_from_slice(ev.msg_id.as_bytes());
+            let val = encode_event(&ev).unwrap();
             events.insert(key, val).unwrap();
         }
 
@@ -937,6 +1091,30 @@ mod tests {
         let events = store.query_events(0, i64::MAX, UserFilter::Single("alice".into())).await.unwrap();
         assert_eq!(events.len(), 1, "backfill must index pre-existing events");
         assert_eq!(events[0].input_tokens, 42);
+    }
+
+    #[tokio::test]
+    async fn test_session_round_trips_without_changing_event_value_schema() {
+        let dir = TempDir::new().unwrap();
+        let store = FjallEventStore::open(dir.path()).unwrap();
+        let mut event = make_event("d1", "m", 1000, "opus", 42);
+        event.session = "session-123".to_string();
+        let legacy_value = encode_event(&event).unwrap();
+
+        store.upsert_events(&[event]).await.unwrap();
+        let rows = store
+            .query_events(0, i64::MAX, UserFilter::Single("user1".into()))
+            .await
+            .unwrap();
+        assert_eq!(rows[0].session, "session-123");
+
+        let key = FjallEventStore::event_key(1000, "d1", "claude_code", "m");
+        let stored_value = store.events.get(&key).unwrap().unwrap();
+        assert_eq!(stored_value.as_ref(), legacy_value.as_slice());
+        assert_eq!(load_session(&store.sessions, &key), "session-123");
+
+        store.delete_device_events("d1").await.unwrap();
+        assert!(store.sessions.get(&key).unwrap().is_none());
     }
 
     #[tokio::test]
@@ -1051,7 +1229,7 @@ mod tests {
         {
             let db = fjall::Database::builder(dir.path()).open().unwrap();
             let events = db.keyspace("events", || fjall::KeyspaceCreateOptions::default()).unwrap();
-            let key = FjallEventStore::event_key(1000, "d1", "m");
+            let key = FjallEventStore::event_key(1000, "d1", "claude_code", "m");
             events.insert(key, b"not-a-serverevent".to_vec()).unwrap();
         }
 

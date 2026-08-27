@@ -652,6 +652,15 @@ async fn handle_sync_batch(
                 }
                 String::new()
             });
+        let session = batch.dict.get(&item.event.session_id)
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .unwrap_or_else(|| {
+                if item.event.session_id != 0 {
+                    tracing::warn!("missing dict ID {} for session in device {}", item.event.session_id, device_id);
+                }
+                String::new()
+            });
         let bare_msg_id = item.message_id.split(':').next().unwrap_or(&item.message_id);
 
         // Map token columns by name (supports different providers)
@@ -663,6 +672,7 @@ async fn handle_sync_batch(
             provider: provider.to_string(),
             model,
             project,
+            session,
             input_tokens: 0,
             output_tokens: 0,
             cache_creation_input_tokens: 0,
