@@ -19,8 +19,9 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 /// Listens on `addr`, accepts connections, and spawns a handler task per client.
 /// Shuts down cleanly when `shutdown_rx` receives `true`: stops accepting new
 /// connections, waits up to 30s for in-flight handlers to complete, then exits.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_tcp_server(
-    db:  Arc<dyn DatabaseRepo>,
+    db: Arc<dyn DatabaseRepo>,
     jwt: Arc<JwtManager>,
     events: Arc<dyn EventStore>,
     addr: SocketAddr,
@@ -36,7 +37,9 @@ pub async fn run_tcp_server(
     // reconnect, so it must NOT be per-connection state.
     let windows_rate: crate::sync::handler::WindowsRateLimiter = Default::default();
     let mut handlers = JoinSet::new();
-    tracing::info!("TCP sync server listening on {addr} (max_concurrent_writes={max_concurrent_writes})");
+    tracing::info!(
+        "TCP sync server listening on {addr} (max_concurrent_writes={max_concurrent_writes})"
+    );
 
     loop {
         // Reap completed handlers before accepting new ones
@@ -91,9 +94,7 @@ pub async fn run_tcp_server(
     let active = handlers.len();
     if active > 0 {
         tracing::info!("TCP sync server draining {active} connections (timeout {DRAIN_TIMEOUT:?})");
-        let drain = async {
-            while handlers.join_next().await.is_some() {}
-        };
+        let drain = async { while handlers.join_next().await.is_some() {} };
         if tokio::time::timeout(DRAIN_TIMEOUT, drain).await.is_err() {
             let remaining = handlers.len();
             tracing::warn!("TCP drain timeout, aborting {remaining} remaining connections");

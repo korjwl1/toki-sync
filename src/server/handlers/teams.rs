@@ -5,7 +5,7 @@ use axum::{
 };
 use serde::Deserialize;
 
-use super::super::http::{AppError, AppState, authenticate, require_admin};
+use super::super::http::{authenticate, require_admin, AppError, AppState};
 
 // ─── Admin: team management ─────────────────────────────────────────────────
 
@@ -23,7 +23,10 @@ pub async fn admin_create_team(
 
     let name = body.name.trim().to_string();
     if name.is_empty() {
-        return Err(AppError { status: StatusCode::UNPROCESSABLE_ENTITY, message: "team name must not be empty".into() });
+        return Err(AppError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            message: "team name must not be empty".into(),
+        });
     }
 
     let id = uuid::Uuid::new_v4().to_string();
@@ -35,7 +38,10 @@ pub async fn admin_create_team(
         }
     })?;
 
-    Ok((StatusCode::CREATED, Json(serde_json::json!({ "id": id, "name": name }))))
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "id": id, "name": name })),
+    ))
 }
 
 pub async fn admin_list_teams(
@@ -44,16 +50,23 @@ pub async fn admin_list_teams(
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_admin(&headers, &state).await?;
 
-    let teams = state.db.list_teams_with_member_count().await.map_err(AppError::internal)?;
+    let teams = state
+        .db
+        .list_teams_with_member_count()
+        .await
+        .map_err(AppError::internal)?;
 
-    let team_list: Vec<_> = teams.into_iter().map(|t| {
-        serde_json::json!({
-            "id": t.id,
-            "name": t.name,
-            "member_count": t.member_count,
-            "created_at": t.created_at,
+    let team_list: Vec<_> = teams
+        .into_iter()
+        .map(|t| {
+            serde_json::json!({
+                "id": t.id,
+                "name": t.name,
+                "member_count": t.member_count,
+                "created_at": t.created_at,
+            })
         })
-    }).collect();
+        .collect();
 
     Ok(Json(serde_json::json!({ "teams": team_list })))
 }
@@ -65,7 +78,11 @@ pub async fn admin_delete_team(
 ) -> Result<StatusCode, AppError> {
     require_admin(&headers, &state).await?;
 
-    let deleted = state.db.delete_team(&team_id).await.map_err(AppError::internal)?;
+    let deleted = state
+        .db
+        .delete_team(&team_id)
+        .await
+        .map_err(AppError::internal)?;
     if !deleted {
         return Err(AppError::not_found("team not found"));
     }
@@ -89,13 +106,21 @@ pub async fn admin_add_team_member(
     require_admin(&headers, &state).await?;
 
     // Verify team exists
-    let team = state.db.get_team(&team_id).await.map_err(AppError::internal)?;
+    let team = state
+        .db
+        .get_team(&team_id)
+        .await
+        .map_err(AppError::internal)?;
     if team.is_none() {
         return Err(AppError::not_found("team not found"));
     }
 
     // Verify user exists
-    let user = state.db.get_user_by_id(&body.user_id).await.map_err(AppError::internal)?;
+    let user = state
+        .db
+        .get_user_by_id(&body.user_id)
+        .await
+        .map_err(AppError::internal)?;
     if user.is_none() {
         return Err(AppError::not_found("user not found"));
     }
@@ -108,15 +133,22 @@ pub async fn admin_add_team_member(
         });
     }
 
-    state.db.add_team_member(&team_id, &body.user_id, role).await.map_err(|e| {
-        if e.to_string().contains("UNIQUE") || e.to_string().contains("PRIMARY") {
-            AppError::conflict("user is already a team member")
-        } else {
-            AppError::internal(e)
-        }
-    })?;
+    state
+        .db
+        .add_team_member(&team_id, &body.user_id, role)
+        .await
+        .map_err(|e| {
+            if e.to_string().contains("UNIQUE") || e.to_string().contains("PRIMARY") {
+                AppError::conflict("user is already a team member")
+            } else {
+                AppError::internal(e)
+            }
+        })?;
 
-    Ok((StatusCode::CREATED, Json(serde_json::json!({ "team_id": team_id, "user_id": body.user_id, "role": role }))))
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "team_id": team_id, "user_id": body.user_id, "role": role })),
+    ))
 }
 
 pub async fn admin_remove_team_member(
@@ -126,7 +158,11 @@ pub async fn admin_remove_team_member(
 ) -> Result<StatusCode, AppError> {
     require_admin(&headers, &state).await?;
 
-    let removed = state.db.remove_team_member(&team_id, &user_id).await.map_err(AppError::internal)?;
+    let removed = state
+        .db
+        .remove_team_member(&team_id, &user_id)
+        .await
+        .map_err(AppError::internal)?;
     if !removed {
         return Err(AppError::not_found("team member not found"));
     }
@@ -141,20 +177,31 @@ pub async fn admin_list_team_members(
     require_admin(&headers, &state).await?;
 
     // Verify team exists
-    let team = state.db.get_team(&team_id).await.map_err(AppError::internal)?;
+    let team = state
+        .db
+        .get_team(&team_id)
+        .await
+        .map_err(AppError::internal)?;
     if team.is_none() {
         return Err(AppError::not_found("team not found"));
     }
 
-    let members = state.db.list_team_members(&team_id).await.map_err(AppError::internal)?;
-    let member_list: Vec<_> = members.into_iter().map(|m| {
-        serde_json::json!({
-            "user_id": m.user_id,
-            "username": m.username,
-            "role": m.role,
-            "joined_at": m.joined_at,
+    let members = state
+        .db
+        .list_team_members(&team_id)
+        .await
+        .map_err(AppError::internal)?;
+    let member_list: Vec<_> = members
+        .into_iter()
+        .map(|m| {
+            serde_json::json!({
+                "user_id": m.user_id,
+                "username": m.username,
+                "role": m.role,
+                "joined_at": m.joined_at,
+            })
         })
-    }).collect();
+        .collect();
 
     Ok(Json(serde_json::json!({ "members": member_list })))
 }
@@ -166,16 +213,22 @@ pub async fn me_teams(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let claims = authenticate(&state, &headers).await?;
-    let teams = state.db.list_user_teams(&claims.sub).await.map_err(AppError::internal)?;
+    let teams = state
+        .db
+        .list_user_teams(&claims.sub)
+        .await
+        .map_err(AppError::internal)?;
 
-    let team_list: Vec<_> = teams.into_iter().map(|t| {
-        serde_json::json!({
-            "team_id": t.team_id,
-            "team_name": t.team_name,
-            "role": t.role,
+    let team_list: Vec<_> = teams
+        .into_iter()
+        .map(|t| {
+            serde_json::json!({
+                "team_id": t.team_id,
+                "team_name": t.team_name,
+                "role": t.role,
+            })
         })
-    }).collect();
+        .collect();
 
     Ok(Json(serde_json::json!({ "teams": team_list })))
 }
-

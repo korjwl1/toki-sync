@@ -1,4 +1,4 @@
-/// Shared model types used by all database backends.
+//! Shared model types used by all database backends.
 
 #[allow(dead_code)]
 pub struct User {

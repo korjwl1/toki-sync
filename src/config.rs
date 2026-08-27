@@ -44,10 +44,18 @@ pub struct ServerConfig {
     pub trust_proxy: bool,
 }
 
-fn default_http_port() -> u16 { 9091 }
-fn default_tcp_port() -> u16 { 9090 }
-fn default_bind() -> String { "0.0.0.0".to_string() }
-fn default_max_concurrent_writes() -> usize { 10 }
+fn default_http_port() -> u16 {
+    9091
+}
+fn default_tcp_port() -> u16 {
+    9090
+}
+fn default_bind() -> String {
+    "0.0.0.0".to_string()
+}
+fn default_max_concurrent_writes() -> usize {
+    10
+}
 
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -93,7 +101,9 @@ pub struct AuthConfig {
     pub oidc_redirect_uri: String,
 }
 
-fn default_registration_mode() -> String { "closed".to_string() }
+fn default_registration_mode() -> String {
+    "closed".to_string()
+}
 
 impl AuthConfig {
     /// Resolve the effective registration mode, supporting legacy `allow_registration` field.
@@ -109,11 +119,21 @@ impl AuthConfig {
     }
 }
 
-fn default_access_ttl() -> u64 { 3600 }         // 1h
-fn default_refresh_ttl() -> u64 { 86400 * 90 }  // 90d
-fn default_brute_max_attempts() -> u32 { 5 }
-fn default_brute_window() -> u64 { 300 }         // 5m
-fn default_brute_lockout() -> u64 { 900 }        // 15m
+fn default_access_ttl() -> u64 {
+    3600
+} // 1h
+fn default_refresh_ttl() -> u64 {
+    86400 * 90
+} // 90d
+fn default_brute_max_attempts() -> u32 {
+    5
+}
+fn default_brute_window() -> u64 {
+    300
+} // 5m
+fn default_brute_lockout() -> u64 {
+    900
+} // 15m
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct StorageConfig {
@@ -129,8 +149,12 @@ pub struct StorageConfig {
     pub postgres_url: String,
 }
 
-fn default_db_backend() -> String { "sqlite".to_string() }
-fn default_db_path() -> String { "./data/toki_sync.db".to_string() }
+fn default_db_backend() -> String {
+    "sqlite".to_string()
+}
+fn default_db_path() -> String {
+    "./data/toki_sync.db".to_string()
+}
 
 impl StorageConfig {
     /// Resolve the effective sqlite_path: prefer explicit `sqlite_path`,
@@ -167,25 +191,34 @@ pub struct LogConfig {
     pub json: bool,
 }
 
-fn default_log_level() -> String { "info".to_string() }
+fn default_log_level() -> String {
+    "info".to_string()
+}
 
 impl Default for LogConfig {
     fn default() -> Self {
-        Self { level: default_log_level(), json: false }
+        Self {
+            level: default_log_level(),
+            json: false,
+        }
     }
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct FeaturesConfig {
     #[serde(default = "default_max_query_scope")]
-    pub max_query_scope: String,  // "self" | "team" | "all"
+    pub max_query_scope: String, // "self" | "team" | "all"
 }
 
-fn default_max_query_scope() -> String { "self".to_string() }
+fn default_max_query_scope() -> String {
+    "self".to_string()
+}
 
 impl Default for FeaturesConfig {
     fn default() -> Self {
-        Self { max_query_scope: default_max_query_scope() }
+        Self {
+            max_query_scope: default_max_query_scope(),
+        }
     }
 }
 
@@ -208,9 +241,15 @@ pub struct EventsConfig {
     pub dedup_retention_secs: i64,
 }
 
-fn default_events_backend() -> String { "fjall".to_string() }
-fn default_events_fjall_path() -> String { "./data/events.fjall".to_string() }
-fn default_dedup_retention_secs() -> i64 { 30 * 24 * 3600 } // 30 days
+fn default_events_backend() -> String {
+    "fjall".to_string()
+}
+fn default_events_fjall_path() -> String {
+    "./data/events.fjall".to_string()
+}
+fn default_dedup_retention_secs() -> i64 {
+    30 * 24 * 3600
+} // 30 days
 
 impl Default for EventsConfig {
     fn default() -> Self {
@@ -230,14 +269,15 @@ impl EventsConfig {
     /// so large that converting to milliseconds overflows i64. The `checked_mul`
     /// guards that ms conversion (used by the sync handler's cleanup cutoff).
     pub fn validate_dedup_retention(&mut self) {
-        let valid = self.dedup_retention_secs > 0
-            && self.dedup_retention_secs.checked_mul(1000).is_some();
+        let valid =
+            self.dedup_retention_secs > 0 && self.dedup_retention_secs.checked_mul(1000).is_some();
         if !valid {
             let fallback = default_dedup_retention_secs();
             tracing::warn!(
                 "events.dedup_retention_secs={} is invalid (must be > 0 and fit in ms); \
                  falling back to default {}s",
-                self.dedup_retention_secs, fallback
+                self.dedup_retention_secs,
+                fallback
             );
             self.dedup_retention_secs = fallback;
         }
@@ -309,25 +349,38 @@ mod tests {
     fn test_validate_dedup_retention_clamps_invalid() {
         let default = default_dedup_retention_secs();
 
-        let mut c = EventsConfig::default();
-        c.dedup_retention_secs = 0;
+        let mut c = EventsConfig {
+            dedup_retention_secs: 0,
+            ..EventsConfig::default()
+        };
         c.validate_dedup_retention();
         assert_eq!(c.dedup_retention_secs, default, "zero clamps to default");
 
         c.dedup_retention_secs = -3600;
         c.validate_dedup_retention();
-        assert_eq!(c.dedup_retention_secs, default, "negative clamps to default");
+        assert_eq!(
+            c.dedup_retention_secs, default,
+            "negative clamps to default"
+        );
 
         c.dedup_retention_secs = i64::MAX; // *1000 overflows
         c.validate_dedup_retention();
-        assert_eq!(c.dedup_retention_secs, default, "overflowing value clamps to default");
+        assert_eq!(
+            c.dedup_retention_secs, default,
+            "overflowing value clamps to default"
+        );
     }
 
     #[test]
     fn test_validate_dedup_retention_keeps_valid() {
-        let mut c = EventsConfig::default();
-        c.dedup_retention_secs = 3600;
+        let mut c = EventsConfig {
+            dedup_retention_secs: 3600,
+            ..EventsConfig::default()
+        };
         c.validate_dedup_retention();
-        assert_eq!(c.dedup_retention_secs, 3600, "a valid value is left unchanged");
+        assert_eq!(
+            c.dedup_retention_secs, 3600,
+            "a valid value is left unchanged"
+        );
     }
 }

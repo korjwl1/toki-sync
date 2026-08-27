@@ -5,7 +5,7 @@ use axum::{
 };
 use serde::Deserialize;
 
-use super::super::http::{AppError, AppState, require_admin, validate_username};
+use super::super::http::{require_admin, validate_username, AppError, AppState};
 
 // --- /admin/users ----------------------------------------------------------
 
@@ -41,7 +41,10 @@ pub async fn admin_create_user(
     validate_username(&body.username)?;
 
     if body.password.len() < 8 || body.password.len() > 128 {
-        return Err(AppError { status: StatusCode::UNPROCESSABLE_ENTITY, message: "password must be 8-128 characters".into() });
+        return Err(AppError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            message: "password must be 8-128 characters".into(),
+        });
     }
 
     let pw = body.password.clone();
@@ -73,7 +76,10 @@ pub async fn admin_create_user(
         }
     })?;
 
-    Ok((StatusCode::CREATED, Json(serde_json::json!({ "id": id, "username": body.username, "role": role }))))
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "id": id, "username": body.username, "role": role })),
+    ))
 }
 
 pub async fn admin_delete_user(
@@ -86,11 +92,17 @@ pub async fn admin_delete_user(
     // Protect built-in admin account from deletion
     if let Ok(Some(user)) = state.db.get_user_by_id(&user_id).await {
         if user.username == "admin" {
-            return Err(AppError::forbidden("the built-in admin account cannot be deleted, only deactivated"));
+            return Err(AppError::forbidden(
+                "the built-in admin account cannot be deleted, only deactivated",
+            ));
         }
     }
 
-    let device_ids = state.db.get_user_device_ids(&user_id).await.map_err(AppError::internal)?;
+    let device_ids = state
+        .db
+        .get_user_device_ids(&user_id)
+        .await
+        .map_err(AppError::internal)?;
 
     // (a) Stop new writes first: mark the user inactive and evict the active
     //     cache so any live TCP sync session fails its next per-batch active
@@ -111,7 +123,11 @@ pub async fn admin_delete_user(
     }
 
     // (c) Delete the relational rows (cascade).
-    let deleted = state.db.delete_user(&user_id).await.map_err(AppError::internal)?;
+    let deleted = state
+        .db
+        .delete_user(&user_id)
+        .await
+        .map_err(AppError::internal)?;
     if !deleted {
         return Err(AppError::not_found("user not found"));
     }
@@ -144,13 +160,20 @@ pub async fn admin_change_user_password(
     require_admin(&headers, &state).await?;
 
     // Verify user exists
-    let user = state.db.get_user_by_id(&user_id).await.map_err(AppError::internal)?;
+    let user = state
+        .db
+        .get_user_by_id(&user_id)
+        .await
+        .map_err(AppError::internal)?;
     if user.is_none() {
         return Err(AppError::not_found("user not found"));
     }
 
     if body.password.len() < 8 || body.password.len() > 128 {
-        return Err(AppError { status: StatusCode::UNPROCESSABLE_ENTITY, message: "password must be 8-128 characters".into() });
+        return Err(AppError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            message: "password must be 8-128 characters".into(),
+        });
     }
 
     let pw = body.password.clone();
@@ -159,10 +182,18 @@ pub async fn admin_change_user_password(
         .map_err(AppError::internal)?
         .map_err(AppError::internal)?;
 
-    state.db.update_password(&user_id, &new_hash).await.map_err(AppError::internal)?;
+    state
+        .db
+        .update_password(&user_id, &new_hash)
+        .await
+        .map_err(AppError::internal)?;
 
     // Revoke all refresh tokens -- password change invalidates existing sessions
-    state.db.revoke_user_refresh_tokens(&user_id).await.map_err(AppError::internal)?;
+    state
+        .db
+        .revoke_user_refresh_tokens(&user_id)
+        .await
+        .map_err(AppError::internal)?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -173,7 +204,11 @@ pub async fn admin_list_devices(
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_admin(&headers, &state).await?;
 
-    let rows = state.db.list_all_devices().await.map_err(AppError::internal)?;
+    let rows = state
+        .db
+        .list_all_devices()
+        .await
+        .map_err(AppError::internal)?;
 
     let devices: Vec<_> = rows.into_iter().map(|d| {
         serde_json::json!({ "id": d.id, "name": d.name, "username": d.username, "last_seen_at": d.last_seen_at })
@@ -204,7 +239,11 @@ pub async fn admin_change_user_role(
         });
     }
 
-    let updated = state.db.update_user_role(&user_id, &body.role).await.map_err(AppError::internal)?;
+    let updated = state
+        .db
+        .update_user_role(&user_id, &body.role)
+        .await
+        .map_err(AppError::internal)?;
     if !updated {
         return Err(AppError::not_found("user not found"));
     }
@@ -225,7 +264,11 @@ pub async fn admin_delete_device(
         tracing::warn!("failed to delete events for device {device_id}: {e}");
     }
 
-    let deleted = state.db.delete_device(&device_id).await.map_err(AppError::internal)?;
+    let deleted = state
+        .db
+        .delete_device(&device_id)
+        .await
+        .map_err(AppError::internal)?;
     if !deleted {
         return Err(AppError::not_found("device not found"));
     }
@@ -244,7 +287,11 @@ pub async fn admin_list_pending(
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_admin(&headers, &state).await?;
 
-    let rows = state.db.list_pending_registrations().await.map_err(AppError::internal)?;
+    let rows = state
+        .db
+        .list_pending_registrations()
+        .await
+        .map_err(AppError::internal)?;
 
     let pending: Vec<_> = rows.into_iter().map(|p| {
         serde_json::json!({ "id": p.id, "username": p.username, "requested_at": p.requested_at })
@@ -260,13 +307,17 @@ pub async fn admin_approve_pending(
 ) -> Result<StatusCode, AppError> {
     require_admin(&headers, &state).await?;
 
-    let approved = state.db.approve_registration(&pending_id).await.map_err(|e| {
-        if e.to_string().contains("UNIQUE") {
-            AppError::conflict("username already exists")
-        } else {
-            AppError::internal(e)
-        }
-    })?;
+    let approved = state
+        .db
+        .approve_registration(&pending_id)
+        .await
+        .map_err(|e| {
+            if e.to_string().contains("UNIQUE") {
+                AppError::conflict("username already exists")
+            } else {
+                AppError::internal(e)
+            }
+        })?;
     if !approved {
         return Err(AppError::not_found("pending registration not found"));
     }
@@ -280,7 +331,11 @@ pub async fn admin_reject_pending(
 ) -> Result<StatusCode, AppError> {
     require_admin(&headers, &state).await?;
 
-    let rejected = state.db.reject_registration(&pending_id).await.map_err(AppError::internal)?;
+    let rejected = state
+        .db
+        .reject_registration(&pending_id)
+        .await
+        .map_err(AppError::internal)?;
     if !rejected {
         return Err(AppError::not_found("pending registration not found"));
     }
@@ -361,7 +416,8 @@ pub async fn admin_update_setting(
     }
 
     // Validate registration_mode values
-    if key == "registration_mode" && !["open", "approval", "closed"].contains(&body.value.as_str()) {
+    if key == "registration_mode" && !["open", "approval", "closed"].contains(&body.value.as_str())
+    {
         return Err(AppError {
             status: StatusCode::UNPROCESSABLE_ENTITY,
             message: "registration_mode must be 'open', 'approval', or 'closed'".into(),
@@ -376,7 +432,11 @@ pub async fn admin_update_setting(
         });
     }
 
-    state.db.set_server_setting(&key, &body.value).await.map_err(AppError::internal)?;
+    state
+        .db
+        .set_server_setting(&key, &body.value)
+        .await
+        .map_err(AppError::internal)?;
 
     // Invalidate OIDC discovery cache when any OIDC setting changes
     if key.starts_with("oidc_") {
@@ -410,7 +470,11 @@ pub async fn admin_set_user_active(
         });
     }
 
-    let user = state.db.get_user_by_id(&user_id).await.map_err(AppError::internal)?;
+    let user = state
+        .db
+        .get_user_by_id(&user_id)
+        .await
+        .map_err(AppError::internal)?;
     let user = match user {
         Some(u) => u,
         None => return Err(AppError::not_found("user not found")),
@@ -418,7 +482,11 @@ pub async fn admin_set_user_active(
 
     // When deactivating the built-in admin, ensure at least one other active admin exists
     if !body.active && user.username == "admin" {
-        let other_admins = state.db.count_active_admins_except("admin").await.map_err(AppError::internal)?;
+        let other_admins = state
+            .db
+            .count_active_admins_except("admin")
+            .await
+            .map_err(AppError::internal)?;
         if other_admins == 0 {
             return Err(AppError {
                 status: StatusCode::UNPROCESSABLE_ENTITY,
@@ -427,7 +495,11 @@ pub async fn admin_set_user_active(
         }
     }
 
-    let updated = state.db.set_user_active(&user_id, body.active).await.map_err(AppError::internal)?;
+    let updated = state
+        .db
+        .set_user_active(&user_id, body.active)
+        .await
+        .map_err(AppError::internal)?;
     if !updated {
         return Err(AppError::not_found("user not found"));
     }
@@ -438,7 +510,11 @@ pub async fn admin_set_user_active(
 
     // If deactivating, revoke all their refresh tokens
     if !body.active {
-        state.db.revoke_user_refresh_tokens(&user_id).await.map_err(AppError::internal)?;
+        state
+            .db
+            .revoke_user_refresh_tokens(&user_id)
+            .await
+            .map_err(AppError::internal)?;
     }
 
     Ok(StatusCode::NO_CONTENT)

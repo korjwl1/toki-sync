@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use crate::auth::{BruteForceGuard, JwtManager};
 use crate::auth::oidc::{OidcDiscovery, OidcStateStore};
+use crate::auth::{BruteForceGuard, JwtManager};
 use crate::db::DatabaseRepo;
 
 use super::handlers::{admin, auth, dashboard, me, metrics, monitor, teams};
@@ -30,33 +30,51 @@ pub struct DynamicSettings {
 
 impl DynamicSettings {
     pub async fn registration_mode(&self) -> String {
-        self.db.get_server_setting("registration_mode").await
-            .ok().flatten()
+        self.db
+            .get_server_setting("registration_mode")
+            .await
+            .ok()
+            .flatten()
             .unwrap_or_else(|| self.config_registration_mode.clone())
     }
     pub async fn oidc_issuer(&self) -> String {
-        self.db.get_server_setting("oidc_issuer").await
-            .ok().flatten()
+        self.db
+            .get_server_setting("oidc_issuer")
+            .await
+            .ok()
+            .flatten()
             .unwrap_or_else(|| self.config_oidc_issuer.clone())
     }
     pub async fn oidc_client_id(&self) -> String {
-        self.db.get_server_setting("oidc_client_id").await
-            .ok().flatten()
+        self.db
+            .get_server_setting("oidc_client_id")
+            .await
+            .ok()
+            .flatten()
             .unwrap_or_else(|| self.config_oidc_client_id.clone())
     }
     pub async fn oidc_client_secret(&self) -> String {
-        self.db.get_server_setting("oidc_client_secret").await
-            .ok().flatten()
+        self.db
+            .get_server_setting("oidc_client_secret")
+            .await
+            .ok()
+            .flatten()
             .unwrap_or_else(|| self.config_oidc_client_secret.clone())
     }
     pub async fn oidc_redirect_uri(&self) -> String {
-        self.db.get_server_setting("oidc_redirect_uri").await
-            .ok().flatten()
+        self.db
+            .get_server_setting("oidc_redirect_uri")
+            .await
+            .ok()
+            .flatten()
             .unwrap_or_else(|| self.config_oidc_redirect_uri.clone())
     }
     pub async fn max_query_scope(&self) -> String {
-        self.db.get_server_setting("max_query_scope").await
-            .ok().flatten()
+        self.db
+            .get_server_setting("max_query_scope")
+            .await
+            .ok()
+            .flatten()
             .unwrap_or_else(|| self.config_max_query_scope.clone())
     }
 }
@@ -151,7 +169,10 @@ pub fn build_router(state: AppState) -> Router {
         // User self-service
         .route("/me/devices", get(me::me_devices))
         .route("/me/devices/{device_id}", delete(me::me_delete_device))
-        .route("/me/devices/{device_id}/name", axum::routing::patch(me::me_rename_device))
+        .route(
+            "/me/devices/{device_id}/name",
+            axum::routing::patch(me::me_rename_device),
+        )
         .route("/me/password", axum::routing::patch(me::me_change_password))
         .route("/me/teams", get(teams::me_teams))
         // Monitor settings sync: opt-in, user-scoped, opaque blobs. Separate
@@ -164,30 +185,65 @@ pub fn build_router(state: AppState) -> Router {
                 .put(monitor::me_monitor_put)
                 .delete(monitor::me_monitor_delete)
                 // Reject an oversized body before it is buffered, not after.
-                .layer(axum::extract::DefaultBodyLimit::max(monitor::MAX_REQUEST_BODY)),
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    monitor::MAX_REQUEST_BODY,
+                )),
         )
         // Admin
-        .route("/admin/users", get(admin::admin_list_users).post(admin::admin_create_user))
+        .route(
+            "/admin/users",
+            get(admin::admin_list_users).post(admin::admin_create_user),
+        )
         .route("/admin/users/{user_id}", delete(admin::admin_delete_user))
-        .route("/admin/users/{user_id}/password", axum::routing::patch(admin::admin_change_user_password))
-        .route("/admin/users/{user_id}/role", axum::routing::patch(admin::admin_change_user_role))
+        .route(
+            "/admin/users/{user_id}/password",
+            axum::routing::patch(admin::admin_change_user_password),
+        )
+        .route(
+            "/admin/users/{user_id}/role",
+            axum::routing::patch(admin::admin_change_user_role),
+        )
         .route("/admin/devices", get(admin::admin_list_devices))
-        .route("/admin/devices/{device_id}", delete(admin::admin_delete_device))
+        .route(
+            "/admin/devices/{device_id}",
+            delete(admin::admin_delete_device),
+        )
         // Admin: pending registrations
         .route("/admin/pending", get(admin::admin_list_pending))
-        .route("/admin/pending/{id}/approve", post(admin::admin_approve_pending))
-        .route("/admin/pending/{id}/reject", post(admin::admin_reject_pending))
+        .route(
+            "/admin/pending/{id}/approve",
+            post(admin::admin_approve_pending),
+        )
+        .route(
+            "/admin/pending/{id}/reject",
+            post(admin::admin_reject_pending),
+        )
         // Admin: server info & settings
         .route("/admin/server-info", get(admin::admin_server_info))
         .route("/admin/settings", get(admin::admin_list_settings))
-        .route("/admin/settings/{key}", axum::routing::put(admin::admin_update_setting))
+        .route(
+            "/admin/settings/{key}",
+            axum::routing::put(admin::admin_update_setting),
+        )
         // Admin: user active status
-        .route("/admin/users/{user_id}/active", axum::routing::patch(admin::admin_set_user_active))
+        .route(
+            "/admin/users/{user_id}/active",
+            axum::routing::patch(admin::admin_set_user_active),
+        )
         // Admin: teams
-        .route("/admin/teams", get(teams::admin_list_teams).post(teams::admin_create_team))
+        .route(
+            "/admin/teams",
+            get(teams::admin_list_teams).post(teams::admin_create_team),
+        )
         .route("/admin/teams/{team_id}", delete(teams::admin_delete_team))
-        .route("/admin/teams/{team_id}/members", get(teams::admin_list_team_members).post(teams::admin_add_team_member))
-        .route("/admin/teams/{team_id}/members/{user_id}", delete(teams::admin_remove_team_member))
+        .route(
+            "/admin/teams/{team_id}/members",
+            get(teams::admin_list_team_members).post(teams::admin_add_team_member),
+        )
+        .route(
+            "/admin/teams/{team_id}/members/{user_id}",
+            delete(teams::admin_remove_team_member),
+        )
         .with_state(state)
 }
 
@@ -201,7 +257,10 @@ pub fn validate_username(username: &str) -> Result<(), AppError> {
             message: "username must be 3-32 characters".into(),
         });
     }
-    if !username.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.') {
+    if !username
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.')
+    {
         return Err(AppError {
             status: StatusCode::UNPROCESSABLE_ENTITY,
             message: "username may only contain letters, digits, _, -, .".into(),
@@ -230,7 +289,8 @@ pub fn truncate_device_name(name: &str) -> &str {
 /// ignored entirely to prevent spoofing.
 pub fn extract_client_ip(headers: &HeaderMap, addr: &SocketAddr, trust_proxy: bool) -> String {
     if trust_proxy {
-        headers.get("x-forwarded-for")
+        headers
+            .get("x-forwarded-for")
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.rsplit(',').next())
             .map(|s| s.trim().to_string())
@@ -243,13 +303,17 @@ pub fn extract_client_ip(headers: &HeaderMap, addr: &SocketAddr, trust_proxy: bo
 // ─── JWT extraction helper ───────────────────────────────────────────────────
 
 /// Extract and verify the Bearer JWT from the Authorization header.
-pub fn extract_jwt(headers: &HeaderMap, jwt: &JwtManager) -> Result<crate::auth::jwt::Claims, AppError> {
+pub fn extract_jwt(
+    headers: &HeaderMap,
+    jwt: &JwtManager,
+) -> Result<crate::auth::jwt::Claims, AppError> {
     let auth = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| AppError::unauthorized("missing Authorization header"))?;
 
-    let token = auth.strip_prefix("Bearer ")
+    let token = auth
+        .strip_prefix("Bearer ")
         .ok_or_else(|| AppError::unauthorized("expected Bearer token"))?;
 
     jwt.verify_access(token)
@@ -293,9 +357,8 @@ impl ActiveCacheInner {
     /// Fresh (within TTL) cached value, if any.
     fn get_fresh(&self, user_id: &str) -> Option<bool> {
         let map = self.map.lock().unwrap();
-        map.get(user_id).and_then(|(active, at)| {
-            (at.elapsed() < ACTIVE_CACHE_TTL).then_some(*active)
-        })
+        map.get(user_id)
+            .and_then(|(active, at)| (at.elapsed() < ACTIVE_CACHE_TTL).then_some(*active))
     }
 
     fn generation(&self) -> u64 {
@@ -328,7 +391,8 @@ impl ActiveCacheInner {
     pub fn evict(&self, user_id: &str) {
         let mut map = self.map.lock().unwrap();
         map.remove(user_id);
-        self.generation.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
 
@@ -375,7 +439,10 @@ pub async fn ensure_user_active(state: &AppState, user_id: &str) -> Result<(), A
 
 /// Extract and verify the JWT, then confirm the account is still active.
 /// Use this for authenticated endpoints instead of bare `extract_jwt`.
-pub async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<crate::auth::jwt::Claims, AppError> {
+pub async fn authenticate(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<crate::auth::jwt::Claims, AppError> {
     let claims = extract_jwt(headers, &state.jwt)?;
     ensure_user_active(state, &claims.sub).await?;
     Ok(claims)
@@ -383,7 +450,11 @@ pub async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<crate
 
 pub async fn require_admin(headers: &HeaderMap, state: &AppState) -> Result<String, AppError> {
     let claims = authenticate(state, headers).await?;
-    let is_admin = state.db.user_is_admin(&claims.sub).await.map_err(AppError::internal)?;
+    let is_admin = state
+        .db
+        .user_is_admin(&claims.sub)
+        .await
+        .map_err(AppError::internal)?;
     if is_admin {
         Ok(claims.sub)
     } else {
@@ -402,23 +473,41 @@ pub struct AppError {
 impl AppError {
     pub fn internal(e: impl std::fmt::Display) -> Self {
         tracing::error!("internal error: {e}");
-        Self { status: StatusCode::INTERNAL_SERVER_ERROR, message: "internal server error".to_string() }
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: "internal server error".to_string(),
+        }
     }
     pub fn bad_gateway(e: impl std::fmt::Display) -> Self {
         tracing::error!("backend unavailable: {e}");
-        Self { status: StatusCode::BAD_GATEWAY, message: "metrics backend unavailable".to_string() }
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            message: "metrics backend unavailable".to_string(),
+        }
     }
     pub fn unauthorized(msg: &str) -> Self {
-        Self { status: StatusCode::UNAUTHORIZED, message: msg.to_string() }
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            message: msg.to_string(),
+        }
     }
     pub fn forbidden(msg: &str) -> Self {
-        Self { status: StatusCode::FORBIDDEN, message: msg.to_string() }
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: msg.to_string(),
+        }
     }
     pub fn not_found(msg: &str) -> Self {
-        Self { status: StatusCode::NOT_FOUND, message: msg.to_string() }
+        Self {
+            status: StatusCode::NOT_FOUND,
+            message: msg.to_string(),
+        }
     }
     pub fn conflict(msg: &str) -> Self {
-        Self { status: StatusCode::CONFLICT, message: msg.to_string() }
+        Self {
+            status: StatusCode::CONFLICT,
+            message: msg.to_string(),
+        }
     }
     pub fn locked_out(retry_after: u64) -> Self {
         Self {
@@ -430,27 +519,35 @@ impl AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        (self.status, Json(serde_json::json!({ "error": self.message }))).into_response()
+        (
+            self.status,
+            Json(serde_json::json!({ "error": self.message })),
+        )
+            .into_response()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::sqlite::SqliteRepo;
     use crate::db::models::NewUser;
+    use crate::db::sqlite::SqliteRepo;
     use tempfile::NamedTempFile;
 
     #[tokio::test]
     async fn test_is_user_active_cached() {
         let tmp = NamedTempFile::new().unwrap();
-        let db = SqliteRepo::open(tmp.path().to_str().unwrap()).await.unwrap();
+        let db = SqliteRepo::open(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
         db.create_user(&NewUser {
             id: "u1".into(),
             username: "u1".into(),
             password_hash: "h".into(),
             role: "user".into(),
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         let cache: ActiveCache = Arc::new(ActiveCacheInner::new());
 
@@ -486,7 +583,10 @@ mod tests {
         // Our in-flight read resolved active=true; try to cache it.
         cache.insert_if_current("u1", true, gen_before);
 
-        assert!(cache.get_fresh("u1").is_none(), "stale value must not be cached after an evict");
+        assert!(
+            cache.get_fresh("u1").is_none(),
+            "stale value must not be cached after an evict"
+        );
 
         // A read with the current generation caches normally.
         let gen_now = cache.generation();

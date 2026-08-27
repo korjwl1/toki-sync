@@ -12,8 +12,12 @@ use std::sync::Arc;
 
 use crate::auth::{BruteForceGuard, JwtManager};
 use crate::config::Config;
-use crate::db::{DatabaseRepo, open_database};
-use crate::server::{build_router, http::{AppState, DynamicSettings}, tcp::run_tcp_server};
+use crate::db::{open_database, DatabaseRepo};
+use crate::server::{
+    build_router,
+    http::{AppState, DynamicSettings},
+    tcp::run_tcp_server,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -29,8 +33,11 @@ async fn main() -> Result<()> {
     // Initialize tracing with config-driven level + format
     init_tracing(&config.log.level, config.log.json);
 
-    tracing::info!("toki-sync starting (http=:{}, tcp=:{})",
-        config.server.http_port, config.server.tcp_port);
+    tracing::info!(
+        "toki-sync starting (http=:{}, tcp=:{})",
+        config.server.http_port,
+        config.server.tcp_port
+    );
 
     if config.auth.jwt_secret == "change-me-in-production" {
         tracing::warn!("Using default JWT secret -- set JWT_SECRET env var for production!");
@@ -38,13 +45,19 @@ async fn main() -> Result<()> {
 
     let mode = config.auth.effective_registration_mode();
     if !["open", "approval", "closed"].contains(&mode) {
-        tracing::error!("Invalid registration_mode: '{}'. Must be 'open', 'approval', or 'closed'.", mode);
+        tracing::error!(
+            "Invalid registration_mode: '{}'. Must be 'open', 'approval', or 'closed'.",
+            mode
+        );
         std::process::exit(1);
     }
 
     let scope = config.features.max_query_scope.as_str();
     if !["self", "team", "all"].contains(&scope) {
-        tracing::error!("Invalid max_query_scope: '{}'. Must be 'self', 'team', or 'all'.", scope);
+        tracing::error!(
+            "Invalid max_query_scope: '{}'. Must be 'self', 'team', or 'all'.",
+            scope
+        );
         std::process::exit(1);
     }
 
@@ -57,21 +70,27 @@ async fn main() -> Result<()> {
     ensure_admin(&*db).await?;
 
     // Cleanup expired/revoked refresh tokens
-    let cleaned = db.cleanup_expired_tokens().await
+    let cleaned = db
+        .cleanup_expired_tokens()
+        .await
         .context("failed to cleanup expired tokens")?;
     if cleaned > 0 {
         tracing::info!("cleaned up {cleaned} expired/revoked refresh tokens");
     }
 
     // Cleanup old pending registrations (older than 7 days)
-    let cleaned_pending = db.cleanup_old_pending_registrations(7 * 86400).await
+    let cleaned_pending = db
+        .cleanup_old_pending_registrations(7 * 86400)
+        .await
         .context("failed to cleanup old pending registrations")?;
     if cleaned_pending > 0 {
         tracing::info!("cleaned up {cleaned_pending} old pending registrations");
     }
 
     // Cleanup expired device codes
-    let cleaned_dc = db.cleanup_expired_device_codes().await
+    let cleaned_dc = db
+        .cleanup_expired_device_codes()
+        .await
         .context("failed to cleanup expired device codes")?;
     if cleaned_dc > 0 {
         tracing::info!("cleaned up {cleaned_dc} expired device codes");
@@ -99,17 +118,28 @@ async fn main() -> Result<()> {
             if config.events.clickhouse_url.is_empty() {
                 anyhow::bail!("events.backend=clickhouse but events.clickhouse_url is empty");
             }
-            Arc::new(crate::events::clickhouse::ClickHouseEventStore::new(&config.events.clickhouse_url)
-                .context("failed to initialize ClickHouse event store")?)
+            Arc::new(
+                crate::events::clickhouse::ClickHouseEventStore::new(&config.events.clickhouse_url)
+                    .context("failed to initialize ClickHouse event store")?,
+            )
         }
         _ => {
             let path = std::path::Path::new(&config.events.fjall_path);
-            Arc::new(crate::events::fjall_store::FjallEventStore::open(path)
-                .context("failed to open Fjall event store")?)
+            Arc::new(
+                crate::events::fjall_store::FjallEventStore::open(path)
+                    .context("failed to open Fjall event store")?,
+            )
         }
     };
-    tracing::info!("Event store: {} ({})", config.events.backend,
-        if config.events.backend == "fjall" { &config.events.fjall_path } else { &config.events.clickhouse_url });
+    tracing::info!(
+        "Event store: {} ({})",
+        config.events.backend,
+        if config.events.backend == "fjall" {
+            &config.events.fjall_path
+        } else {
+            &config.events.clickhouse_url
+        }
+    );
 
     let oidc_state_store = Arc::new(crate::auth::oidc::OidcStateStore::new(600)); // 10 min TTL
 
@@ -151,7 +181,10 @@ async fn main() -> Result<()> {
         Arc::new(crate::server::http::ActiveCacheInner::new());
 
     let state = AppState {
-        db, jwt, brute, events: event_store.clone(),
+        db,
+        jwt,
+        brute,
+        events: event_store.clone(),
         access_token_ttl_secs: config.auth.access_token_ttl_secs,
         oidc_state_store,
         oidc_discovery_cache: Arc::new(tokio::sync::RwLock::new(None)),
@@ -177,9 +210,9 @@ async fn main() -> Result<()> {
             loop {
                 interval.tick().await;
                 let cache_path = crate::pricing::default_cache_path();
-                let new_pricing = tokio::task::spawn_blocking(move || {
-                    crate::pricing::fetch_pricing(&cache_path)
-                }).await;
+                let new_pricing =
+                    tokio::task::spawn_blocking(move || crate::pricing::fetch_pricing(&cache_path))
+                        .await;
                 match new_pricing {
                     Ok(p) if !p.is_empty() => {
                         *pricing.write().await = p;
@@ -205,20 +238,27 @@ async fn main() -> Result<()> {
                 let cutoff_ms = (std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0)) - 730 * 86_400_000;
+                    .unwrap_or(0))
+                    - 730 * 86_400_000;
                 match events.cleanup_old_windows(cutoff_ms).await {
                     Ok(n) if n > 0 => tracing::info!("windows retention: {n} rows removed"),
                     Ok(_) => {}
                     Err(e) => tracing::warn!("windows retention failed: {e}"),
                 }
                 if let Ok(n) = db.cleanup_expired_tokens().await {
-                    if n > 0 { tracing::info!("periodic cleanup: {n} expired/revoked refresh tokens"); }
+                    if n > 0 {
+                        tracing::info!("periodic cleanup: {n} expired/revoked refresh tokens");
+                    }
                 }
                 if let Ok(n) = db.cleanup_expired_device_codes().await {
-                    if n > 0 { tracing::info!("periodic cleanup: {n} expired device codes"); }
+                    if n > 0 {
+                        tracing::info!("periodic cleanup: {n} expired device codes");
+                    }
                 }
                 if let Ok(n) = db.cleanup_old_pending_registrations(7 * 86400).await {
-                    if n > 0 { tracing::info!("periodic cleanup: {n} old pending registrations"); }
+                    if n > 0 {
+                        tracing::info!("periodic cleanup: {n} old pending registrations");
+                    }
                 }
             }
         });
@@ -230,7 +270,7 @@ async fn main() -> Result<()> {
         .context("invalid TCP bind address")?;
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let tcp_db  = state.db.clone();
+    let tcp_db = state.db.clone();
     let tcp_jwt = state.jwt.clone();
     let tcp_events = event_store.clone();
     let max_concurrent_writes = config.server.max_concurrent_writes;
@@ -238,7 +278,18 @@ async fn main() -> Result<()> {
     let tcp_active_cache = active_cache.clone();
 
     tokio::spawn(async move {
-        if let Err(e) = run_tcp_server(tcp_db, tcp_jwt, tcp_events, tcp_addr, max_concurrent_writes, dedup_retention_secs, tcp_active_cache, shutdown_rx).await {
+        if let Err(e) = run_tcp_server(
+            tcp_db,
+            tcp_jwt,
+            tcp_events,
+            tcp_addr,
+            max_concurrent_writes,
+            dedup_retention_secs,
+            tcp_active_cache,
+            shutdown_rx,
+        )
+        .await
+        {
             tracing::error!("TCP server error: {e}");
         }
     });
@@ -252,7 +303,8 @@ async fn main() -> Result<()> {
 
     tracing::info!("HTTP server listening on {http_addr}");
 
-    let listener = tokio::net::TcpListener::bind(http_addr).await
+    let listener = tokio::net::TcpListener::bind(http_addr)
+        .await
         .with_context(|| format!("failed to bind to {http_addr}"))?;
 
     axum::serve(listener, router)
@@ -270,18 +322,16 @@ async fn main() -> Result<()> {
 fn init_tracing(level: &str, json: bool) {
     use tracing_subscriber::{fmt, EnvFilter};
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(level));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
 
     if json {
-        fmt().json()
+        fmt()
+            .json()
             .with_env_filter(filter)
             .with_current_span(false)
             .init();
     } else {
-        fmt()
-            .with_env_filter(filter)
-            .init();
+        fmt().with_env_filter(filter).init();
     }
 }
 
@@ -294,7 +344,9 @@ async fn ensure_admin(db: &dyn DatabaseRepo) -> Result<()> {
         }
     };
 
-    let existing = db.get_user_by_username("admin").await
+    let existing = db
+        .get_user_by_username("admin")
+        .await
         .context("failed to check admin existence")?;
 
     if existing.is_some() {
@@ -303,12 +355,11 @@ async fn ensure_admin(db: &dyn DatabaseRepo) -> Result<()> {
     }
 
     // Hash password in threadpool (bcrypt is CPU-intensive)
-    let hash = tokio::task::spawn_blocking(move || {
-        bcrypt::hash(&admin_password, bcrypt::DEFAULT_COST)
-    })
-    .await
-    .context("bcrypt task panicked")?
-    .context("bcrypt hashing failed")?;
+    let hash =
+        tokio::task::spawn_blocking(move || bcrypt::hash(&admin_password, bcrypt::DEFAULT_COST))
+            .await
+            .context("bcrypt task panicked")?
+            .context("bcrypt hashing failed")?;
 
     let new_user = db::models::NewUser {
         id: uuid::Uuid::new_v4().to_string(),
@@ -316,7 +367,8 @@ async fn ensure_admin(db: &dyn DatabaseRepo) -> Result<()> {
         password_hash: hash,
         role: "admin".to_string(),
     };
-    db.create_user(&new_user).await
+    db.create_user(&new_user)
+        .await
         .context("failed to create admin user")?;
 
     tracing::info!("admin account created");
@@ -326,7 +378,9 @@ async fn ensure_admin(db: &dyn DatabaseRepo) -> Result<()> {
 async fn shutdown_signal() {
     use tokio::signal;
     let ctrl_c = async {
-        signal::ctrl_c().await.expect("failed to install Ctrl+C handler");
+        signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
     };
 
     #[cfg(unix)]

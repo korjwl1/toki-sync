@@ -122,8 +122,12 @@ impl OidcStateStore {
 
 /// Fetch the OIDC discovery document from the issuer's well-known endpoint.
 pub async fn discover(issuer: &str, client: &reqwest::Client) -> Result<OidcDiscovery> {
-    let url = format!("{}/.well-known/openid-configuration", issuer.trim_end_matches('/'));
-    let resp = client.get(&url)
+    let url = format!(
+        "{}/.well-known/openid-configuration",
+        issuer.trim_end_matches('/')
+    );
+    let resp = client
+        .get(&url)
         .timeout(Duration::from_secs(10))
         .send()
         .await
@@ -133,14 +137,17 @@ pub async fn discover(issuer: &str, client: &reqwest::Client) -> Result<OidcDisc
         return Err(anyhow!("OIDC discovery returned status {}", resp.status()));
     }
 
-    let discovery: OidcDiscovery = resp.json().await
+    let discovery: OidcDiscovery = resp
+        .json()
+        .await
         .context("failed to parse OIDC discovery document")?;
     Ok(discovery)
 }
 
 /// Fetch the JWKS (JSON Web Key Set) from the provider's jwks_uri.
 pub async fn fetch_jwks(jwks_uri: &str, client: &reqwest::Client) -> Result<Vec<JwkKey>> {
-    let resp = client.get(jwks_uri)
+    let resp = client
+        .get(jwks_uri)
         .timeout(Duration::from_secs(10))
         .send()
         .await
@@ -150,8 +157,7 @@ pub async fn fetch_jwks(jwks_uri: &str, client: &reqwest::Client) -> Result<Vec<
         return Err(anyhow!("JWKS endpoint returned status {}", resp.status()));
     }
 
-    let jwks: JwksResponse = resp.json().await
-        .context("failed to parse JWKS response")?;
+    let jwks: JwksResponse = resp.json().await.context("failed to parse JWKS response")?;
     Ok(jwks.keys)
 }
 
@@ -183,7 +189,8 @@ pub async fn exchange_code(
     code: &str,
     client: &reqwest::Client,
 ) -> Result<TokenResponse> {
-    let resp = client.post(&discovery.token_endpoint)
+    let resp = client
+        .post(&discovery.token_endpoint)
         .timeout(Duration::from_secs(10))
         .form(&[
             ("grant_type", "authorization_code"),
@@ -202,7 +209,9 @@ pub async fn exchange_code(
         return Err(anyhow!("OIDC token exchange failed ({}): {}", status, body));
     }
 
-    let token_resp: TokenResponse = resp.json().await
+    let token_resp: TokenResponse = resp
+        .json()
+        .await
         .context("failed to parse OIDC token response")?;
     Ok(token_resp)
 }
@@ -238,7 +247,9 @@ pub async fn extract_user_info(
                 client_id,
                 expected_nonce,
                 client,
-            ).await {
+            )
+            .await
+            {
                 Ok(info) => return Ok(info),
                 Err(e) => {
                     tracing::warn!("JWKS verification failed, falling back to userinfo: {e}");
@@ -259,7 +270,12 @@ pub async fn extract_user_info(
 
     // Fall back to userinfo endpoint
     if !discovery.userinfo_endpoint.is_empty() {
-        return fetch_userinfo(&token_resp.access_token, &discovery.userinfo_endpoint, client).await;
+        return fetch_userinfo(
+            &token_resp.access_token,
+            &discovery.userinfo_endpoint,
+            client,
+        )
+        .await;
     }
 
     Err(anyhow!("no id_token and no userinfo endpoint available"))
@@ -277,28 +293,36 @@ async fn verify_id_token_with_jwks(
     use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 
     // Decode the JWT header to get the kid and algorithm
-    let header = decode_header(id_token)
-        .context("failed to decode id_token JWT header")?;
+    let header = decode_header(id_token).context("failed to decode id_token JWT header")?;
 
-    let kid = header.kid
+    let kid = header
+        .kid
         .ok_or_else(|| anyhow!("id_token JWT header missing kid"))?;
 
     // Fetch JWKS
     let keys = fetch_jwks(jwks_uri, http_client).await?;
 
     // Find the matching key
-    let jwk = keys.iter()
+    let jwk = keys
+        .iter()
         .find(|k| k.kid.as_deref() == Some(&kid))
         .ok_or_else(|| anyhow!("no matching key found in JWKS for kid={kid}"))?;
 
     // Only RSA keys are supported for now
     if jwk.kty != "RSA" {
-        return Err(anyhow!("unsupported key type: {} (only RSA supported)", jwk.kty));
+        return Err(anyhow!(
+            "unsupported key type: {} (only RSA supported)",
+            jwk.kty
+        ));
     }
 
-    let n = jwk.n.as_deref()
+    let n = jwk
+        .n
+        .as_deref()
         .ok_or_else(|| anyhow!("JWKS key missing 'n' component"))?;
-    let e = jwk.e.as_deref()
+    let e = jwk
+        .e
+        .as_deref()
         .ok_or_else(|| anyhow!("JWKS key missing 'e' component"))?;
 
     let decoding_key = DecodingKey::from_rsa_components(n, e)
@@ -327,10 +351,12 @@ async fn verify_id_token_with_jwks(
     // Validate nonce if expected
     if let Some(expected) = expected_nonce {
         match &claims.nonce {
-            Some(token_nonce) if token_nonce == expected => {},
+            Some(token_nonce) if token_nonce == expected => {}
             Some(token_nonce) => {
-                return Err(anyhow!("nonce mismatch: expected {expected}, got {token_nonce}"));
-            },
+                return Err(anyhow!(
+                    "nonce mismatch: expected {expected}, got {token_nonce}"
+                ));
+            }
             None => {
                 return Err(anyhow!("id_token missing nonce claim"));
             }
@@ -425,8 +451,8 @@ fn parse_id_token_claims(id_token: &str) -> Result<OidcUserInfo> {
     // Decode the payload (second part), using URL-safe base64 without padding
     use base64_decode::decode_url_safe;
     let payload_bytes = decode_url_safe(parts[1])?;
-    let claims: IdTokenClaims = serde_json::from_slice(&payload_bytes)
-        .context("failed to parse id_token claims")?;
+    let claims: IdTokenClaims =
+        serde_json::from_slice(&payload_bytes).context("failed to parse id_token claims")?;
 
     Ok(OidcUserInfo {
         sub: claims.sub,
@@ -436,8 +462,13 @@ fn parse_id_token_claims(id_token: &str) -> Result<OidcUserInfo> {
 }
 
 /// Fetch user info from the OIDC provider's userinfo endpoint.
-async fn fetch_userinfo(access_token: &str, userinfo_endpoint: &str, client: &reqwest::Client) -> Result<OidcUserInfo> {
-    let resp = client.get(userinfo_endpoint)
+async fn fetch_userinfo(
+    access_token: &str,
+    userinfo_endpoint: &str,
+    client: &reqwest::Client,
+) -> Result<OidcUserInfo> {
+    let resp = client
+        .get(userinfo_endpoint)
         .timeout(Duration::from_secs(10))
         .bearer_auth(access_token)
         .send()
@@ -445,10 +476,15 @@ async fn fetch_userinfo(access_token: &str, userinfo_endpoint: &str, client: &re
         .context("userinfo request failed")?;
 
     if !resp.status().is_success() {
-        return Err(anyhow!("userinfo endpoint returned status {}", resp.status()));
+        return Err(anyhow!(
+            "userinfo endpoint returned status {}",
+            resp.status()
+        ));
     }
 
-    let info: UserinfoResponse = resp.json().await
+    let info: UserinfoResponse = resp
+        .json()
+        .await
         .context("failed to parse userinfo response")?;
 
     Ok(OidcUserInfo {
@@ -461,7 +497,7 @@ async fn fetch_userinfo(access_token: &str, userinfo_endpoint: &str, client: &re
 /// Base64 URL-safe decoder using the `base64` crate.
 mod base64_decode {
     use anyhow::{Context, Result};
-    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 
     pub fn decode_url_safe(input: &str) -> Result<Vec<u8>> {
         URL_SAFE_NO_PAD

@@ -112,10 +112,11 @@ fn parse_litellm_json(json_str: &str) -> HashMap<String, ModelPricing> {
     let mut prices = HashMap::with_capacity(raw.len());
 
     for (key, entry) in &raw {
-        let (input_cost, output_cost) = match (entry.input_cost_per_token, entry.output_cost_per_token) {
-            (Some(i), Some(o)) if i > 0.0 || o > 0.0 => (i, o),
-            _ => continue,
-        };
+        let (input_cost, output_cost) =
+            match (entry.input_cost_per_token, entry.output_cost_per_token) {
+                (Some(i), Some(o)) if i > 0.0 || o > 0.0 => (i, o),
+                _ => continue,
+            };
 
         let pricing = ModelPricing {
             input_cost_per_token: input_cost,
@@ -200,13 +201,16 @@ fn save_cache(path: &Path, cache: &PricingCache) {
 pub fn fetch_pricing(cache_path: &Path) -> PricingTable {
     let cached = load_cache(cache_path);
 
-    let cache_valid = cached.as_ref().map_or(false, |c| c.version == PRICING_CACHE_VERSION);
+    let cache_valid = cached
+        .as_ref()
+        .is_some_and(|c| c.version == PRICING_CACHE_VERSION);
 
     // Invalidate etag if cache file is older than 24 hours.
     // LiteLLM's CDN sometimes returns the same etag even when prices change.
-    let cache_age_ok = cache_path.metadata()
+    let cache_age_ok = cache_path
+        .metadata()
         .and_then(|m| m.modified())
-        .map(|t| t.elapsed().map_or(false, |age| age.as_secs() < 86400))
+        .map(|t| t.elapsed().is_ok_and(|age| age.as_secs() < 86400))
         .unwrap_or(false);
 
     let cached_etag = if cache_valid && cache_age_ok {
@@ -223,7 +227,8 @@ pub fn fetch_pricing(cache_path: &Path) -> PricingTable {
     match req.call() {
         Ok(resp) => {
             if resp.status() == 304 {
-                return cached.map(|c| PricingTable::new(c.prices))
+                return cached
+                    .map(|c| PricingTable::new(c.prices))
                     .unwrap_or_else(|| PricingTable::new(HashMap::new()));
             }
 
@@ -242,7 +247,14 @@ pub fn fetch_pricing(cache_path: &Path) -> PricingTable {
                 return fallback(cached);
             }
 
-            save_cache(cache_path, &PricingCache { etag: new_etag, version: PRICING_CACHE_VERSION, prices: prices.clone() });
+            save_cache(
+                cache_path,
+                &PricingCache {
+                    etag: new_etag,
+                    version: PRICING_CACHE_VERSION,
+                    prices: prices.clone(),
+                },
+            );
             PricingTable::new(prices)
         }
         Err(ureq::Error::Status(304, _)) => fallback(cached),
@@ -303,15 +315,21 @@ mod tests {
     #[test]
     fn test_cost_calculation() {
         let mut prices = HashMap::new();
-        prices.insert("claude-sonnet-4-20250514".to_string(), ModelPricing {
-            input_cost_per_token: 0.000003,
-            output_cost_per_token: 0.000015,
-            cache_creation_input_token_cost: Some(0.00000375),
-            cache_read_input_token_cost: Some(0.0000003),
-        });
+        prices.insert(
+            "claude-sonnet-4-20250514".to_string(),
+            ModelPricing {
+                input_cost_per_token: 0.000003,
+                output_cost_per_token: 0.000015,
+                cache_creation_input_token_cost: Some(0.00000375),
+                cache_read_input_token_cost: Some(0.0000003),
+            },
+        );
         let table = PricingTable::new(prices);
 
-        let cost = table.get("claude-sonnet-4-20250514").unwrap().cost(1000, 500, 200, 3000);
+        let cost = table
+            .get("claude-sonnet-4-20250514")
+            .unwrap()
+            .cost(1000, 500, 200, 3000);
         assert!((cost - 0.01215).abs() < 1e-10);
     }
 

@@ -1,10 +1,10 @@
 pub mod models;
-pub mod sqlite;
 pub mod postgres;
+pub mod sqlite;
 
-use std::sync::Arc;
 use anyhow::Result;
 use models::*;
+use std::sync::Arc;
 
 use crate::config::StorageConfig;
 
@@ -21,8 +21,18 @@ pub trait DatabaseRepo: Send + Sync {
     async fn user_is_admin(&self, user_id: &str) -> Result<bool>;
 
     // Devices
-    async fn find_device_by_key_and_user(&self, device_key: &str, user_id: &str) -> Result<Option<String>>;
-    async fn create_device(&self, id: &str, user_id: &str, name: &str, device_key: &str) -> Result<()>;
+    async fn find_device_by_key_and_user(
+        &self,
+        device_key: &str,
+        user_id: &str,
+    ) -> Result<Option<String>>;
+    async fn create_device(
+        &self,
+        id: &str,
+        user_id: &str,
+        name: &str,
+        device_key: &str,
+    ) -> Result<()>;
     async fn update_device_seen(&self, id: &str, name: &str) -> Result<()>;
     async fn list_user_devices(&self, user_id: &str) -> Result<Vec<DeviceSummary>>;
     async fn list_all_devices(&self) -> Result<Vec<DeviceAdminSummary>>;
@@ -53,7 +63,12 @@ pub trait DatabaseRepo: Send + Sync {
     async fn get_team_member_role(&self, team_id: &str, user_id: &str) -> Result<Option<String>>;
 
     // Pending registrations
-    async fn create_pending_registration(&self, id: &str, username: &str, password_hash: &str) -> Result<()>;
+    async fn create_pending_registration(
+        &self,
+        id: &str,
+        username: &str,
+        password_hash: &str,
+    ) -> Result<()>;
     async fn list_pending_registrations(&self) -> Result<Vec<PendingRegistration>>;
     async fn approve_registration(&self, id: &str) -> Result<bool>;
     async fn reject_registration(&self, id: &str) -> Result<bool>;
@@ -67,17 +82,41 @@ pub trait DatabaseRepo: Send + Sync {
     async fn create_oidc_user(&self, user: &NewOidcUser) -> Result<()>;
 
     // Refresh tokens
-    async fn store_refresh_token(&self, jti: &str, user_id: &str, device_id: Option<&str>, expires_at: i64) -> Result<()>;
+    async fn store_refresh_token(
+        &self,
+        jti: &str,
+        user_id: &str,
+        device_id: Option<&str>,
+        expires_at: i64,
+    ) -> Result<()>;
     async fn is_refresh_token_revoked(&self, jti: &str) -> Result<bool>;
     async fn revoke_refresh_token(&self, jti: &str) -> Result<()>;
     async fn revoke_user_refresh_tokens(&self, user_id: &str) -> Result<()>;
-    async fn rotate_refresh_token(&self, old_jti: &str, new_jti: &str, user_id: &str, device_id: Option<&str>, expires_at: i64) -> Result<()>;
+    async fn rotate_refresh_token(
+        &self,
+        old_jti: &str,
+        new_jti: &str,
+        user_id: &str,
+        device_id: Option<&str>,
+        expires_at: i64,
+    ) -> Result<()>;
 
     // Device codes (OAuth 2.0 Device Authorization Grant)
-    async fn create_device_code(&self, device_code: &str, user_code: &str, expires_at: i64) -> Result<()>;
+    async fn create_device_code(
+        &self,
+        device_code: &str,
+        user_code: &str,
+        expires_at: i64,
+    ) -> Result<()>;
     async fn get_device_code(&self, device_code: &str) -> Result<Option<DeviceCode>>;
     async fn get_device_code_by_user_code(&self, user_code: &str) -> Result<Option<DeviceCode>>;
-    async fn approve_device_code(&self, user_code: &str, user_id: &str, access_token: &str, refresh_token: &str) -> Result<bool>;
+    async fn approve_device_code(
+        &self,
+        user_code: &str,
+        user_id: &str,
+        access_token: &str,
+        refresh_token: &str,
+    ) -> Result<bool>;
     async fn delete_device_code(&self, device_code: &str) -> Result<()>;
     async fn cleanup_expired_device_codes(&self) -> Result<u64>;
 
@@ -89,7 +128,8 @@ pub trait DatabaseRepo: Send + Sync {
     // Monitor settings (opt-in monitor config / dashboard channel)
     async fn list_monitor_settings(&self, user_id: &str) -> Result<Vec<MonitorSetting>>;
     async fn list_monitor_setting_index(&self, user_id: &str) -> Result<Vec<MonitorSettingMeta>>;
-    async fn get_monitor_setting(&self, user_id: &str, key: &str) -> Result<Option<MonitorSetting>>;
+    async fn get_monitor_setting(&self, user_id: &str, key: &str)
+        -> Result<Option<MonitorSetting>>;
     async fn monitor_settings_usage(&self, user_id: &str) -> Result<MonitorUsage>;
     /// Upsert one entry. The CAS (`if_version`) and the quota check both happen
     /// inside the write transaction; see [`MonitorWriteOutcome`] for what the
@@ -138,7 +178,9 @@ pub(crate) fn resolve_seed_admin_password() -> (String, bool) {
     'outer: loop {
         for b in uuid::Uuid::new_v4().into_bytes() {
             pw.push(ADMIN_PW_CHARS[b as usize % ADMIN_PW_CHARS.len()] as char);
-            if pw.len() == 16 { break 'outer; }
+            if pw.len() == 16 {
+                break 'outer;
+            }
         }
     }
     (pw, true)

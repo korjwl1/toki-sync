@@ -1,5 +1,5 @@
-use anyhow::{Context, Result};
 use super::{EventStore, ServerEvent, UserFilter};
+use anyhow::{Context, Result};
 
 /// ClickHouse-backed event store.
 ///
@@ -17,7 +17,9 @@ pub struct ClickHouseEventStore {
     /// DEPLOYMENT LIMIT: process-local — the documented toki-sync topology is
     /// a single instance. Running replicas against one ClickHouse would need
     /// distributed coordination (or an append+aggregate table design).
-    windows_locks: tokio::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+    windows_locks: tokio::sync::Mutex<
+        std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>,
+    >,
 }
 
 /// Shared by table creation and the one-time `updated_at` migration, which
@@ -106,7 +108,8 @@ impl ClickHouseEventStore {
         // so the survivor is always the merged state. A concurrent upsert can
         // transiently lose one side's contribution — clients resend their full
         // recent set, so the merge converges on the next cycle.
-        self.execute(WINDOWS_DDL).context("create toki_windows table")?;
+        self.execute(WINDOWS_DDL)
+            .context("create toki_windows table")?;
         self.migrate_windows_table()?;
         Ok(())
     }
@@ -177,7 +180,10 @@ impl ClickHouseEventStore {
         // all. A crash before this point simply re-runs the whole migration on
         // restart (the detection query still sees no `updated_at`), so the
         // sequence is idempotent.
-        if self.execute("EXCHANGE TABLES toki_windows AND toki_windows_v2").is_err() {
+        if self
+            .execute("EXCHANGE TABLES toki_windows AND toki_windows_v2")
+            .is_err()
+        {
             tracing::warn!("EXCHANGE TABLES unavailable; falling back to RENAME");
             self.execute("RENAME TABLE toki_windows TO toki_windows_old")
                 .context("rename old toki_windows")?;
@@ -225,7 +231,9 @@ impl ClickHouseEventStore {
 
     fn window_from_row(cols: &[&str]) -> Option<(String, toki_sync_protocol::WireWindow)> {
         // TSV column order matches the SELECT in query_user_windows.
-        if cols.len() < 21 { return None; }
+        if cols.len() < 21 {
+            return None;
+        }
         Some((
             Self::tsv_unescape(cols[1]),
             toki_sync_protocol::WireWindow {
@@ -259,7 +267,9 @@ impl ClickHouseEventStore {
          sampled_active_fraction, n_samples, plan";
 
     fn execute(&self, query: &str) -> Result<String> {
-        let resp = self.client.post(&self.url)
+        let resp = self
+            .client
+            .post(&self.url)
             .set("Content-Type", "text/plain")
             .send_string(query)
             .map_err(|e| anyhow::anyhow!("ClickHouse query failed: {e}"))?;
@@ -269,11 +279,11 @@ impl ClickHouseEventStore {
 
     fn escape(s: &str) -> String {
         s.replace('\\', "\\\\")
-         .replace('\'', "\\'")
-         .replace('\0', "")
-         .replace('\n', "\\n")
-         .replace('\r', "\\r")
-         .replace('\t', "\\t")
+            .replace('\'', "\\'")
+            .replace('\0', "")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+            .replace('\t', "\\t")
     }
 }
 
@@ -299,7 +309,8 @@ impl ClickHouseEventStore {
         let client = self.client.clone();
         let url = self.url.clone();
         let body = tokio::task::spawn_blocking(move || -> Result<String> {
-            let resp = client.post(&url)
+            let resp = client
+                .post(&url)
                 .set("Content-Type", "text/plain")
                 .send_string(&sql)
                 .map_err(|e| anyhow::anyhow!("ClickHouse windows SELECT failed: {e}"))?;
@@ -322,7 +333,9 @@ impl ClickHouseEventStore {
 #[async_trait::async_trait]
 impl EventStore for ClickHouseEventStore {
     async fn upsert_events(&self, events: &[ServerEvent]) -> Result<()> {
-        if events.is_empty() { return Ok(()); }
+        if events.is_empty() {
+            return Ok(());
+        }
 
         // Build INSERT with VALUES — ClickHouse ReplacingMergeTree handles dedup
         let mut sql = String::from(
@@ -331,7 +344,9 @@ impl EventStore for ClickHouseEventStore {
         );
 
         for (i, e) in events.iter().enumerate() {
-            if i > 0 { sql.push(','); }
+            if i > 0 {
+                sql.push(',');
+            }
             sql.push_str(&format!(
                 "('{}','{}','{}',{},'{}','{}','{}','{}',{},{},{},{},{})",
                 Self::escape(&e.device_id),
@@ -354,7 +369,8 @@ impl EventStore for ClickHouseEventStore {
         let client = self.client.clone();
 
         tokio::task::spawn_blocking(move || {
-            client.post(&client_url)
+            client
+                .post(&client_url)
                 .set("Content-Type", "text/plain")
                 .send_string(&sql)
                 .map_err(|e| anyhow::anyhow!("ClickHouse INSERT failed: {e}"))?;
@@ -374,7 +390,10 @@ impl EventStore for ClickHouseEventStore {
         let user_clause = match &filter {
             UserFilter::Single(uid) => format!("AND user_id = '{}'", Self::escape(uid)),
             UserFilter::Multiple(uids) => {
-                let list: Vec<String> = uids.iter().map(|u| format!("'{}'", Self::escape(u))).collect();
+                let list: Vec<String> = uids
+                    .iter()
+                    .map(|u| format!("'{}'", Self::escape(u)))
+                    .collect();
                 format!("AND user_id IN ({})", list.join(","))
             }
             UserFilter::All => String::new(),
@@ -394,7 +413,8 @@ impl EventStore for ClickHouseEventStore {
         let client = self.client.clone();
 
         tokio::task::spawn_blocking(move || {
-            let resp = client.post(&url)
+            let resp = client
+                .post(&url)
                 .set("Content-Type", "text/plain")
                 .send_string(&sql)
                 .map_err(|e| anyhow::anyhow!("ClickHouse SELECT failed: {e}"))?;
@@ -402,9 +422,12 @@ impl EventStore for ClickHouseEventStore {
 
             let mut events = Vec::new();
             for line in body.lines() {
-                if line.is_empty() { continue; }
-                let e: ServerEvent = serde_json::from_str(line)
-                    .with_context(|| format!("parse ClickHouse row: {}", &line[..line.len().min(100)]))?;
+                if line.is_empty() {
+                    continue;
+                }
+                let e: ServerEvent = serde_json::from_str(line).with_context(|| {
+                    format!("parse ClickHouse row: {}", &line[..line.len().min(100)])
+                })?;
                 events.push(e);
             }
             Ok(events)
@@ -420,7 +443,10 @@ impl EventStore for ClickHouseEventStore {
 
     async fn delete_device_events(&self, device_id: &str) -> Result<()> {
         // Validate device_id format (UUID) to prevent SQL injection
-        if !device_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        if !device_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        {
             anyhow::bail!("invalid device_id format: {}", device_id);
         }
         let sql = format!(
@@ -432,7 +458,8 @@ impl EventStore for ClickHouseEventStore {
         let client = self.client.clone();
 
         tokio::task::spawn_blocking(move || {
-            client.post(&url)
+            client
+                .post(&url)
                 .set("Content-Type", "text/plain")
                 .send_string(&sql)
                 .map_err(|e| anyhow::anyhow!("ClickHouse DELETE failed: {e}"))?;
@@ -448,7 +475,9 @@ impl EventStore for ClickHouseEventStore {
         provider: &str,
         items: &[toki_sync_protocol::WireWindow],
     ) -> Result<usize> {
-        if items.is_empty() { return Ok(0); }
+        if items.is_empty() {
+            return Ok(0);
+        }
 
         // Serialize read-merge-write per user: two devices of one user
         // upserting concurrently could otherwise transiently lose one side's
@@ -478,16 +507,31 @@ impl EventStore for ClickHouseEventStore {
         let existing = self
             .query_user_windows_filtered(user_id, Some(provider), since)
             .await?;
-        let mut by_key: std::collections::HashMap<(u8, &str, &str, i64), &toki_sync_protocol::WireWindow> =
-            std::collections::HashMap::with_capacity(existing.len());
+        let mut by_key: std::collections::HashMap<
+            (u8, &str, &str, i64),
+            &toki_sync_protocol::WireWindow,
+        > = std::collections::HashMap::with_capacity(existing.len());
         for (p, e) in &existing {
             if p == provider {
-                by_key.insert((e.window_kind, e.limit_id.as_str(), e.account.as_str(), e.window_end_ms), e);
+                by_key.insert(
+                    (
+                        e.window_kind,
+                        e.limit_id.as_str(),
+                        e.account.as_str(),
+                        e.window_end_ms,
+                    ),
+                    e,
+                );
             }
         }
         let mut merged: Vec<toki_sync_protocol::WireWindow> = Vec::with_capacity(items.len());
         for w in items {
-            match by_key.get(&(w.window_kind, w.limit_id.as_str(), w.account.as_str(), w.window_end_ms)) {
+            match by_key.get(&(
+                w.window_kind,
+                w.limit_id.as_str(),
+                w.account.as_str(),
+                w.window_end_ms,
+            )) {
                 Some(prev) => {
                     let mut base = (*prev).clone();
                     super::merge_wire_windows(&mut base, w);
@@ -503,15 +547,22 @@ impl EventStore for ClickHouseEventStore {
                 None => merged.push(w.clone()),
             }
         }
-        if merged.is_empty() { return Ok(0); }
+        if merged.is_empty() {
+            return Ok(0);
+        }
 
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let mut sql = format!("INSERT INTO toki_windows ({}, updated_at) VALUES ", Self::WINDOW_COLS);
+        let mut sql = format!(
+            "INSERT INTO toki_windows ({}, updated_at) VALUES ",
+            Self::WINDOW_COLS
+        );
         for (i, w) in merged.iter().enumerate() {
-            if i > 0 { sql.push(','); }
+            if i > 0 {
+                sql.push(',');
+            }
             sql.push_str(&format!(
                 "('{}','{}','{}','{}',{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},'{}',{})",
                 Self::escape(user_id),
@@ -542,7 +593,8 @@ impl EventStore for ClickHouseEventStore {
         let client = self.client.clone();
         let url = self.url.clone();
         tokio::task::spawn_blocking(move || {
-            client.post(&url)
+            client
+                .post(&url)
                 .set("Content-Type", "text/plain")
                 .send_string(&sql)
                 .map_err(|e| anyhow::anyhow!("ClickHouse windows INSERT failed: {e}"))?;
@@ -557,7 +609,8 @@ impl EventStore for ClickHouseEventStore {
         user_id: &str,
         since_ms: i64,
     ) -> Result<Vec<(String, toki_sync_protocol::WireWindow)>> {
-        self.query_user_windows_filtered(user_id, None, since_ms).await
+        self.query_user_windows_filtered(user_id, None, since_ms)
+            .await
     }
 
     async fn cleanup_old_windows(&self, cutoff_ms: i64) -> Result<usize> {
@@ -582,7 +635,8 @@ impl EventStore for ClickHouseEventStore {
         let client = self.client.clone();
         let url = self.url.clone();
         tokio::task::spawn_blocking(move || {
-            let body = client.post(&url)
+            let body = client
+                .post(&url)
                 .set("Content-Type", "text/plain")
                 .send_string(&count_sql)
                 .map_err(|e| anyhow::anyhow!("ClickHouse windows count failed: {e}"))?
@@ -592,7 +646,8 @@ impl EventStore for ClickHouseEventStore {
             if stale == 0 {
                 return Ok(0);
             }
-            client.post(&url)
+            client
+                .post(&url)
                 .set("Content-Type", "text/plain")
                 .send_string(&delete_sql)
                 .map_err(|e| anyhow::anyhow!("ClickHouse windows cleanup failed: {e}"))?;
@@ -610,7 +665,8 @@ impl EventStore for ClickHouseEventStore {
         let client = self.client.clone();
         let url = self.url.clone();
         tokio::task::spawn_blocking(move || {
-            client.post(&url)
+            client
+                .post(&url)
                 .set("Content-Type", "text/plain")
                 .send_string(&sql)
                 .map_err(|e| anyhow::anyhow!("ClickHouse windows DELETE failed: {e}"))?;

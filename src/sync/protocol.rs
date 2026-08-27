@@ -2,7 +2,6 @@
 ///
 /// Wire types are defined in the shared `toki-sync-protocol` crate.
 /// This module provides asynchronous (tokio::io) frame I/O.
-
 use std::io;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -11,10 +10,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 // modules, so suppress unused-import warnings.
 #[allow(unused_imports)]
 pub use toki_sync_protocol::{
-    MsgType, AuthPayload, AuthOkPayload, AuthErrPayload,
-    GetLastTsPayload, LastTsPayload,
-    StoredEvent, SyncItem, SyncBatchPayload, SyncAckPayload, SyncErrPayload,
-    PROTOCOL_VERSION, MAX_PAYLOAD_SIZE, SCHEMA_VERSION,
+    AuthErrPayload, AuthOkPayload, AuthPayload, GetLastTsPayload, LastTsPayload, MsgType,
+    StoredEvent, SyncAckPayload, SyncBatchPayload, SyncErrPayload, SyncItem, MAX_PAYLOAD_SIZE,
+    PROTOCOL_VERSION, SCHEMA_VERSION,
 };
 
 // ─── Async frame I/O ───────────────────────────────────────────────────────
@@ -27,7 +25,10 @@ where
     if payload.len() > MAX_PAYLOAD_SIZE as usize {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("payload too large: {} bytes (max {MAX_PAYLOAD_SIZE})", payload.len()),
+            format!(
+                "payload too large: {} bytes (max {MAX_PAYLOAD_SIZE})",
+                payload.len()
+            ),
         ));
     }
     let mut header = [0u8; 8];
@@ -73,10 +74,13 @@ where
     r.read_exact(&mut header).await?;
 
     let type_u32 = u32::from_le_bytes(header[..4].try_into().unwrap());
-    let len      = u32::from_le_bytes(header[4..].try_into().unwrap());
+    let len = u32::from_le_bytes(header[4..].try_into().unwrap());
 
     let msg_type = MsgType::from_u32(type_u32).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("unknown msg_type: {type_u32}"))
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unknown msg_type: {type_u32}"),
+        )
     })?;
 
     if len > max_payload {

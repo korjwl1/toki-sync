@@ -5,10 +5,10 @@ use anyhow::Result;
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 
+use super::protocol::*;
 use crate::auth::JwtManager;
 use crate::db::DatabaseRepo;
 use crate::events::{EventStore, ServerEvent};
-use super::protocol::*;
 
 const MAX_DECOMPRESSED_SIZE: usize = 64 * 1024 * 1024; // 64 MiB
 const MAX_BATCH_SIZE: usize = 50_000;
@@ -62,7 +62,6 @@ impl WindowsRateLimiterInner {
         true
     }
 }
-
 
 /// Server-side per-batch keep limit. The client applies the same cap before
 /// sending (`MAX_WINDOWS_PER_SYNC` in toki), so reaching it means a misbehaving
@@ -186,7 +185,12 @@ pub(crate) fn sanitize_window_batch(
         }
     }
 
-    SanitizedWindows { items, stable_rejects, transient_rejects, over_cap }
+    SanitizedWindows {
+        items,
+        stable_rejects,
+        transient_rejects,
+        over_cap,
+    }
 }
 
 /// Pre-merge in-batch duplicates (the same logical window twice in one
@@ -224,6 +228,7 @@ pub(crate) fn premerge_windows(
     merged
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_connection(
     stream: TcpStream,
     db: Arc<dyn DatabaseRepo>,
@@ -289,7 +294,7 @@ pub async fn handle_connection(
         }
     };
 
-    let user_id  = claims.sub.clone();
+    let user_id = claims.sub.clone();
     let provider = auth.provider.clone();
 
     // Reject deactivated (or deleted) accounts even while their access token is
@@ -297,12 +302,18 @@ pub async fn handle_connection(
     match crate::server::http::is_user_active_cached(&active_cache, &*db, &user_id).await {
         Ok(true) => {}
         Ok(false) => {
-            let err = AuthErrPayload { reason: "account deactivated".to_string(), reset_required: false };
+            let err = AuthErrPayload {
+                reason: "account deactivated".to_string(),
+                reset_required: false,
+            };
             write_frame(&mut writer, MsgType::AuthErr, &bincode::serialize(&err)?).await?;
             return Ok(());
         }
         Err(e) => {
-            let err = AuthErrPayload { reason: format!("active check failed: {e}"), reset_required: false };
+            let err = AuthErrPayload {
+                reason: format!("active check failed: {e}"),
+                reset_required: false,
+            };
             write_frame(&mut writer, MsgType::AuthErr, &bincode::serialize(&err)?).await?;
             return Ok(());
         }
@@ -313,7 +324,7 @@ pub async fn handle_connection(
     // Validate device_key is a well-formed UUID (prevents Fjall key injection via null bytes)
     if uuid::Uuid::parse_str(&auth.device_key).is_err() {
         let err = AuthErrPayload {
-            reason: format!("invalid device_key: expected UUID format"),
+            reason: "invalid device_key: expected UUID format".to_string(),
             reset_required: false,
         };
         write_frame(&mut writer, MsgType::AuthErr, &bincode::serialize(&err)?).await?;
@@ -347,7 +358,9 @@ pub async fn handle_connection(
     db.ensure_cursor(&device_id, &provider).await?;
 
     // AUTH_OK
-    let ok = AuthOkPayload { device_id: device_id.clone() };
+    let ok = AuthOkPayload {
+        device_id: device_id.clone(),
+    };
     write_frame(&mut writer, MsgType::AuthOk, &bincode::serialize(&ok)?).await?;
 
     tracing::debug!("sync auth ok: user={user_id} device={device_id} provider={provider}");
@@ -357,19 +370,20 @@ pub async fn handle_connection(
     const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
     loop {
-        let (msg_type, payload) = match tokio::time::timeout(READ_TIMEOUT, read_frame(&mut reader)).await {
-            Err(_elapsed) => {
-                tracing::warn!("TCP read timeout ({READ_TIMEOUT:?}), dropping connection");
-                break;
-            }
-            Ok(Ok(f)) => f,
-            Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Ok(Err(e)) if e.kind() == std::io::ErrorKind::InvalidData => {
-                tracing::warn!("dropping TCP connection: {e}");
-                break;
-            }
-            Ok(Err(e)) => return Err(e.into()),
-        };
+        let (msg_type, payload) =
+            match tokio::time::timeout(READ_TIMEOUT, read_frame(&mut reader)).await {
+                Err(_elapsed) => {
+                    tracing::warn!("TCP read timeout ({READ_TIMEOUT:?}), dropping connection");
+                    break;
+                }
+                Ok(Ok(f)) => f,
+                Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Ok(Err(e)) if e.kind() == std::io::ErrorKind::InvalidData => {
+                    tracing::warn!("dropping TCP connection: {e}");
+                    break;
+                }
+                Ok(Err(e)) => return Err(e.into()),
+            };
 
         match msg_type {
             MsgType::GetLastTs => {
@@ -383,11 +397,16 @@ pub async fn handle_connection(
                 // Re-check active status per batch so a mid-session deactivation
                 // stops further writes (cache TTL <= 60s, or instantly on evict),
                 // not just new connections.
-                match crate::server::http::is_user_active_cached(&active_cache, &*db, &user_id).await {
+                match crate::server::http::is_user_active_cached(&active_cache, &*db, &user_id)
+                    .await
+                {
                     Ok(true) => {}
                     Ok(false) => {
-                        let err = SyncErrPayload { reason: "account deactivated".to_string() };
-                        write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?).await?;
+                        let err = SyncErrPayload {
+                            reason: "account deactivated".to_string(),
+                        };
+                        write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?)
+                            .await?;
                         break;
                     }
                     Err(e) => {
@@ -399,7 +418,9 @@ pub async fn handle_connection(
                     let decoder = zstd::stream::Decoder::new(payload.as_slice())
                         .map_err(|e| anyhow::anyhow!("zstd decoder init failed: {e}"))?;
                     let mut buf = Vec::new();
-                    decoder.take(MAX_DECOMPRESSED_SIZE as u64 + 1).read_to_end(&mut buf)
+                    decoder
+                        .take(MAX_DECOMPRESSED_SIZE as u64 + 1)
+                        .read_to_end(&mut buf)
                         .map_err(|e| anyhow::anyhow!("zstd decompress failed: {e}"))?;
                     if buf.len() > MAX_DECOMPRESSED_SIZE {
                         anyhow::bail!("decompressed payload exceeds {MAX_DECOMPRESSED_SIZE} bytes");
@@ -411,25 +432,47 @@ pub async fn handle_connection(
                 let batch: SyncBatchPayload = bincode::deserialize(&raw)?;
                 // Ensure cursor exists for this batch's provider (may differ from auth provider)
                 db.ensure_cursor(&device_id, &batch.provider).await?;
-                match handle_sync_batch(&batch, &user_id, &device_id, &batch.provider, &*db, &*events, &batch_semaphore, dedup_retention_secs).await {
+                match handle_sync_batch(
+                    &batch,
+                    &user_id,
+                    &device_id,
+                    &batch.provider,
+                    &*db,
+                    &*events,
+                    &batch_semaphore,
+                    dedup_retention_secs,
+                )
+                .await
+                {
                     Ok(last_ts) => {
-                        let ack = SyncAckPayload { last_ts_ms: last_ts };
-                        write_frame(&mut writer, MsgType::SyncAck, &bincode::serialize(&ack)?).await?;
+                        let ack = SyncAckPayload {
+                            last_ts_ms: last_ts,
+                        };
+                        write_frame(&mut writer, MsgType::SyncAck, &bincode::serialize(&ack)?)
+                            .await?;
                     }
                     Err(e) => {
                         tracing::warn!("sync_batch error for device={device_id}: {e}");
-                        let err = SyncErrPayload { reason: e.to_string() };
-                        write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?).await?;
+                        let err = SyncErrPayload {
+                            reason: e.to_string(),
+                        };
+                        write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?)
+                            .await?;
                     }
                 }
             }
 
             MsgType::SyncWindows => {
-                match crate::server::http::is_user_active_cached(&active_cache, &*db, &user_id).await {
+                match crate::server::http::is_user_active_cached(&active_cache, &*db, &user_id)
+                    .await
+                {
                     Ok(true) => {}
                     Ok(false) => {
-                        let err = SyncErrPayload { reason: "account deactivated".to_string() };
-                        write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?).await?;
+                        let err = SyncErrPayload {
+                            reason: "account deactivated".to_string(),
+                        };
+                        write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?)
+                            .await?;
                         break;
                     }
                     Err(e) => {
@@ -453,7 +496,8 @@ pub async fn handle_connection(
                     write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?).await?;
                     continue;
                 }
-                let mut win: toki_sync_protocol::SyncWindowsPayload = bincode::deserialize(&payload)?;
+                let mut win: toki_sync_protocol::SyncWindowsPayload =
+                    bincode::deserialize(&payload)?;
                 if win.windows_schema != toki_sync_protocol::WINDOWS_SCHEMA_VERSION {
                     let err = SyncErrPayload {
                         reason: format!(
@@ -469,7 +513,10 @@ pub async fn handle_connection(
                 // anything outside the known shape before it becomes row keys.
                 let provider_ok = !win.provider.is_empty()
                     && win.provider.len() <= 32
-                    && win.provider.chars().all(|c| c.is_ascii_lowercase() || c == '_');
+                    && win
+                        .provider
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c == '_');
                 if !provider_ok {
                     let err = SyncErrPayload {
                         reason: format!("invalid provider name: {:?}", win.provider),
@@ -489,7 +536,9 @@ pub async fn handle_connection(
                         "sync_windows throttled for user={user_id} device={device_id} provider={}",
                         win.provider
                     );
-                    let err = SyncErrPayload { reason: "windows sync throttled".to_string() };
+                    let err = SyncErrPayload {
+                        reason: "windows sync throttled".to_string(),
+                    };
                     write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?).await?;
                     continue;
                 }
@@ -561,7 +610,8 @@ pub async fn handle_connection(
                     Ok(()) if dropped == 0 => {
                         let last = items.iter().map(|w| w.observed_ts_ms).max().unwrap_or(0);
                         let ack = SyncAckPayload { last_ts_ms: last };
-                        write_frame(&mut writer, MsgType::SyncAck, &bincode::serialize(&ack)?).await?;
+                        write_frame(&mut writer, MsgType::SyncAck, &bincode::serialize(&ack)?)
+                            .await?;
                     }
                     Ok(()) => {
                         // Valid items are stored, but the batch was NOT fully
@@ -572,12 +622,16 @@ pub async fn handle_connection(
                         let err = SyncErrPayload {
                             reason: format!("{dropped} of {before} window items rejected"),
                         };
-                        write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?).await?;
+                        write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?)
+                            .await?;
                     }
                     Err(e) => {
                         tracing::warn!("sync_windows error for device={device_id}: {e}");
-                        let err = SyncErrPayload { reason: e.to_string() };
-                        write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?).await?;
+                        let err = SyncErrPayload {
+                            reason: e.to_string(),
+                        };
+                        write_frame(&mut writer, MsgType::SyncErr, &bincode::serialize(&err)?)
+                            .await?;
                     }
                 }
             }
@@ -612,12 +666,14 @@ async fn find_or_create_device(
     }
 
     // New device: use device_key as ID (not a random UUID)
-    db.create_device(device_key, user_id, device_name, device_key).await?;
+    db.create_device(device_key, user_id, device_name, device_key)
+        .await?;
 
     tracing::info!("registered device '{device_name}' (id={device_key}) for user={user_id}");
     Ok(device_key.to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_sync_batch(
     batch: &SyncBatchPayload,
     user_id: &str,
@@ -634,79 +690,114 @@ async fn handle_sync_batch(
     }
 
     if batch.items.len() > MAX_BATCH_SIZE {
-        anyhow::bail!("batch too large: {} items (max {MAX_BATCH_SIZE})", batch.items.len());
+        anyhow::bail!(
+            "batch too large: {} items (max {MAX_BATCH_SIZE})",
+            batch.items.len()
+        );
     }
 
     // Convert SyncItems to ServerEvents (resolve dict IDs to strings)
-    let server_events: Vec<ServerEvent> = batch.items.iter().map(|item| {
-        let model = batch.dict.get(&item.event.model_id).cloned().unwrap_or_else(|| {
-            tracing::warn!("missing dict ID {} for model in device {}", item.event.model_id, device_id);
-            String::new()
-        });
-        let project = batch.dict.get(&item.event.project_name_id)
-            .filter(|s| !s.is_empty())
-            .cloned()
-            .unwrap_or_else(|| {
-                if item.event.project_name_id != 0 {
-                    tracing::warn!("missing dict ID {} for project in device {}", item.event.project_name_id, device_id);
-                }
-                String::new()
-            });
-        let session = batch.dict.get(&item.event.session_id)
-            .filter(|s| !s.is_empty())
-            .cloned()
-            .unwrap_or_else(|| {
-                if item.event.session_id != 0 {
-                    tracing::warn!("missing dict ID {} for session in device {}", item.event.session_id, device_id);
-                }
-                String::new()
-            });
-        let bare_msg_id = item.message_id.split(':').next().unwrap_or(&item.message_id);
+    let server_events: Vec<ServerEvent> = batch
+        .items
+        .iter()
+        .map(|item| {
+            let model = batch
+                .dict
+                .get(&item.event.model_id)
+                .cloned()
+                .unwrap_or_else(|| {
+                    tracing::warn!(
+                        "missing dict ID {} for model in device {}",
+                        item.event.model_id,
+                        device_id
+                    );
+                    String::new()
+                });
+            let project = batch
+                .dict
+                .get(&item.event.project_name_id)
+                .filter(|s| !s.is_empty())
+                .cloned()
+                .unwrap_or_else(|| {
+                    if item.event.project_name_id != 0 {
+                        tracing::warn!(
+                            "missing dict ID {} for project in device {}",
+                            item.event.project_name_id,
+                            device_id
+                        );
+                    }
+                    String::new()
+                });
+            let session = batch
+                .dict
+                .get(&item.event.session_id)
+                .filter(|s| !s.is_empty())
+                .cloned()
+                .unwrap_or_else(|| {
+                    if item.event.session_id != 0 {
+                        tracing::warn!(
+                            "missing dict ID {} for session in device {}",
+                            item.event.session_id,
+                            device_id
+                        );
+                    }
+                    String::new()
+                });
+            let bare_msg_id = item
+                .message_id
+                .split(':')
+                .next()
+                .unwrap_or(&item.message_id);
 
-        // Map token columns by name (supports different providers)
-        let mut se = ServerEvent {
-            device_id: device_id.to_string(),
-            user_id: user_id.to_string(),
-            msg_id: bare_msg_id.to_string(),
-            ts_ms: item.ts_ms,
-            provider: provider.to_string(),
-            model,
-            project,
-            session,
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-            usage_total: 0,
-        };
+            // Map token columns by name (supports different providers)
+            let mut se = ServerEvent {
+                device_id: device_id.to_string(),
+                user_id: user_id.to_string(),
+                msg_id: bare_msg_id.to_string(),
+                ts_ms: item.ts_ms,
+                provider: provider.to_string(),
+                model,
+                project,
+                session,
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                usage_total: 0,
+            };
 
-        for (i, col) in batch.token_columns.iter().enumerate() {
-            if i >= item.event.tokens.len() { break; }
-            match col.as_str() {
-                "input" => se.input_tokens = item.event.tokens[i],
-                "output" => se.output_tokens = item.event.tokens[i],
-                "cache_create" => se.cache_creation_input_tokens = item.event.tokens[i],
-                "cache_read" => se.cache_read_input_tokens = item.event.tokens[i],
-                // Codex subsets: store in the corresponding fields but they're
-                // already excluded from usage_total by the daemon
-                "cached_input" => se.cache_read_input_tokens = item.event.tokens[i],
-                "reasoning_output" => se.cache_creation_input_tokens = item.event.tokens[i],
-                _ => {}
+            for (i, col) in batch.token_columns.iter().enumerate() {
+                if i >= item.event.tokens.len() {
+                    break;
+                }
+                match col.as_str() {
+                    "input" => se.input_tokens = item.event.tokens[i],
+                    "output" => se.output_tokens = item.event.tokens[i],
+                    "cache_create" => se.cache_creation_input_tokens = item.event.tokens[i],
+                    "cache_read" => se.cache_read_input_tokens = item.event.tokens[i],
+                    // Codex subsets: store in the corresponding fields but they're
+                    // already excluded from usage_total by the daemon
+                    "cached_input" => se.cache_read_input_tokens = item.event.tokens[i],
+                    "reasoning_output" => se.cache_creation_input_tokens = item.event.tokens[i],
+                    _ => {}
+                }
             }
-        }
 
-        // usage_total is pre-computed by the daemon per provider:
-        // - Claude: input + output + cache_creation + cache_read
-        // - Codex: input + output only (cached_input ⊂ input, reasoning_output ⊂ output)
-        // We trust the daemon's calculation rather than recomputing, because
-        // the server doesn't know provider-specific semantics at this point.
-        se.usage_total = item.usage_total;
+            // usage_total is pre-computed by the daemon per provider:
+            // - Claude: input + output + cache_creation + cache_read
+            // - Codex: input + output only (cached_input ⊂ input, reasoning_output ⊂ output)
+            // We trust the daemon's calculation rather than recomputing, because
+            // the server doesn't know provider-specific semantics at this point.
+            se.usage_total = item.usage_total;
 
-        se
-    }).collect();
+            se
+        })
+        .collect();
 
     // Acquire permit (limits concurrent writes to EventStore)
-    let permit = batch_semaphore.acquire().await
+    let permit = batch_semaphore
+        .acquire()
+        .await
         .map_err(|_| anyhow::anyhow!("batch semaphore closed"))?;
 
     // Write to EventStore — dedup by (device_id, provider, msg_id) is handled internally
@@ -733,7 +824,6 @@ async fn handle_sync_batch(
 
     Ok(max_ts)
 }
-
 
 #[cfg(test)]
 mod window_batch_tests {
@@ -782,7 +872,10 @@ mod window_batch_tests {
         let out = sanitize_window_batch(vec![base(), long_plan, bad_kind, ctrl], NOW);
         assert_eq!(out.items.len(), 1);
         assert_eq!(out.stable_rejects, 3);
-        assert_eq!(out.transient_rejects, 0, "these can never become valid; must not be retried");
+        assert_eq!(
+            out.transient_rejects, 0,
+            "these can never become valid; must not be retried"
+        );
     }
 
     /// The mirror case: a row the server clock will eventually accept MUST be
@@ -859,7 +952,10 @@ mod window_batch_tests {
         let out = sanitize_window_batch(items, NOW);
         assert_eq!(out.items.len(), MAX_WINDOW_ITEMS);
         assert_eq!(out.over_cap, 11);
-        assert_eq!(out.transient_rejects, 0, "over-cap is stable; must not trigger a retry loop");
+        assert_eq!(
+            out.transient_rejects, 0,
+            "over-cap is stable; must not trigger a retry loop"
+        );
         let oldest = out.items.iter().map(|w| w.window_end_ms).min().unwrap();
         assert!(oldest > NOW - (MAX_WINDOW_ITEMS as i64 + 9) * 600_000);
     }
@@ -903,12 +999,18 @@ mod window_batch_tests {
     #[test]
     fn windows_rate_limiter_is_per_user_and_survives_reconnect() {
         let limiter = WindowsRateLimiterInner::default();
-        assert!(limiter.allow("user-a", "codex", "dev-1"), "first batch accepted");
+        assert!(
+            limiter.allow("user-a", "codex", "dev-1"),
+            "first batch accepted"
+        );
         assert!(
             !limiter.allow("user-a", "codex", "dev-1"),
             "the same device inside the window is refused — a reconnect is just another call"
         );
-        assert!(limiter.allow("user-b", "codex", "dev-1"), "a different user is unaffected");
+        assert!(
+            limiter.allow("user-b", "codex", "dev-1"),
+            "a different user is unaffected"
+        );
         // One sync thread per provider on the same account.
         assert!(
             limiter.allow("user-a", "claude_code", "dev-1"),

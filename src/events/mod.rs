@@ -1,5 +1,5 @@
-pub mod fjall_store;
 pub mod clickhouse;
+pub mod fjall_store;
 
 use anyhow::Result;
 
@@ -172,6 +172,8 @@ pub fn merge_wire_windows(
     if prev.active_ms > cap {
         prev.active_ms = cap;
     }
-    prev.sampled_active_fraction = prev.sampled_active_fraction.max(other.sampled_active_fraction);
+    prev.sampled_active_fraction = prev
+        .sampled_active_fraction
+        .max(other.sampled_active_fraction);
     prev.n_samples = prev.n_samples.max(other.n_samples);
 }

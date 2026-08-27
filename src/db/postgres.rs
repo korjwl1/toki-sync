@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
-use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 
 use super::models::*;
 use super::DatabaseRepo;
@@ -99,10 +99,12 @@ impl PostgresRepo {
         .await
         .context("migrate: create refresh_tokens")?;
 
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens(user_id)")
-            .execute(&self.pool)
-            .await
-            .context("migrate: idx_refresh_tokens_user")?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens(user_id)",
+        )
+        .execute(&self.pool)
+        .await
+        .context("migrate: idx_refresh_tokens_user")?;
 
         // Migration: teams and team_members tables
         sqlx::query(
@@ -142,9 +144,13 @@ impl PostgresRepo {
         // Migration: add OIDC columns to users
         // Use DO $$ block to avoid errors if columns already exist
         sqlx::query("ALTER TABLE users ADD COLUMN IF NOT EXISTS oidc_sub TEXT")
-            .execute(&self.pool).await.context("migrate: add oidc_sub")?;
+            .execute(&self.pool)
+            .await
+            .context("migrate: add oidc_sub")?;
         sqlx::query("ALTER TABLE users ADD COLUMN IF NOT EXISTS oidc_issuer TEXT")
-            .execute(&self.pool).await.context("migrate: add oidc_issuer")?;
+            .execute(&self.pool)
+            .await
+            .context("migrate: add oidc_issuer")?;
         sqlx::query(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_oidc ON users(oidc_issuer, oidc_sub) WHERE oidc_sub IS NOT NULL"
         )
@@ -223,10 +229,12 @@ impl PostgresRepo {
         .context("migrate: create monitor_settings")?;
 
         // Migration: add active column to users
-        sqlx::query("ALTER TABLE users ADD COLUMN IF NOT EXISTS active SMALLINT NOT NULL DEFAULT 1")
-            .execute(&self.pool)
-            .await
-            .context("migrate: add active column")?;
+        sqlx::query(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS active SMALLINT NOT NULL DEFAULT 1",
+        )
+        .execute(&self.pool)
+        .await
+        .context("migrate: add active column")?;
 
         // Seed: create default admin account if no users exist
         let user_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
@@ -256,7 +264,9 @@ impl PostgresRepo {
                      — log in and change it immediately"
                 );
             } else {
-                tracing::info!("created default admin account (username: admin) using TOKI_ADMIN_PASSWORD");
+                tracing::info!(
+                    "created default admin account (username: admin) using TOKI_ADMIN_PASSWORD"
+                );
             }
         }
 
@@ -277,9 +287,29 @@ impl DatabaseRepo for PostgresRepo {
         .await
         .context("get_user_by_username")?;
 
-        Ok(row.map(|(id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer, active)| User {
-            id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer, active,
-        }))
+        Ok(row.map(
+            |(
+                id,
+                username,
+                password_hash,
+                role,
+                created_at,
+                updated_at,
+                oidc_sub,
+                oidc_issuer,
+                active,
+            )| User {
+                id,
+                username,
+                password_hash,
+                role,
+                created_at,
+                updated_at,
+                oidc_sub,
+                oidc_issuer,
+                active,
+            },
+        ))
     }
 
     async fn get_user_by_id(&self, id: &str) -> Result<Option<User>> {
@@ -291,9 +321,29 @@ impl DatabaseRepo for PostgresRepo {
         .await
         .context("get_user_by_id")?;
 
-        Ok(row.map(|(id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer, active)| User {
-            id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer, active,
-        }))
+        Ok(row.map(
+            |(
+                id,
+                username,
+                password_hash,
+                role,
+                created_at,
+                updated_at,
+                oidc_sub,
+                oidc_issuer,
+                active,
+            )| User {
+                id,
+                username,
+                password_hash,
+                role,
+                created_at,
+                updated_at,
+                oidc_sub,
+                oidc_issuer,
+                active,
+            },
+        ))
     }
 
     async fn create_user(&self, user: &NewUser) -> Result<()> {
@@ -349,9 +399,16 @@ impl DatabaseRepo for PostgresRepo {
         .await
         .context("list_users")?;
 
-        Ok(rows.into_iter().map(|(id, username, role, created_at, active)| UserSummary {
-            id, username, role, created_at, active,
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(id, username, role, created_at, active)| UserSummary {
+                id,
+                username,
+                role,
+                created_at,
+                active,
+            })
+            .collect())
     }
 
     async fn user_is_admin(&self, user_id: &str) -> Result<bool> {
@@ -365,19 +422,28 @@ impl DatabaseRepo for PostgresRepo {
 
     // ── Devices ─────────────────────────────────────────────────────────────
 
-    async fn find_device_by_key_and_user(&self, device_key: &str, user_id: &str) -> Result<Option<String>> {
-        let id: Option<String> = sqlx::query_scalar(
-            "SELECT id FROM devices WHERE device_key = $1 AND user_id = $2",
-        )
-        .bind(device_key)
-        .bind(user_id)
-        .fetch_optional(&self.pool)
-        .await
-        .context("find_device_by_key_and_user")?;
+    async fn find_device_by_key_and_user(
+        &self,
+        device_key: &str,
+        user_id: &str,
+    ) -> Result<Option<String>> {
+        let id: Option<String> =
+            sqlx::query_scalar("SELECT id FROM devices WHERE device_key = $1 AND user_id = $2")
+                .bind(device_key)
+                .bind(user_id)
+                .fetch_optional(&self.pool)
+                .await
+                .context("find_device_by_key_and_user")?;
         Ok(id)
     }
 
-    async fn create_device(&self, id: &str, user_id: &str, name: &str, device_key: &str) -> Result<()> {
+    async fn create_device(
+        &self,
+        id: &str,
+        user_id: &str,
+        name: &str,
+        device_key: &str,
+    ) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
         sqlx::query(
             "INSERT INTO devices (id, user_id, name, device_key, created_at, last_seen_at) VALUES ($1, $2, $3, $4, $5, $6)",
@@ -415,9 +481,15 @@ impl DatabaseRepo for PostgresRepo {
         .await
         .context("list_user_devices")?;
 
-        Ok(rows.into_iter().map(|(id, name, device_key, last_seen_at)| DeviceSummary {
-            id, name, device_key, last_seen_at,
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(id, name, device_key, last_seen_at)| DeviceSummary {
+                id,
+                name,
+                device_key,
+                last_seen_at,
+            })
+            .collect())
     }
 
     async fn list_all_devices(&self) -> Result<Vec<DeviceAdminSummary>> {
@@ -429,9 +501,15 @@ impl DatabaseRepo for PostgresRepo {
         .await
         .context("list_all_devices")?;
 
-        Ok(rows.into_iter().map(|(id, name, username, last_seen_at)| DeviceAdminSummary {
-            id, name, username, last_seen_at,
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(id, name, username, last_seen_at)| DeviceAdminSummary {
+                id,
+                name,
+                username,
+                last_seen_at,
+            })
+            .collect())
     }
 
     async fn delete_device(&self, id: &str) -> Result<bool> {
@@ -456,39 +534,34 @@ impl DatabaseRepo for PostgresRepo {
     }
 
     async fn device_belongs_to_user(&self, device_id: &str, user_id: &str) -> Result<bool> {
-        let exists: bool = sqlx::query_scalar(
-            "SELECT COUNT(*) > 0 FROM devices WHERE id = $1 AND user_id = $2"
-        )
-        .bind(device_id)
-        .bind(user_id)
-        .fetch_one(&self.pool)
-        .await
-        .context("device_belongs_to_user")?;
+        let exists: bool =
+            sqlx::query_scalar("SELECT COUNT(*) > 0 FROM devices WHERE id = $1 AND user_id = $2")
+                .bind(device_id)
+                .bind(user_id)
+                .fetch_one(&self.pool)
+                .await
+                .context("device_belongs_to_user")?;
         Ok(exists)
     }
 
     async fn rename_device(&self, device_id: &str, user_id: &str, name: &str) -> Result<bool> {
-        let affected = sqlx::query(
-            "UPDATE devices SET name = $1 WHERE id = $2 AND user_id = $3",
-        )
-        .bind(name)
-        .bind(device_id)
-        .bind(user_id)
-        .execute(&self.pool)
-        .await
-        .context("rename_device")?
-        .rows_affected();
+        let affected = sqlx::query("UPDATE devices SET name = $1 WHERE id = $2 AND user_id = $3")
+            .bind(name)
+            .bind(device_id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await
+            .context("rename_device")?
+            .rows_affected();
         Ok(affected > 0)
     }
 
     async fn get_user_device_ids(&self, user_id: &str) -> Result<Vec<String>> {
-        let ids: Vec<String> = sqlx::query_scalar(
-            "SELECT id FROM devices WHERE user_id = $1"
-        )
-        .bind(user_id)
-        .fetch_all(&self.pool)
-        .await
-        .context("get_user_device_ids")?;
+        let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM devices WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_all(&self.pool)
+            .await
+            .context("get_user_device_ids")?;
         Ok(ids)
     }
 
@@ -565,30 +638,37 @@ impl DatabaseRepo for PostgresRepo {
     }
 
     async fn get_team(&self, id: &str) -> Result<Option<Team>> {
-        let row: Option<(String, String, i64, i64)> = sqlx::query_as(
-            "SELECT id, name, created_at, updated_at FROM teams WHERE id = $1",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await
-        .context("get_team")?;
+        let row: Option<(String, String, i64, i64)> =
+            sqlx::query_as("SELECT id, name, created_at, updated_at FROM teams WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await
+                .context("get_team")?;
 
         Ok(row.map(|(id, name, created_at, updated_at)| Team {
-            id, name, created_at, updated_at,
+            id,
+            name,
+            created_at,
+            updated_at,
         }))
     }
 
     async fn list_teams(&self) -> Result<Vec<Team>> {
-        let rows: Vec<(String, String, i64, i64)> = sqlx::query_as(
-            "SELECT id, name, created_at, updated_at FROM teams ORDER BY name",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .context("list_teams")?;
+        let rows: Vec<(String, String, i64, i64)> =
+            sqlx::query_as("SELECT id, name, created_at, updated_at FROM teams ORDER BY name")
+                .fetch_all(&self.pool)
+                .await
+                .context("list_teams")?;
 
-        Ok(rows.into_iter().map(|(id, name, created_at, updated_at)| Team {
-            id, name, created_at, updated_at,
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(id, name, created_at, updated_at)| Team {
+                id,
+                name,
+                created_at,
+                updated_at,
+            })
+            .collect())
     }
 
     async fn list_teams_with_member_count(&self) -> Result<Vec<TeamWithCount>> {
@@ -601,9 +681,15 @@ impl DatabaseRepo for PostgresRepo {
         .await
         .context("list_teams_with_member_count")?;
 
-        Ok(rows.into_iter().map(|(id, name, member_count, created_at)| TeamWithCount {
-            id, name, member_count, created_at,
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(id, name, member_count, created_at)| TeamWithCount {
+                id,
+                name,
+                member_count,
+                created_at,
+            })
+            .collect())
     }
 
     async fn delete_team(&self, id: &str) -> Result<bool> {
@@ -627,9 +713,14 @@ impl DatabaseRepo for PostgresRepo {
         .await
         .context("list_user_teams")?;
 
-        Ok(rows.into_iter().map(|(team_id, team_name, role)| TeamMembership {
-            team_id, team_name, role,
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(team_id, team_name, role)| TeamMembership {
+                team_id,
+                team_name,
+                role,
+            })
+            .collect())
     }
 
     // ── Team members ───────────────────────────────────────────────────────
@@ -637,7 +728,7 @@ impl DatabaseRepo for PostgresRepo {
     async fn add_team_member(&self, team_id: &str, user_id: &str, role: &str) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
         sqlx::query(
-            "INSERT INTO team_members (team_id, user_id, role, joined_at) VALUES ($1, $2, $3, $4)"
+            "INSERT INTO team_members (team_id, user_id, role, joined_at) VALUES ($1, $2, $3, $4)",
         )
         .bind(team_id)
         .bind(user_id)
@@ -671,20 +762,25 @@ impl DatabaseRepo for PostgresRepo {
         .await
         .context("list_team_members")?;
 
-        Ok(rows.into_iter().map(|(user_id, username, role, joined_at)| TeamMemberSummary {
-            user_id, username, role, joined_at,
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(user_id, username, role, joined_at)| TeamMemberSummary {
+                user_id,
+                username,
+                role,
+                joined_at,
+            })
+            .collect())
     }
 
     async fn get_team_member_role(&self, team_id: &str, user_id: &str) -> Result<Option<String>> {
-        let role: Option<String> = sqlx::query_scalar(
-            "SELECT role FROM team_members WHERE team_id = $1 AND user_id = $2"
-        )
-        .bind(team_id)
-        .bind(user_id)
-        .fetch_optional(&self.pool)
-        .await
-        .context("get_team_member_role")?;
+        let role: Option<String> =
+            sqlx::query_scalar("SELECT role FROM team_members WHERE team_id = $1 AND user_id = $2")
+                .bind(team_id)
+                .bind(user_id)
+                .fetch_optional(&self.pool)
+                .await
+                .context("get_team_member_role")?;
         Ok(role)
     }
 
@@ -705,7 +801,12 @@ impl DatabaseRepo for PostgresRepo {
 
     // ── Pending registrations ──────────────────────────────────────────────
 
-    async fn create_pending_registration(&self, id: &str, username: &str, password_hash: &str) -> Result<()> {
+    async fn create_pending_registration(
+        &self,
+        id: &str,
+        username: &str,
+        password_hash: &str,
+    ) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
         sqlx::query(
             "INSERT INTO pending_registrations (id, username, password_hash, requested_at) VALUES ($1, $2, $3, $4)",
@@ -734,9 +835,14 @@ impl DatabaseRepo for PostgresRepo {
         .await
         .context("list_pending_registrations")?;
 
-        Ok(rows.into_iter().map(|(id, username, requested_at)| PendingRegistration {
-            id, username, requested_at,
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(id, username, requested_at)| PendingRegistration {
+                id,
+                username,
+                requested_at,
+            })
+            .collect())
     }
 
     async fn approve_registration(&self, id: &str) -> Result<bool> {
@@ -825,9 +931,29 @@ impl DatabaseRepo for PostgresRepo {
         .await
         .context("find_user_by_oidc")?;
 
-        Ok(row.map(|(id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer, active)| User {
-            id, username, password_hash, role, created_at, updated_at, oidc_sub, oidc_issuer, active,
-        }))
+        Ok(row.map(
+            |(
+                id,
+                username,
+                password_hash,
+                role,
+                created_at,
+                updated_at,
+                oidc_sub,
+                oidc_issuer,
+                active,
+            )| User {
+                id,
+                username,
+                password_hash,
+                role,
+                created_at,
+                updated_at,
+                oidc_sub,
+                oidc_issuer,
+                active,
+            },
+        ))
     }
 
     async fn create_oidc_user(&self, user: &NewOidcUser) -> Result<()> {
@@ -852,7 +978,13 @@ impl DatabaseRepo for PostgresRepo {
 
     // ── Refresh tokens ──────────────────────────────────────────────────────
 
-    async fn store_refresh_token(&self, jti: &str, user_id: &str, device_id: Option<&str>, expires_at: i64) -> Result<()> {
+    async fn store_refresh_token(
+        &self,
+        jti: &str,
+        user_id: &str,
+        device_id: Option<&str>,
+        expires_at: i64,
+    ) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
         sqlx::query(
             "INSERT INTO refresh_tokens (jti, user_id, device_id, expires_at, revoked, created_at) VALUES ($1, $2, $3, $4, 0, $5)",
@@ -869,13 +1001,12 @@ impl DatabaseRepo for PostgresRepo {
     }
 
     async fn is_refresh_token_revoked(&self, jti: &str) -> Result<bool> {
-        let revoked: Option<bool> = sqlx::query_scalar(
-            "SELECT revoked != 0 FROM refresh_tokens WHERE jti = $1",
-        )
-        .bind(jti)
-        .fetch_optional(&self.pool)
-        .await
-        .context("is_refresh_token_revoked")?;
+        let revoked: Option<bool> =
+            sqlx::query_scalar("SELECT revoked != 0 FROM refresh_tokens WHERE jti = $1")
+                .bind(jti)
+                .fetch_optional(&self.pool)
+                .await
+                .context("is_refresh_token_revoked")?;
         Ok(revoked.unwrap_or(true))
     }
 
@@ -897,17 +1028,27 @@ impl DatabaseRepo for PostgresRepo {
         Ok(())
     }
 
-    async fn rotate_refresh_token(&self, old_jti: &str, new_jti: &str, user_id: &str, device_id: Option<&str>, expires_at: i64) -> Result<()> {
-        let mut tx = self.pool.begin().await.context("failed to begin transaction")?;
+    async fn rotate_refresh_token(
+        &self,
+        old_jti: &str,
+        new_jti: &str,
+        user_id: &str,
+        device_id: Option<&str>,
+        expires_at: i64,
+    ) -> Result<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .context("failed to begin transaction")?;
 
         // Check not already revoked
-        let revoked: Option<bool> = sqlx::query_scalar(
-            "SELECT revoked != 0 FROM refresh_tokens WHERE jti = $1",
-        )
-        .bind(old_jti)
-        .fetch_optional(&mut *tx)
-        .await
-        .context("db error checking revocation")?;
+        let revoked: Option<bool> =
+            sqlx::query_scalar("SELECT revoked != 0 FROM refresh_tokens WHERE jti = $1")
+                .bind(old_jti)
+                .fetch_optional(&mut *tx)
+                .await
+                .context("db error checking revocation")?;
 
         let is_revoked = revoked.unwrap_or(true);
 
@@ -937,13 +1078,20 @@ impl DatabaseRepo for PostgresRepo {
         .await
         .context("failed to store new refresh token")?;
 
-        tx.commit().await.context("failed to commit rotation transaction")?;
+        tx.commit()
+            .await
+            .context("failed to commit rotation transaction")?;
         Ok(())
     }
 
     // ── Device codes ────────────────────────────────────────────────────
 
-    async fn create_device_code(&self, device_code: &str, user_code: &str, expires_at: i64) -> Result<()> {
+    async fn create_device_code(
+        &self,
+        device_code: &str,
+        user_code: &str,
+        expires_at: i64,
+    ) -> Result<()> {
         sqlx::query(
             "INSERT INTO device_codes (device_code, user_code, expires_at) VALUES ($1, $2, $3)",
         )
@@ -965,9 +1113,18 @@ impl DatabaseRepo for PostgresRepo {
         .await
         .context("get_device_code")?;
 
-        Ok(row.map(|(device_code, user_code, expires_at, approved_by, access_token, refresh_token)| DeviceCode {
-            device_code, user_code, expires_at, approved_by, access_token, refresh_token,
-        }))
+        Ok(row.map(
+            |(device_code, user_code, expires_at, approved_by, access_token, refresh_token)| {
+                DeviceCode {
+                    device_code,
+                    user_code,
+                    expires_at,
+                    approved_by,
+                    access_token,
+                    refresh_token,
+                }
+            },
+        ))
     }
 
     async fn get_device_code_by_user_code(&self, user_code: &str) -> Result<Option<DeviceCode>> {
@@ -979,12 +1136,27 @@ impl DatabaseRepo for PostgresRepo {
         .await
         .context("get_device_code_by_user_code")?;
 
-        Ok(row.map(|(device_code, user_code, expires_at, approved_by, access_token, refresh_token)| DeviceCode {
-            device_code, user_code, expires_at, approved_by, access_token, refresh_token,
-        }))
+        Ok(row.map(
+            |(device_code, user_code, expires_at, approved_by, access_token, refresh_token)| {
+                DeviceCode {
+                    device_code,
+                    user_code,
+                    expires_at,
+                    approved_by,
+                    access_token,
+                    refresh_token,
+                }
+            },
+        ))
     }
 
-    async fn approve_device_code(&self, user_code: &str, user_id: &str, access_token: &str, refresh_token: &str) -> Result<bool> {
+    async fn approve_device_code(
+        &self,
+        user_code: &str,
+        user_id: &str,
+        access_token: &str,
+        refresh_token: &str,
+    ) -> Result<bool> {
         let affected = sqlx::query(
             "UPDATE device_codes SET approved_by = $1, access_token = $2, refresh_token = $3 WHERE user_code = $4 AND approved_by IS NULL",
         )
@@ -1028,24 +1200,24 @@ impl DatabaseRepo for PostgresRepo {
 
     async fn cleanup_expired_tokens(&self) -> Result<u64> {
         let now = chrono::Utc::now().timestamp();
-        let result = sqlx::query("DELETE FROM refresh_tokens WHERE expires_at < $1 OR revoked != 0")
-            .bind(now)
-            .execute(&self.pool)
-            .await
-            .context("cleanup_expired_tokens")?;
+        let result =
+            sqlx::query("DELETE FROM refresh_tokens WHERE expires_at < $1 OR revoked != 0")
+                .bind(now)
+                .execute(&self.pool)
+                .await
+                .context("cleanup_expired_tokens")?;
         Ok(result.rows_affected())
     }
 
     // ── Server settings ────────────────────────────────────────────────
 
     async fn get_server_setting(&self, key: &str) -> Result<Option<String>> {
-        let value: Option<String> = sqlx::query_scalar(
-            "SELECT value FROM server_settings WHERE key = $1",
-        )
-        .bind(key)
-        .fetch_optional(&self.pool)
-        .await
-        .context("get_server_setting")?;
+        let value: Option<String> =
+            sqlx::query_scalar("SELECT value FROM server_settings WHERE key = $1")
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await
+                .context("get_server_setting")?;
         Ok(value)
     }
 
@@ -1065,12 +1237,11 @@ impl DatabaseRepo for PostgresRepo {
     }
 
     async fn list_server_settings(&self) -> Result<Vec<(String, String)>> {
-        let rows: Vec<(String, String)> = sqlx::query_as(
-            "SELECT key, value FROM server_settings ORDER BY key",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .context("list_server_settings")?;
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT key, value FROM server_settings ORDER BY key")
+                .fetch_all(&self.pool)
+                .await
+                .context("list_server_settings")?;
         Ok(rows)
     }
 
@@ -1102,7 +1273,12 @@ impl DatabaseRepo for PostgresRepo {
         .context("list_monitor_settings")?;
         Ok(rows
             .into_iter()
-            .map(|(key, value, version, updated_at)| MonitorSetting { key, value, version, updated_at })
+            .map(|(key, value, version, updated_at)| MonitorSetting {
+                key,
+                value,
+                version,
+                updated_at,
+            })
             .collect())
     }
 
@@ -1116,11 +1292,22 @@ impl DatabaseRepo for PostgresRepo {
         .context("list_monitor_setting_index")?;
         Ok(rows
             .into_iter()
-            .map(|(key, version, updated_at, size_bytes)| MonitorSettingMeta { key, version, updated_at, size_bytes })
+            .map(
+                |(key, version, updated_at, size_bytes)| MonitorSettingMeta {
+                    key,
+                    version,
+                    updated_at,
+                    size_bytes,
+                },
+            )
             .collect())
     }
 
-    async fn get_monitor_setting(&self, user_id: &str, key: &str) -> Result<Option<MonitorSetting>> {
+    async fn get_monitor_setting(
+        &self,
+        user_id: &str,
+        key: &str,
+    ) -> Result<Option<MonitorSetting>> {
         let row: Option<(String, i64, i64)> = sqlx::query_as(
             "SELECT value, version, updated_at FROM monitor_settings WHERE user_id = $1 AND key = $2",
         )
@@ -1146,7 +1333,10 @@ impl DatabaseRepo for PostgresRepo {
         .fetch_one(&self.pool)
         .await
         .context("monitor_settings_usage")?;
-        Ok(MonitorUsage { entries, total_bytes })
+        Ok(MonitorUsage {
+            entries,
+            total_bytes,
+        })
     }
 
     async fn upsert_monitor_setting(

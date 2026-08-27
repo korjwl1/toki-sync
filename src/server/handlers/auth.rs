@@ -7,13 +7,13 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
-use super::super::http::{AppError, AppState, authenticate, extract_client_ip, get_oidc_discovery, validate_username};
+use super::super::http::{
+    authenticate, extract_client_ip, get_oidc_discovery, validate_username, AppError, AppState,
+};
 
 // ─── /health ────────────────────────────────────────────────────────────────
 
-pub async fn health(
-    State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, AppError> {
+pub async fn health(State(state): State<AppState>) -> Result<Json<serde_json::Value>, AppError> {
     state.db.health_check().await.map_err(|e| AppError {
         status: StatusCode::SERVICE_UNAVAILABLE,
         message: format!("database unhealthy: {e}"),
@@ -82,9 +82,16 @@ pub async fn login(
 ) -> Result<Json<TokenResponse>, AppError> {
     let ip = extract_client_ip(&headers, &addr, state.trust_proxy);
 
-    state.brute.check(&ip, &body.username).map_err(AppError::locked_out)?;
+    state
+        .brute
+        .check(&ip, &body.username)
+        .map_err(AppError::locked_out)?;
 
-    let user = state.db.get_user_by_username(&body.username).await.map_err(AppError::internal)?;
+    let user = state
+        .db
+        .get_user_by_username(&body.username)
+        .await
+        .map_err(AppError::internal)?;
 
     let user = match user {
         Some(u) => u,
@@ -126,11 +133,19 @@ pub async fn login(
 
     state.brute.record_success(&ip, &body.username);
 
-    let access = state.jwt.issue_access_token(&user_id).map_err(AppError::internal)?;
-    let (refresh, refresh_claims) = state.jwt
+    let access = state
+        .jwt
+        .issue_access_token(&user_id)
+        .map_err(AppError::internal)?;
+    let (refresh, refresh_claims) = state
+        .jwt
         .issue_refresh_token(&user_id, body.device_id.as_deref())
         .map_err(AppError::internal)?;
-    state.jwt.store_refresh_token(&*state.db, &refresh_claims).await.map_err(AppError::internal)?;
+    state
+        .jwt
+        .store_refresh_token(&*state.db, &refresh_claims)
+        .await
+        .map_err(AppError::internal)?;
 
     tracing::info!(user_id = %user_id, "login successful");
     Ok(Json(TokenResponse {
@@ -156,7 +171,10 @@ pub async fn register(
     Json(body): Json<RegisterRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
     let ip = extract_client_ip(&headers, &addr, state.trust_proxy);
-    state.brute.check(&ip, "__register__").map_err(AppError::locked_out)?;
+    state
+        .brute
+        .check(&ip, "__register__")
+        .map_err(AppError::locked_out)?;
 
     let mode = state.dynamic_settings.registration_mode().await;
     match mode.as_str() {
@@ -169,7 +187,10 @@ pub async fn register(
     validate_username(&body.username)?;
 
     if body.password.len() < 8 || body.password.len() > 128 {
-        return Err(AppError { status: StatusCode::UNPROCESSABLE_ENTITY, message: "password must be 8-128 characters".into() });
+        return Err(AppError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            message: "password must be 8-128 characters".into(),
+        });
     }
 
     let pw = body.password.clone();
@@ -183,19 +204,26 @@ pub async fn register(
 
     if mode.as_str() == "approval" {
         // Insert into pending_registrations, not users
-        state.db.create_pending_registration(&id, &username, &hash).await.map_err(|e| {
-            if e.to_string().contains("UNIQUE") {
-                state.brute.record_failure(&ip, "__register__").ok();
-                AppError::conflict("username already exists or pending")
-            } else {
-                AppError::internal(e)
-            }
-        })?;
+        state
+            .db
+            .create_pending_registration(&id, &username, &hash)
+            .await
+            .map_err(|e| {
+                if e.to_string().contains("UNIQUE") {
+                    state.brute.record_failure(&ip, "__register__").ok();
+                    AppError::conflict("username already exists or pending")
+                } else {
+                    AppError::internal(e)
+                }
+            })?;
 
         state.brute.record_success(&ip, "__register__");
-        return Ok((StatusCode::ACCEPTED, Json(serde_json::json!({
-            "message": "registration pending admin approval"
-        }))));
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "message": "registration pending admin approval"
+            })),
+        ));
     }
 
     // "open" mode: create user immediately
@@ -215,7 +243,10 @@ pub async fn register(
     })?;
 
     state.brute.record_success(&ip, "__register__");
-    Ok((StatusCode::CREATED, Json(serde_json::json!({ "id": id, "username": username }))))
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "id": id, "username": username })),
+    ))
 }
 
 // ─── /token/refresh ─────────────────────────────────────────────────────────
@@ -233,9 +264,13 @@ pub async fn token_refresh(
     Json(body): Json<RefreshRequest>,
 ) -> Result<Json<TokenResponse>, AppError> {
     let ip = extract_client_ip(&headers, &addr, state.trust_proxy);
-    state.brute.check(&ip, "__refresh__").map_err(AppError::locked_out)?;
+    state
+        .brute
+        .check(&ip, "__refresh__")
+        .map_err(AppError::locked_out)?;
 
-    let result = state.jwt
+    let result = state
+        .jwt
         .rotate(&*state.db, &body.refresh_token, body.device_id.as_deref())
         .await;
 
@@ -270,7 +305,10 @@ pub async fn oidc_authorize(
 ) -> Result<Redirect, AppError> {
     let oidc_issuer = state.dynamic_settings.oidc_issuer().await;
     if oidc_issuer.is_empty() {
-        return Err(AppError { status: StatusCode::NOT_FOUND, message: "OIDC not configured".into() });
+        return Err(AppError {
+            status: StatusCode::NOT_FOUND,
+            message: "OIDC not configured".into(),
+        });
     }
 
     // Discover OIDC provider endpoints (cached with TTL)
@@ -286,7 +324,9 @@ pub async fn oidc_authorize(
     } else {
         params.redirect_uri.clone()
     };
-    state.oidc_state_store.insert(csrf_state.clone(), client_redirect, nonce.clone());
+    state
+        .oidc_state_store
+        .insert(csrf_state.clone(), client_redirect, nonce.clone());
 
     let oidc_client_id = state.dynamic_settings.oidc_client_id().await;
     let oidc_redirect_uri = state.dynamic_settings.oidc_redirect_uri().await;
@@ -319,17 +359,28 @@ pub async fn oidc_callback(
 ) -> Result<axum::response::Response, AppError> {
     let oidc_issuer = state.dynamic_settings.oidc_issuer().await;
     if oidc_issuer.is_empty() {
-        return Err(AppError { status: StatusCode::NOT_FOUND, message: "OIDC not configured".into() });
+        return Err(AppError {
+            status: StatusCode::NOT_FOUND,
+            message: "OIDC not configured".into(),
+        });
     }
 
     // Check for error from provider
     if let Some(ref err) = params.error {
-        return Err(AppError { status: StatusCode::BAD_REQUEST, message: format!("OIDC error: {err}") });
+        return Err(AppError {
+            status: StatusCode::BAD_REQUEST,
+            message: format!("OIDC error: {err}"),
+        });
     }
 
     // Validate CSRF state and retrieve nonce
-    let (client_redirect, stored_nonce) = state.oidc_state_store.validate(&params.state)
-        .ok_or_else(|| AppError { status: StatusCode::BAD_REQUEST, message: "invalid or expired state parameter".into() })?;
+    let (client_redirect, stored_nonce) = state
+        .oidc_state_store
+        .validate(&params.state)
+        .ok_or_else(|| AppError {
+            status: StatusCode::BAD_REQUEST,
+            message: "invalid or expired state parameter".into(),
+        })?;
 
     // Discover provider endpoints (cached with TTL)
     let discovery = get_oidc_discovery(&state).await?;
@@ -351,7 +402,11 @@ pub async fn oidc_callback(
     .map_err(AppError::internal)?;
 
     // Extract user info (with nonce validation)
-    let nonce_ref = if stored_nonce.is_empty() { None } else { Some(stored_nonce.as_str()) };
+    let nonce_ref = if stored_nonce.is_empty() {
+        None
+    } else {
+        Some(stored_nonce.as_str())
+    };
     let user_info = crate::auth::oidc::extract_user_info(
         &token_resp,
         &discovery,
@@ -360,11 +415,13 @@ pub async fn oidc_callback(
         nonce_ref,
         &state.oidc_http_client,
     )
-        .await
-        .map_err(AppError::internal)?;
+    .await
+    .map_err(AppError::internal)?;
 
     // Find or create user by OIDC subject
-    let user = state.db.find_user_by_oidc(&oidc_issuer, &user_info.sub)
+    let user = state
+        .db
+        .find_user_by_oidc(&oidc_issuer, &user_info.sub)
         .await
         .map_err(AppError::internal)?;
 
@@ -379,9 +436,13 @@ pub async fn oidc_callback(
         None => {
             // Create new OIDC user
             let id = uuid::Uuid::new_v4().to_string();
-            let username = user_info.email.clone()
+            let username = user_info
+                .email
+                .clone()
                 .or_else(|| user_info.name.clone())
-                .unwrap_or_else(|| format!("oidc_{}", &user_info.sub[..8.min(user_info.sub.len())]));
+                .unwrap_or_else(|| {
+                    format!("oidc_{}", &user_info.sub[..8.min(user_info.sub.len())])
+                });
 
             let new_user = crate::db::models::NewOidcUser {
                 id: id.clone(),
@@ -398,12 +459,16 @@ pub async fn oidc_callback(
                 Err(e) => {
                     // On UNIQUE constraint violation (concurrent creation), retry find
                     if e.to_string().contains("UNIQUE") {
-                        let retry_user = state.db.find_user_by_oidc(&oidc_issuer, &user_info.sub)
+                        let retry_user = state
+                            .db
+                            .find_user_by_oidc(&oidc_issuer, &user_info.sub)
                             .await
                             .map_err(AppError::internal)?
-                            .ok_or_else(|| AppError::internal(anyhow::anyhow!(
-                                "OIDC user creation conflict but user not found on retry"
-                            )))?;
+                            .ok_or_else(|| {
+                                AppError::internal(anyhow::anyhow!(
+                                    "OIDC user creation conflict but user not found on retry"
+                                ))
+                            })?;
                         if !retry_user.active {
                             return Err(AppError::unauthorized("account deactivated"));
                         }
@@ -417,11 +482,17 @@ pub async fn oidc_callback(
     };
 
     // Issue JWT pair
-    let access = state.jwt.issue_access_token(&user_id).map_err(AppError::internal)?;
-    let (refresh, refresh_claims) = state.jwt
+    let access = state
+        .jwt
+        .issue_access_token(&user_id)
+        .map_err(AppError::internal)?;
+    let (refresh, refresh_claims) = state
+        .jwt
         .issue_refresh_token(&user_id, None)
         .map_err(AppError::internal)?;
-    state.jwt.store_refresh_token(&*state.db, &refresh_claims)
+    state
+        .jwt
+        .store_refresh_token(&*state.db, &refresh_claims)
         .await
         .map_err(AppError::internal)?;
 
@@ -431,7 +502,9 @@ pub async fn oidc_callback(
     // Only allow localhost redirects with tokens in query params (safe: localhost
     // traffic is not proxied or logged externally). Reject non-localhost redirects.
     if !client_redirect.is_empty() {
-        if client_redirect.starts_with("http://127.0.0.1") || client_redirect.starts_with("http://localhost") {
+        if client_redirect.starts_with("http://127.0.0.1")
+            || client_redirect.starts_with("http://localhost")
+        {
             let redirect_url = format!(
                 "{}?access_token={}&refresh_token={}&token_type=Bearer&expires_in={}",
                 client_redirect,
@@ -443,7 +516,9 @@ pub async fn oidc_callback(
         } else {
             return Err(AppError {
                 status: StatusCode::BAD_REQUEST,
-                message: "OIDC CLI redirect must be localhost (http://127.0.0.1 or http://localhost)".into(),
+                message:
+                    "OIDC CLI redirect must be localhost (http://127.0.0.1 or http://localhost)"
+                        .into(),
             });
         }
     }
@@ -460,9 +535,7 @@ pub async fn oidc_callback(
 
 // ─── GET /auth/info ────────────────────────────────────────────────────────
 
-pub async fn auth_info(
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+pub async fn auth_info(State(state): State<AppState>) -> impl IntoResponse {
     let reg_mode = state.dynamic_settings.registration_mode().await;
     let oidc_issuer = state.dynamic_settings.oidc_issuer().await;
     Json(serde_json::json!({
@@ -495,13 +568,18 @@ pub async fn device_code_request(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let ip = extract_client_ip(&headers, &addr, state.trust_proxy);
-    state.brute.check(&ip, "__device_code__").map_err(AppError::locked_out)?;
+    state
+        .brute
+        .check(&ip, "__device_code__")
+        .map_err(AppError::locked_out)?;
     state.brute.record_success(&ip, "__device_code__");
     let device_code = uuid::Uuid::new_v4().to_string();
     let user_code = generate_user_code();
     let expires_at = chrono::Utc::now().timestamp() + 300; // 5 minutes
 
-    state.db.create_device_code(&device_code, &user_code, expires_at)
+    state
+        .db
+        .create_device_code(&device_code, &user_code, expires_at)
         .await
         .map_err(AppError::internal)?;
 
@@ -541,23 +619,33 @@ pub async fn device_token_poll(
         tracker.retain(|_, instant| instant.elapsed() < std::time::Duration::from_secs(900));
         if let Some(last) = tracker.get(&body.device_code) {
             if last.elapsed() < std::time::Duration::from_secs(5) {
-                return Ok((StatusCode::BAD_REQUEST, Json(serde_json::json!({
-                    "error": "slow_down",
-                    "interval": 10
-                }))).into_response());
+                return Ok((
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "slow_down",
+                        "interval": 10
+                    })),
+                )
+                    .into_response());
             }
         }
         tracker.insert(body.device_code.clone(), std::time::Instant::now());
     }
 
-    let dc = state.db.get_device_code(&body.device_code)
+    let dc = state
+        .db
+        .get_device_code(&body.device_code)
         .await
         .map_err(AppError::internal)?;
 
     let dc = match dc {
         Some(dc) => dc,
         None => {
-            return Ok((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "expired_token" }))).into_response());
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "expired_token" })),
+            )
+                .into_response());
         }
     };
 
@@ -565,14 +653,21 @@ pub async fn device_token_poll(
     if now > dc.expires_at {
         // Clean up expired code
         let _ = state.db.delete_device_code(&body.device_code).await;
-        return Err(AppError { status: StatusCode::GONE, message: "expired_token".into() });
+        return Err(AppError {
+            status: StatusCode::GONE,
+            message: "expired_token".into(),
+        });
     }
 
     if dc.approved_by.is_none() {
         // Still pending
-        return Ok((StatusCode::BAD_REQUEST, Json(serde_json::json!({
-            "error": "authorization_pending"
-        }))).into_response());
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "authorization_pending"
+            })),
+        )
+            .into_response());
     }
 
     // Approved — return tokens and delete the device code row
@@ -583,19 +678,33 @@ pub async fn device_token_poll(
     let _ = state.db.delete_device_code(&body.device_code).await;
 
     // Clean up poll tracker entry now that the device code is consumed
-    state.device_poll_tracker.lock().unwrap().remove(&body.device_code);
+    state
+        .device_poll_tracker
+        .lock()
+        .unwrap()
+        .remove(&body.device_code);
 
     // Register device if device_key was provided (new flow: device creation at token exchange)
     if let Some(ref device_key) = body.device_key {
-        if !device_key.is_empty() && !user_id.is_empty() && uuid::Uuid::parse_str(device_key).is_ok() {
+        if !device_key.is_empty()
+            && !user_id.is_empty()
+            && uuid::Uuid::parse_str(device_key).is_ok()
+        {
             let device_name = super::super::http::truncate_device_name(
                 body.device_name.as_deref().unwrap_or("unknown"),
             );
             // Find or create — idempotent in case of retry
-            let existing = state.db.find_device_by_key_and_user(device_key, &user_id).await;
+            let existing = state
+                .db
+                .find_device_by_key_and_user(device_key, &user_id)
+                .await;
             if let Ok(None) = existing {
                 // Use device_key as ID (client's stable UUID)
-                if let Err(e) = state.db.create_device(device_key, &user_id, device_name, device_key).await {
+                if let Err(e) = state
+                    .db
+                    .create_device(device_key, &user_id, device_name, device_key)
+                    .await
+                {
                     tracing::warn!("failed to register device during token exchange: {e}");
                 } else {
                     tracing::info!(
@@ -614,7 +723,8 @@ pub async fn device_token_poll(
         "refresh_token": refresh_token,
         "token_type": "Bearer",
         "expires_in": state.access_token_ttl_secs,
-    })).into_response())
+    }))
+    .into_response())
 }
 
 /// POST /device/approve — approve a device code (JWT required)
@@ -631,7 +741,10 @@ pub async fn device_approve(
     let claims = authenticate(&state, &headers).await?;
     let user_id = &claims.sub;
 
-    state.brute.check(user_id, "__device_approve__").map_err(AppError::locked_out)?;
+    state
+        .brute
+        .check(user_id, "__device_approve__")
+        .map_err(AppError::locked_out)?;
 
     // Normalize user_code: uppercase, ensure hyphen
     let user_code = body.user_code.to_uppercase().replace(' ', "");
@@ -642,14 +755,19 @@ pub async fn device_approve(
     };
 
     // Verify the device code exists and is not expired
-    let dc = state.db.get_device_code_by_user_code(&user_code)
+    let dc = state
+        .db
+        .get_device_code_by_user_code(&user_code)
         .await
         .map_err(AppError::internal)?;
 
     let dc = match dc {
         Some(dc) => dc,
         None => {
-            state.brute.record_failure(user_id, "__device_approve__").ok();
+            state
+                .brute
+                .record_failure(user_id, "__device_approve__")
+                .ok();
             return Err(AppError::not_found("invalid or expired code"));
         }
     };
@@ -657,7 +775,10 @@ pub async fn device_approve(
     let now = chrono::Utc::now().timestamp();
     if now > dc.expires_at {
         let _ = state.db.delete_device_code(&dc.device_code).await;
-        return Err(AppError { status: StatusCode::GONE, message: "code expired".into() });
+        return Err(AppError {
+            status: StatusCode::GONE,
+            message: "code expired".into(),
+        });
     }
 
     if dc.approved_by.is_some() {
@@ -665,16 +786,24 @@ pub async fn device_approve(
     }
 
     // Issue JWT pair for the user
-    let access = state.jwt.issue_access_token(user_id).map_err(AppError::internal)?;
-    let (refresh, refresh_claims) = state.jwt
+    let access = state
+        .jwt
+        .issue_access_token(user_id)
+        .map_err(AppError::internal)?;
+    let (refresh, refresh_claims) = state
+        .jwt
         .issue_refresh_token(user_id, None)
         .map_err(AppError::internal)?;
-    state.jwt.store_refresh_token(&*state.db, &refresh_claims)
+    state
+        .jwt
+        .store_refresh_token(&*state.db, &refresh_claims)
         .await
         .map_err(AppError::internal)?;
 
     // Store tokens in the device code row
-    let approved = state.db.approve_device_code(&user_code, user_id, &access, &refresh)
+    let approved = state
+        .db
+        .approve_device_code(&user_code, user_id, &access, &refresh)
         .await
         .map_err(AppError::internal)?;
 
@@ -689,5 +818,3 @@ pub async fn device_approve(
 
     Ok(Json(serde_json::json!({ "status": "approved" })))
 }
-
-

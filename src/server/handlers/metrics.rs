@@ -5,8 +5,8 @@ use axum::{
 };
 use serde::Deserialize;
 
-use super::super::http::{AppError, AppState, authenticate};
-use crate::events::{UserFilter, ServerEvent};
+use super::super::http::{authenticate, AppError, AppState};
+use crate::events::{ServerEvent, UserFilter};
 
 /// Toki query params — same interface as local daemon REPORT protocol.
 /// Query is toki PromQL (usage{}, events{}, cost{}), start/end are epoch seconds or date strings.
@@ -46,7 +46,11 @@ async fn resolve_user_filter(
     requested_scope: &str,
 ) -> Result<UserFilter, AppError> {
     let max_scope = state.dynamic_settings.max_query_scope().await;
-    let is_admin = state.db.user_is_admin(user_id).await.map_err(AppError::internal)?;
+    let is_admin = state
+        .db
+        .user_is_admin(user_id)
+        .await
+        .map_err(AppError::internal)?;
 
     // Admins bypass max_scope enforcement, but the *requested* scope still
     // narrows the query. An admin asking for `scope=self` should see only
@@ -60,12 +64,20 @@ async fn resolve_user_filter(
             }
             // Admins can pull any team's data; non-admins must be members.
             if !is_admin {
-                let role = state.db.get_team_member_role(&team_id, user_id).await.map_err(AppError::internal)?;
+                let role = state
+                    .db
+                    .get_team_member_role(&team_id, user_id)
+                    .await
+                    .map_err(AppError::internal)?;
                 if role.is_none() {
                     return Err(AppError::forbidden("not a member of this team"));
                 }
             }
-            let members = state.db.list_team_members(&team_id).await.map_err(AppError::internal)?;
+            let members = state
+                .db
+                .list_team_members(&team_id)
+                .await
+                .map_err(AppError::internal)?;
             let user_ids: Vec<String> = members.iter().map(|m| m.user_id.clone()).collect();
             Ok(UserFilter::Multiple(user_ids))
         }
@@ -88,7 +100,11 @@ fn parse_scope(s: &str) -> Scope {
         "all" => Scope::All,
         s if s.starts_with("team:") => {
             let id = s.strip_prefix("team:").unwrap_or("");
-            if id.is_empty() { Scope::Invalid } else { Scope::Team(id.to_string()) }
+            if id.is_empty() {
+                Scope::Invalid
+            } else {
+                Scope::Team(id.to_string())
+            }
         }
         _ => Scope::Invalid,
     }
@@ -113,12 +129,18 @@ pub async fn toki_query(
 
     let tz = parse_timezone(params.tz.as_deref())?;
     let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
-    let start_ms = params.start.as_deref()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let start_ms = params
+        .start
+        .as_deref()
         .map(|s| parse_toki_bound_ms(s, false, tz.as_ref()))
         .transpose()?
         .unwrap_or(0);
-    let end_ms = params.end.as_deref()
+    let end_ms = params
+        .end
+        .as_deref()
         .map(|s| parse_toki_bound_ms(s, true, tz.as_ref()))
         .transpose()?
         .unwrap_or_else(|| now.saturating_mul(1000));
@@ -152,33 +174,36 @@ pub async fn toki_query(
                 continue;
             }
             // Same field names as the local WindowRow wire shape.
-            providers.entry(provider).or_default().push(serde_json::json!({
-                "kind": match w.window_kind { 0 => "session", 1 => "weekly", _ => "unknown" },
-                "limit_id": w.limit_id,
-                "account": w.account,
-                "window_end_ms": w.window_end_ms,
-                "raw_resets_at_ms": w.raw_resets_at_ms,
-                "window_minutes": w.window_minutes,
-                "peak_pct": (w.peak_pct_x100 as f64) / 100.0,
-                "last_pct": (w.last_pct_x100 as f64) / 100.0,
-                "observed_ts_ms": w.observed_ts_ms,
-                "first_seen_ms": w.first_seen_ms,
-                // Derived: a device that uploaded an open snapshot and went
-                // permanently offline never sends the finalize — a passed
-                // reset IS final regardless (mirrors the client's grace).
-                // Compared against WALL CLOCK: the caller can supply a future
-                // end date, which would report a
-                // still-open window (peak still climbing) as final.
-                "finalized": w.finalized || w.raw_resets_at_ms + 180_000 < (now * 1000),
-                "maxed_out": w.maxed_out,
-                "limit_reached_kind": w.limit_reached_kind,
-                "time_to_100_ms": w.time_to_100_ms,
-                "active_ms": w.active_ms,
-                "last_sample_gap_ms": w.last_sample_gap_ms,
-                "sampled_active_fraction": w.sampled_active_fraction,
-                "n_samples": w.n_samples,
-                "plan": w.plan,
-            }));
+            providers
+                .entry(provider)
+                .or_default()
+                .push(serde_json::json!({
+                    "kind": match w.window_kind { 0 => "session", 1 => "weekly", _ => "unknown" },
+                    "limit_id": w.limit_id,
+                    "account": w.account,
+                    "window_end_ms": w.window_end_ms,
+                    "raw_resets_at_ms": w.raw_resets_at_ms,
+                    "window_minutes": w.window_minutes,
+                    "peak_pct": (w.peak_pct_x100 as f64) / 100.0,
+                    "last_pct": (w.last_pct_x100 as f64) / 100.0,
+                    "observed_ts_ms": w.observed_ts_ms,
+                    "first_seen_ms": w.first_seen_ms,
+                    // Derived: a device that uploaded an open snapshot and went
+                    // permanently offline never sends the finalize — a passed
+                    // reset IS final regardless (mirrors the client's grace).
+                    // Compared against WALL CLOCK: the caller can supply a future
+                    // end date, which would report a
+                    // still-open window (peak still climbing) as final.
+                    "finalized": w.finalized || w.raw_resets_at_ms + 180_000 < (now * 1000),
+                    "maxed_out": w.maxed_out,
+                    "limit_reached_kind": w.limit_reached_kind,
+                    "time_to_100_ms": w.time_to_100_ms,
+                    "active_ms": w.active_ms,
+                    "last_sample_gap_ms": w.last_sample_gap_ms,
+                    "sampled_active_fraction": w.sampled_active_fraction,
+                    "n_samples": w.n_samples,
+                    "plan": w.plan,
+                }));
         }
         for list in providers.values_mut() {
             list.sort_by_key(|v| v["window_end_ms"].as_i64().unwrap_or(0));
@@ -192,7 +217,9 @@ pub async fn toki_query(
     let parsed = parse_toki_virtual_query(&params.query).map_err(unsupported_query_error)?;
     let is_range = params.step.is_some();
 
-    let step_secs: i64 = params.step.as_deref()
+    let step_secs: i64 = params
+        .step
+        .as_deref()
         .map(parse_duration_secs)
         .transpose()?
         .unwrap_or(3600);
@@ -277,23 +304,37 @@ pub async fn toki_query(
             StatusCode::OK,
             [("Content-Type", "application/json")],
             toki_json,
-        ).into_response());
+        )
+            .into_response());
     }
 
-    let effective_step = if is_range { step_secs } else { (range_ms / 1000).max(1) };
+    let effective_step = if is_range {
+        step_secs
+    } else {
+        (range_ms / 1000).max(1)
+    };
     let start_of_week = params.start_of_week.as_deref().and_then(parse_weekday);
     let toki_json = aggregate_events_to_toki_json(
-        &all_events, effective_step, since_ms, until_ms,
-        parsed.is_cost, parsed.is_events, &parsed.group_by,
-        parsed.provider.as_deref(), &pricing,
-        tz.as_ref(), start_of_week, include_cost,
+        &all_events,
+        effective_step,
+        since_ms,
+        until_ms,
+        parsed.is_cost,
+        parsed.is_events,
+        &parsed.group_by,
+        parsed.provider.as_deref(),
+        &pricing,
+        tz.as_ref(),
+        start_of_week,
+        include_cost,
     )?;
 
     Ok((
         StatusCode::OK,
         [("Content-Type", "application/json")],
         toki_json,
-    ).into_response())
+    )
+        .into_response())
 }
 
 /// Render the local query engine's `RawEvent` wire shape, grouped only by the
@@ -332,10 +373,7 @@ fn raw_events_to_toki_json(
             .map(|event| {
                 let timestamp = chrono::DateTime::from_timestamp_millis(event.ts_ms)
                     .map(|dt| match tz {
-                        Some(tz) => dt
-                            .with_timezone(tz)
-                            .format("%Y-%m-%dT%H:%M:%S")
-                            .to_string(),
+                        Some(tz) => dt.with_timezone(tz).format("%Y-%m-%dT%H:%M:%S").to_string(),
                         None => dt.format("%Y-%m-%dT%H:%M:%S").to_string(),
                     })
                     .unwrap_or_default();
@@ -354,11 +392,8 @@ fn raw_events_to_toki_json(
                         .entry(event.model.as_str())
                         .or_insert_with(|| pricing.get(&event.model));
                     if let Some(price) = price.as_ref() {
-                        row["cost_usd"] = serde_json::json!(event_cost_for_provider(
-                            price,
-                            event,
-                            provider,
-                        ));
+                        row["cost_usd"] =
+                            serde_json::json!(event_cost_for_provider(price, event, provider,));
                     }
                 }
                 row
@@ -392,7 +427,9 @@ fn event_cost_for_provider(
         // as a subset of output. The cache rate replaces the normal input rate;
         // reasoning has no separate billing bucket.
         price.cost(
-            event.input_tokens.saturating_sub(event.cache_read_input_tokens),
+            event
+                .input_tokens
+                .saturating_sub(event.cache_read_input_tokens),
             event.output_tokens,
             0,
             event.cache_read_input_tokens,
@@ -429,9 +466,9 @@ enum GroupBy {
 impl GroupBy {
     fn key<'a>(&self, event: &'a crate::events::ServerEvent) -> &'a String {
         match self {
-            GroupBy::Model     => &event.model,
-            GroupBy::Project   => &event.project,
-            GroupBy::DeviceId  => &event.device_id,
+            GroupBy::Model => &event.model,
+            GroupBy::Project => &event.project,
+            GroupBy::DeviceId => &event.device_id,
         }
     }
 }
@@ -439,9 +476,9 @@ impl GroupBy {
 impl From<&str> for GroupBy {
     fn from(s: &str) -> Self {
         match s {
-            "project"   => GroupBy::Project,
+            "project" => GroupBy::Project,
             "device_id" => GroupBy::DeviceId,
-            _           => GroupBy::Model,
+            _ => GroupBy::Model,
         }
     }
 }
@@ -471,12 +508,16 @@ fn bucket_start_sec(
     // Tz-aware calendar flooring for week and whole-day-multiple granularities.
     if let (true, Some(tz)) = (is_week || whole_day_multiple, tz) {
         use chrono::{Datelike, Duration, NaiveDate, TimeZone};
-        if let Some(local) = chrono::DateTime::from_timestamp_millis(ts_ms).map(|dt| dt.with_timezone(tz)) {
+        if let Some(local) =
+            chrono::DateTime::from_timestamp_millis(ts_ms).map(|dt| dt.with_timezone(tz))
+        {
             let date = local.date_naive();
             let start_date = if is_week {
                 // Align to start_of_week local midnight (honours the setting).
                 let back = (date.weekday().num_days_from_monday() as i64
-                    - start_of_week.num_days_from_monday() as i64 + 7) % 7;
+                    - start_of_week.num_days_from_monday() as i64
+                    + 7)
+                    % 7;
                 date - Duration::days(back)
             } else {
                 // Floor the day index by step_days, anchored at 1970-01-01.
@@ -538,8 +579,8 @@ fn bucket_start_sec(
 ///
 /// EventStore has already deduped by msg_id, so each event appears once.
 #[allow(clippy::too_many_arguments)] // one aggregation entry point; bundling
-// these into a struct would only move the argument list to a type nobody else
-// constructs.
+                                     // these into a struct would only move the argument list to a type nobody else
+                                     // constructs.
 fn aggregate_events_to_toki_json(
     events: &[ServerEvent],
     step_secs: i64,
@@ -566,8 +607,13 @@ fn aggregate_events_to_toki_json(
 
     #[derive(Default)]
     struct ModelBucket {
-        input: u64, output: u64, cache_create: u64, cache_read: u64,
-        usage_total: u64, events: u64, cost_usd: Option<f64>,
+        input: u64,
+        output: u64,
+        cache_create: u64,
+        cache_read: u64,
+        usage_total: u64,
+        events: u64,
+        cost_usd: Option<f64>,
         provider: String,
     }
 
@@ -598,7 +644,9 @@ fn aggregate_events_to_toki_json(
 
     for event in events {
         // 1. Scan range check (EventStore already filters, but double-check)
-        if event.ts_ms < since_ms || event.ts_ms >= until_ms { continue; }
+        if event.ts_ms < since_ms || event.ts_ms >= until_ms {
+            continue;
+        }
 
         // 2. Bucket assignment. Day/week granularities floor to the request
         //    timezone's local calendar boundary (matching the local CLI's
@@ -608,15 +656,23 @@ fn aggregate_events_to_toki_json(
 
         // 3. Bucket filter (overlap check). step_ms is the nominal bucket width;
         //    DST-length days differ by ±1h, which only nudges range-edge buckets.
-        if bucket_ms + step_ms <= since_ms || bucket_ms >= until_ms { continue; }
+        if bucket_ms + step_ms <= since_ms || bucket_ms >= until_ms {
+            continue;
+        }
 
         let group_key = group_dim.key(event);
-        let provider_key = if event.provider.is_empty() { "claude_code" } else { event.provider.as_str() };
+        let provider_key = if event.provider.is_empty() {
+            "claude_code"
+        } else {
+            event.provider.as_str()
+        };
 
         // 3b. Provider matcher. Compared against the same normalized key the
         //     response is bucketed under, so `provider="claude_code"` also
         //     matches events that arrived with an empty provider.
-        if provider_filter.is_some_and(|want| want != provider_key) { continue; }
+        if provider_filter.is_some_and(|want| want != provider_key) {
+            continue;
+        }
 
         let key = (bucket_sec, provider_key.to_string(), group_key.clone());
         // Hard cap: refuse to allocate new entries past the limit. Existing
@@ -674,7 +730,8 @@ fn aggregate_events_to_toki_json(
     // each provider's periods under its own top-level key — mirroring the
     // single-provider shape `{"providers": {"<provider>": [...]}}` — rather than
     // collapsing every provider's data under the first one seen.
-    let mut per_provider: BTreeMap<String, BTreeMap<String, Vec<serde_json::Value>>> = BTreeMap::new();
+    let mut per_provider: BTreeMap<String, BTreeMap<String, Vec<serde_json::Value>>> =
+        BTreeMap::new();
     for ((bucket_sec, _provider_key, group_key), bucket) in &buckets {
         let ts_str = if let Some(tz) = tz {
             chrono::DateTime::from_timestamp(*bucket_sec, 0)
@@ -686,7 +743,11 @@ fn aggregate_events_to_toki_json(
                 .unwrap_or_default()
         };
 
-        let provider = if bucket.provider.is_empty() { "claude_code" } else { bucket.provider.as_str() };
+        let provider = if bucket.provider.is_empty() {
+            "claude_code"
+        } else {
+            bucket.provider.as_str()
+        };
         let is_codex = provider == "codex";
         let mut entry = serde_json::json!({
             "model": group_key,
@@ -720,19 +781,25 @@ fn aggregate_events_to_toki_json(
 
     let mut providers_json = serde_json::Map::new();
     for (provider, periods) in per_provider {
-        let data: Vec<serde_json::Value> = periods.into_iter().map(|(period, models)| {
-            serde_json::json!({
-                "period": period,
-                "usage_per_models": models,
+        let data: Vec<serde_json::Value> = periods
+            .into_iter()
+            .map(|(period, models)| {
+                serde_json::json!({
+                    "period": period,
+                    "usage_per_models": models,
+                })
             })
-        }).collect();
+            .collect();
         providers_json.insert(provider, serde_json::Value::Array(data));
     }
 
     // Preserve the historical shape: an empty result still carries a
     // `claude_code` key so clients that index it directly don't choke.
     if providers_json.is_empty() {
-        providers_json.insert("claude_code".to_string(), serde_json::Value::Array(Vec::new()));
+        providers_json.insert(
+            "claude_code".to_string(),
+            serde_json::Value::Array(Vec::new()),
+        );
     }
 
     let mut output = serde_json::json!({ "providers": providers_json });
@@ -748,7 +815,6 @@ fn aggregate_events_to_toki_json(
         .map_err(|e| AppError::internal(anyhow::anyhow!("json serialize: {e}")))
 }
 
-
 fn parse_timezone(value: Option<&str>) -> Result<Option<chrono_tz::Tz>, AppError> {
     value
         .map(|name| {
@@ -763,11 +829,7 @@ fn parse_timezone(value: Option<&str>) -> Result<Option<chrono_tz::Tz>, AppError
 /// Convert a user-facing bound into the half-open millisecond range used by
 /// EventStore. A date-only end denotes the whole date, so its exclusive bound
 /// is the following local midnight rather than 23:59:59.000.
-fn parse_toki_bound_ms(
-    s: &str,
-    is_end: bool,
-    tz: Option<&chrono_tz::Tz>,
-) -> Result<i64, AppError> {
+fn parse_toki_bound_ms(s: &str, is_end: bool, tz: Option<&chrono_tz::Tz>) -> Result<i64, AppError> {
     // Unix milliseconds. The daemon reads a 13-digit all-digit value as
     // milliseconds (`toki/src/query.rs`); reading the same string as seconds
     // here put the two paths tens of thousands of years apart, silently and
@@ -796,11 +858,7 @@ fn parse_toki_bound_ms(
 }
 
 /// Parse toki time string: epoch seconds, YYYYMMDD, or YYYYMMDDhhmmss
-fn parse_toki_time(
-    s: &str,
-    is_end: bool,
-    tz: Option<&chrono_tz::Tz>,
-) -> Result<i64, AppError> {
+fn parse_toki_time(s: &str, is_end: bool, tz: Option<&chrono_tz::Tz>) -> Result<i64, AppError> {
     use chrono::TimeZone;
 
     // Try epoch seconds first
@@ -907,7 +965,8 @@ fn parse_duration_secs(s: &str) -> Result<i64, AppError> {
                 'y' => 31536000,
                 _ => return Err(invalid()),
             };
-            total = n.checked_mul(unit_secs)
+            total = n
+                .checked_mul(unit_secs)
                 .and_then(|v| total.checked_add(v))
                 .ok_or_else(invalid)?;
             saw_unit = true;
@@ -1018,7 +1077,10 @@ impl<'a> QueryCursor<'a> {
     fn ident(&mut self) -> Option<&'a str> {
         self.skip_ws();
         let start = self.pos;
-        while self.peek().is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        while self
+            .peek()
+            .is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
             self.pos += 1;
         }
         (self.pos > start).then(|| &self.src[start..self.pos])
@@ -1045,7 +1107,10 @@ impl<'a> QueryCursor<'a> {
     fn quoted(&mut self) -> Result<&'a str, String> {
         self.skip_ws();
         if self.peek() != Some(b'"') {
-            return Err(format!("expected a quoted label value, found `{}`", self.tail()));
+            return Err(format!(
+                "expected a quoted label value, found `{}`",
+                self.tail()
+            ));
         }
         self.pos += 1;
         let start = self.pos;
@@ -1073,9 +1138,12 @@ impl<'a> QueryCursor<'a> {
             if self.eat(b')') {
                 break;
             }
-            let label = self
-                .ident()
-                .ok_or_else(|| format!("expected a label name in `by (...)`, found `{}`", self.tail()))?;
+            let label = self.ident().ok_or_else(|| {
+                format!(
+                    "expected a label name in `by (...)`, found `{}`",
+                    self.tail()
+                )
+            })?;
             labels.push(label);
             if self.eat(b',') {
                 continue;
@@ -1083,7 +1151,10 @@ impl<'a> QueryCursor<'a> {
             if self.eat(b')') {
                 break;
             }
-            return Err(format!("expected `,` or `)` in `by (...)`, found `{}`", self.tail()));
+            return Err(format!(
+                "expected `,` or `)` in `by (...)`, found `{}`",
+                self.tail()
+            ));
         }
         if labels.is_empty() {
             return Err("`by ()` needs at least one label".to_string());
@@ -1224,9 +1295,9 @@ fn parse_toki_virtual_query(query: &str) -> Result<ParsedQuery, String> {
             if c.eat(b'}') {
                 break;
             }
-            let key = c
-                .ident()
-                .ok_or_else(|| format!("expected a label name in `{{...}}`, found `{}`", c.tail()))?;
+            let key = c.ident().ok_or_else(|| {
+                format!("expected a label name in `{{...}}`, found `{}`", c.tail())
+            })?;
             c.skip_ws();
             // Only `=` is executable here; the rest would silently match everything.
             let op = match (c.peek(), c.src.as_bytes().get(c.pos + 1).copied()) {
@@ -1234,7 +1305,12 @@ fn parse_toki_virtual_query(query: &str) -> Result<ParsedQuery, String> {
                 (Some(b'!'), Some(b'~')) => "!~",
                 (Some(b'!'), Some(b'=')) => "!=",
                 (Some(b'='), _) => "=",
-                _ => return Err(format!("expected a label matcher after `{key}`, found `{}`", c.tail())),
+                _ => {
+                    return Err(format!(
+                        "expected a label matcher after `{key}`, found `{}`",
+                        c.tail()
+                    ))
+                }
             };
             c.pos += op.len();
             if op != "=" {
@@ -1262,7 +1338,10 @@ fn parse_toki_virtual_query(query: &str) -> Result<ParsedQuery, String> {
             if c.eat(b'}') {
                 break;
             }
-            return Err(format!("expected `,` or `}}` in `{{...}}`, found `{}`", c.tail()));
+            return Err(format!(
+                "expected `,` or `}}` in `{{...}}`, found `{}`",
+                c.tail()
+            ));
         }
     }
 
@@ -1294,7 +1373,10 @@ fn parse_toki_virtual_query(query: &str) -> Result<ParsedQuery, String> {
 
     for _ in 0..open_parens {
         if !c.eat(b')') {
-            return Err(format!("unbalanced parentheses; expected `)`, found `{}`", c.tail()));
+            return Err(format!(
+                "unbalanced parentheses; expected `)`, found `{}`",
+                c.tail()
+            ));
         }
     }
 
@@ -1349,7 +1431,6 @@ fn parse_toki_virtual_query(query: &str) -> Result<ParsedQuery, String> {
         provider: provider.map(str::to_string),
     })
 }
-
 
 /// Capability discovery for optional sync features. Older servers 404 here;
 /// clients treat only an authoritative 404/2xx as an answer (transient errors
@@ -1480,28 +1561,78 @@ mod tests {
     fn test_previously_accepted_queries_are_unchanged() {
         // (query, is_cost, is_events, group_by)
         let cases: &[(&str, bool, bool, &str)] = &[
-            ("sum by (model) (increase(usage{}[1d]))",       false, false, "model"),
-            ("sum by (model) (increase(usage[1h]))",         false, false, "model"),
-            ("sum by (model) (increase(cost{}[1d]))",        true,  false, "model"),
-            ("sum by (model) (increase(events{}[1d]))",      false, true,  "model"),
-            ("sum by (project) (increase(usage{}[1d]))",     false, false, "project"),
-            ("sum by (device_id) (increase(usage{}[1d]))",   false, false, "device_id"),
+            (
+                "sum by (model) (increase(usage{}[1d]))",
+                false,
+                false,
+                "model",
+            ),
+            (
+                "sum by (model) (increase(usage[1h]))",
+                false,
+                false,
+                "model",
+            ),
+            (
+                "sum by (model) (increase(cost{}[1d]))",
+                true,
+                false,
+                "model",
+            ),
+            (
+                "sum by (model) (increase(events{}[1d]))",
+                false,
+                true,
+                "model",
+            ),
+            (
+                "sum by (project) (increase(usage{}[1d]))",
+                false,
+                false,
+                "project",
+            ),
+            (
+                "sum by (device_id) (increase(usage{}[1d]))",
+                false,
+                false,
+                "device_id",
+            ),
             // `type` was skipped by the old scanner; it still is.
-            ("sum by (type) (increase(usage{}[1d]))",        false, false, "model"),
-            ("sum by (type, project) (increase(cost[1d]))",  true,  false, "project"),
+            (
+                "sum by (type) (increase(usage{}[1d]))",
+                false,
+                false,
+                "model",
+            ),
+            (
+                "sum by (type, project) (increase(cost[1d]))",
+                true,
+                false,
+                "project",
+            ),
             // No `by` clause → per-model rows, same as the daemon's default.
-            ("sum(increase(usage[1d]))",                     false, false, "model"),
-            ("increase(cost{}[1d])",                         true,  false, "model"),
-            ("usage{}[1d]",                                  false, false, "model"),
-            ("usage",                                        false, false, "model"),
+            ("sum(increase(usage[1d]))", false, false, "model"),
+            ("increase(cost{}[1d])", true, false, "model"),
+            ("usage{}[1d]", false, false, "model"),
+            ("usage", false, false, "model"),
             // Legacy toki form: group-by trails the expression.
-            ("increase(usage[1d]) by (project)",             false, false, "project"),
-            ("usage[5m] by (model)",                         false, false, "model"),
-            ("sum(usage[1d]) by (device_id)",                false, false, "device_id"),
+            ("increase(usage[1d]) by (project)", false, false, "project"),
+            ("usage[5m] by (model)", false, false, "model"),
+            ("sum(usage[1d]) by (device_id)", false, false, "device_id"),
             // Pre-rename spelling still carried by saved dashboards.
-            ("sum by (model) (increase(toki_tokens_total{}[1d]))", false, false, "model"),
+            (
+                "sum by (model) (increase(toki_tokens_total{}[1d]))",
+                false,
+                false,
+                "model",
+            ),
             // Whitespace variants.
-            ("sum  by ( model , type ) ( increase( usage{} [1d] ) )", false, false, "model"),
+            (
+                "sum  by ( model , type ) ( increase( usage{} [1d] ) )",
+                false,
+                false,
+                "model",
+            ),
         ];
         for (query, is_cost, is_events, group_by) in cases {
             let r = parsed(query);
@@ -1518,14 +1649,24 @@ mod tests {
     /// returns what it says.
     #[test]
     fn test_bare_events_metric_is_an_events_query() {
-        for query in ["events", "events by (model)", "sum(events)", "sum by (project) (events)"] {
+        for query in [
+            "events",
+            "events by (model)",
+            "sum(events)",
+            "sum by (project) (events)",
+        ] {
             let r = parsed(query);
             assert!(r.is_events, "`{query}` is an events query");
             assert!(!r.is_cost);
         }
         assert!(parsed("events").raw_events);
         assert!(parsed("events{provider=\"codex\"}").raw_events);
-        for query in ["events[1d]", "events by (type)", "sum(events)", "increase(events)"] {
+        for query in [
+            "events[1d]",
+            "events by (type)",
+            "sum(events)",
+            "increase(events)",
+        ] {
             assert!(!parsed(query).raw_events, "`{query}` must stay aggregated");
         }
     }
@@ -1541,7 +1682,7 @@ mod tests {
             "sum by (model) (increase(sessions[1d]))",
             "sum by (model) (increase(projects[1d]))",
             "sum by (model) (increase(windows[1d]))",
-            "usge{}[1d]",                       // typo — used to be silently `usage`
+            "usge{}[1d]", // typo — used to be silently `usage`
             // Aggregations and functions it does not implement.
             "avg by (model) (increase(usage[1d]))",
             "count by (model) (increase(events[1d]))",
@@ -1566,12 +1707,15 @@ mod tests {
             "hello world",
             "{}",
             "1 + 1",
-            "sum by (model) (increase(usage[1d])",   // unbalanced
+            "sum by (model) (increase(usage[1d])", // unbalanced
             "sum by (model) (increase(usage[nope]))", // unparseable range
         ];
         for query in queries {
             let reason = refusal(query);
-            assert!(!reason.is_empty(), "refusal of `{query}` must carry a reason");
+            assert!(
+                !reason.is_empty(),
+                "refusal of `{query}` must carry a reason"
+            );
         }
     }
 
@@ -1580,13 +1724,19 @@ mod tests {
     #[test]
     fn test_refusal_reason_names_the_offending_token() {
         let cases = [
-            ("sum by (model) (increase(usage{model=\"opus\"}[1d]))", "model"),
-            ("sum by (session) (increase(usage[1d]))",               "session"),
-            ("avg by (model) (increase(usage[1d]))",                 "avg"),
-            ("sum by (model) (rate(usage[5m]))",                     "rate"),
-            ("sum by (model) (increase(http_requests_total[5m]))",   "http_requests_total"),
-            ("sum by (model) (increase(usage[1d] offset 7d))",       "offset"),
-            ("sum by (model) (increase(sessions[1d]))",              "sessions"),
+            (
+                "sum by (model) (increase(usage{model=\"opus\"}[1d]))",
+                "model",
+            ),
+            ("sum by (session) (increase(usage[1d]))", "session"),
+            ("avg by (model) (increase(usage[1d]))", "avg"),
+            ("sum by (model) (rate(usage[5m]))", "rate"),
+            (
+                "sum by (model) (increase(http_requests_total[5m]))",
+                "http_requests_total",
+            ),
+            ("sum by (model) (increase(usage[1d] offset 7d))", "offset"),
+            ("sum by (model) (increase(sessions[1d]))", "sessions"),
         ];
         for (query, needle) in cases {
             let reason = refusal(query);
@@ -1607,11 +1757,18 @@ mod tests {
 
         let response = err.into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        let message = body["error"].as_str().expect("body must carry an `error` string");
+        let message = body["error"]
+            .as_str()
+            .expect("body must carry an `error` string");
         assert!(message.starts_with("unsupported query: "), "got: {message}");
-        assert!(message.contains(&reason), "the reason must survive verbatim, got: {message}");
+        assert!(
+            message.contains(&reason),
+            "the reason must survive verbatim, got: {message}"
+        );
         assert!(message.contains("http_requests_total"), "got: {message}");
     }
 
@@ -1619,7 +1776,12 @@ mod tests {
     /// refused with a message, not slice-panic mid-character.
     #[test]
     fn test_non_ascii_query_is_refused_without_panicking() {
-        for query in ["사용량", "usage{model=\"프로젝트\"}", "usage[1일]", "usage{} 한글"] {
+        for query in [
+            "사용량",
+            "usage{model=\"프로젝트\"}",
+            "usage[1일]",
+            "usage{} 한글",
+        ] {
             let reason = refusal(query);
             assert!(!reason.is_empty());
         }
@@ -1664,28 +1826,55 @@ mod tests {
 
         let totals = |provider_filter: Option<&str>| -> serde_json::Value {
             let out = aggregate_events_to_toki_json(
-                &events, 60, 1_700_000_000_000, 1_700_000_060_000,
-                false, false, "model", provider_filter, &pricing, None, None, true,
-            ).unwrap();
+                &events,
+                60,
+                1_700_000_000_000,
+                1_700_000_060_000,
+                false,
+                false,
+                "model",
+                provider_filter,
+                &pricing,
+                None,
+                None,
+                true,
+            )
+            .unwrap();
             serde_json::from_slice(&out).unwrap()
         };
 
         // No matcher: unchanged: both providers are reported.
         let all = totals(None);
         let keys: Vec<&String> = all["providers"].as_object().unwrap().keys().collect();
-        assert_eq!(keys, vec!["claude_code", "codex"], "unfiltered query keeps every provider");
+        assert_eq!(
+            keys,
+            vec!["claude_code", "codex"],
+            "unfiltered query keeps every provider"
+        );
 
         let only_codex = totals(Some("codex"));
         let obj = only_codex["providers"].as_object().unwrap();
-        assert_eq!(obj.keys().collect::<Vec<_>>(), vec!["codex"], "codex filter drops claude_code");
+        assert_eq!(
+            obj.keys().collect::<Vec<_>>(),
+            vec!["codex"],
+            "codex filter drops claude_code"
+        );
         let entry = &obj["codex"].as_array().unwrap()[0]["usage_per_models"][0];
         assert_eq!(entry["input_tokens"].as_u64(), Some(200));
 
         let only_claude = totals(Some("claude_code"));
         let obj = only_claude["providers"].as_object().unwrap();
-        assert_eq!(obj.keys().collect::<Vec<_>>(), vec!["claude_code"], "claude filter drops codex");
+        assert_eq!(
+            obj.keys().collect::<Vec<_>>(),
+            vec!["claude_code"],
+            "claude filter drops codex"
+        );
         let entry = &obj["claude_code"].as_array().unwrap()[0]["usage_per_models"][0];
-        assert_eq!(entry["input_tokens"].as_u64(), Some(400), "empty provider counts as claude_code");
+        assert_eq!(
+            entry["input_tokens"].as_u64(),
+            Some(400),
+            "empty provider counts as claude_code"
+        );
     }
 
     // MARK: - Aggregation integration tests
@@ -1695,7 +1884,13 @@ mod tests {
     // shared a timestamp + model but differed on the group-by label)
     // stays fixed.
 
-    fn make_event(device_id: &str, model: &str, project: &str, ts_ms: i64, input: u64) -> crate::events::ServerEvent {
+    fn make_event(
+        device_id: &str,
+        model: &str,
+        project: &str,
+        ts_ms: i64,
+        input: u64,
+    ) -> crate::events::ServerEvent {
         crate::events::ServerEvent {
             device_id: device_id.to_string(),
             user_id: "u1".to_string(),
@@ -1746,7 +1941,8 @@ mod tests {
             &pricing,
             true,
             false,
-        ).unwrap();
+        )
+        .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&out).unwrap();
         let rows = value["providers"]["codex"].as_array().unwrap();
         assert_eq!(rows.len(), 1);
@@ -1758,14 +1954,9 @@ mod tests {
         assert_eq!(rows[0]["cost_usd"], 13.0);
         assert!(value["providers"].get("claude_code").is_none());
 
-        let no_cost = raw_events_to_toki_json(
-            &[event],
-            Some("codex"),
-            Some(&kst),
-            &pricing,
-            false,
-            false,
-        ).unwrap();
+        let no_cost =
+            raw_events_to_toki_json(&[event], Some("codex"), Some(&kst), &pricing, false, false)
+                .unwrap();
         let no_cost: serde_json::Value = serde_json::from_slice(&no_cost).unwrap();
         assert!(no_cost["providers"]["codex"][0].get("cost_usd").is_none());
     }
@@ -1776,22 +1967,30 @@ mod tests {
         let start = parse_toki_time("20260827", false, Some(&kst)).unwrap();
         let end = parse_toki_time("20260827", true, Some(&kst)).unwrap();
         assert_eq!(
-            chrono::DateTime::from_timestamp(start, 0).unwrap().to_rfc3339(),
+            chrono::DateTime::from_timestamp(start, 0)
+                .unwrap()
+                .to_rfc3339(),
             "2026-08-26T15:00:00+00:00"
         );
         assert_eq!(
-            chrono::DateTime::from_timestamp(end, 0).unwrap().to_rfc3339(),
+            chrono::DateTime::from_timestamp(end, 0)
+                .unwrap()
+                .to_rfc3339(),
             "2026-08-27T14:59:59+00:00"
         );
 
         let start_ms = parse_toki_bound_ms("20260827", false, Some(&kst)).unwrap();
         let end_ms = parse_toki_bound_ms("20260827", true, Some(&kst)).unwrap();
         assert_eq!(
-            chrono::DateTime::from_timestamp_millis(start_ms).unwrap().to_rfc3339(),
+            chrono::DateTime::from_timestamp_millis(start_ms)
+                .unwrap()
+                .to_rfc3339(),
             "2026-08-26T15:00:00+00:00"
         );
         assert_eq!(
-            chrono::DateTime::from_timestamp_millis(end_ms).unwrap().to_rfc3339(),
+            chrono::DateTime::from_timestamp_millis(end_ms)
+                .unwrap()
+                .to_rfc3339(),
             "2026-08-27T15:00:00+00:00"
         );
         assert_eq!(end_ms - start_ms, 86_400_000);
@@ -1849,7 +2048,9 @@ mod tests {
         let base = table.get("claude-opus-5").expect("base model priced");
         assert_eq!(base.input_cost_per_token, 1.0);
 
-        let fast = table.get("claude-opus-5-fast").expect("fast variant priced");
+        let fast = table
+            .get("claude-opus-5-fast")
+            .expect("fast variant priced");
         assert_eq!(fast.input_cost_per_token, 2.0);
         assert_eq!(fast.output_cost_per_token, 20.0);
         assert_eq!(fast.cache_creation_input_token_cost, Some(4.0));
@@ -1939,10 +2140,12 @@ mod tests {
         let providers = v["providers"].as_object().unwrap();
         let arr = providers.values().next().unwrap().as_array().unwrap();
         arr.iter()
-            .map(|p| (
-                p["period"].as_str().unwrap().to_string(),
-                p["usage_per_models"].as_array().unwrap().clone(),
-            ))
+            .map(|p| {
+                (
+                    p["period"].as_str().unwrap().to_string(),
+                    p["usage_per_models"].as_array().unwrap().clone(),
+                )
+            })
             .collect()
     }
 
@@ -1957,14 +2160,34 @@ mod tests {
         ];
         let pricing = crate::pricing::PricingTable::new(std::collections::HashMap::new());
         let out = aggregate_events_to_toki_json(
-            &events, 60, 1_700_000_000_000, 1_700_000_060_000,
-            false, false, "device_id", None, &pricing, None, None, true,
-        ).unwrap();
+            &events,
+            60,
+            1_700_000_000_000,
+            1_700_000_060_000,
+            false,
+            false,
+            "device_id",
+            None,
+            &pricing,
+            None,
+            None,
+            true,
+        )
+        .unwrap();
 
         let periods = parse_periods(&out);
-        assert_eq!(periods.len(), 2, "device_id grouping must split entries by device, got {periods:?}");
-        let labels: std::collections::HashSet<String> = periods.iter()
-            .flat_map(|(_, entries)| entries.iter().map(|e| e["model"].as_str().unwrap().to_string()))
+        assert_eq!(
+            periods.len(),
+            2,
+            "device_id grouping must split entries by device, got {periods:?}"
+        );
+        let labels: std::collections::HashSet<String> = periods
+            .iter()
+            .flat_map(|(_, entries)| {
+                entries
+                    .iter()
+                    .map(|e| e["model"].as_str().unwrap().to_string())
+            })
             .collect();
         assert!(labels.contains("device-a"));
         assert!(labels.contains("device-b"));
@@ -1981,16 +2204,33 @@ mod tests {
         ];
         let pricing = crate::pricing::PricingTable::new(std::collections::HashMap::new());
         let out = aggregate_events_to_toki_json(
-            &events, 60, 1_700_000_000_000, 1_700_000_060_000,
-            false, false, "model", None, &pricing, None, None, true,
-        ).unwrap();
+            &events,
+            60,
+            1_700_000_000_000,
+            1_700_000_060_000,
+            false,
+            false,
+            "model",
+            None,
+            &pricing,
+            None,
+            None,
+            true,
+        )
+        .unwrap();
         let periods = parse_periods(&out);
         assert_eq!(periods.len(), 2, "two distinct models → two entries");
     }
 
     #[test]
     fn test_aggregate_no_cost_skips_server_pricing() {
-        let events = vec![make_event("device-a", "priced-model", "/proj", 1_700_000_000_000, 100)];
+        let events = vec![make_event(
+            "device-a",
+            "priced-model",
+            "/proj",
+            1_700_000_000_000,
+            100,
+        )];
         let pricing = crate::pricing::PricingTable::new(std::collections::HashMap::from([(
             "priced-model".to_string(),
             crate::pricing::ModelPricing {
@@ -2001,9 +2241,20 @@ mod tests {
             },
         )]));
         let out = aggregate_events_to_toki_json(
-            &events, 60, 1_700_000_000_000, 1_700_000_060_000,
-            false, false, "model", None, &pricing, None, None, false,
-        ).unwrap();
+            &events,
+            60,
+            1_700_000_000_000,
+            1_700_000_060_000,
+            false,
+            false,
+            "model",
+            None,
+            &pricing,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&out).unwrap();
         let model = &value["providers"]["claude_code"][0]["usage_per_models"][0];
         assert!(model.get("cost_usd").is_none());
@@ -2022,8 +2273,14 @@ mod tests {
     #[test]
     fn test_parse_duration_secs_malformed_units() {
         // Previously accepted by trim_end_matches / no digit-before-unit check.
-        assert!(parse_duration_secs("3600ss").is_err(), "double 's' suffix must error");
-        assert!(parse_duration_secs("1hms").is_err(), "units with no preceding digits");
+        assert!(
+            parse_duration_secs("3600ss").is_err(),
+            "double 's' suffix must error"
+        );
+        assert!(
+            parse_duration_secs("1hms").is_err(),
+            "units with no preceding digits"
+        );
         assert!(parse_duration_secs("hms").is_err());
         assert!(parse_duration_secs("s").is_err());
         // Checked arithmetic: an astronomically large value errors, not wraps.
@@ -2047,23 +2304,46 @@ mod tests {
 
         let pricing = crate::pricing::PricingTable::new(std::collections::HashMap::new());
         let out = aggregate_events_to_toki_json(
-            &[cc, cx], 60, 1_700_000_000_000, 1_700_000_060_000,
-            false, false, "device_id", None, &pricing, None, None, true,
-        ).unwrap();
+            &[cc, cx],
+            60,
+            1_700_000_000_000,
+            1_700_000_060_000,
+            false,
+            false,
+            "device_id",
+            None,
+            &pricing,
+            None,
+            None,
+            true,
+        )
+        .unwrap();
 
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
         let providers = v["providers"].as_object().unwrap();
-        assert!(providers.contains_key("claude_code"), "missing claude_code: {providers:?}");
-        assert!(providers.contains_key("codex"), "missing codex: {providers:?}");
+        assert!(
+            providers.contains_key("claude_code"),
+            "missing claude_code: {providers:?}"
+        );
+        assert!(
+            providers.contains_key("codex"),
+            "missing codex: {providers:?}"
+        );
 
         let cc_entry = &providers["claude_code"].as_array().unwrap()[0]["usage_per_models"][0];
         assert_eq!(cc_entry["model"].as_str().unwrap(), "device-a");
         assert_eq!(cc_entry["input_tokens"].as_u64().unwrap(), 100);
-        assert!(cc_entry.get("cache_creation_input_tokens").is_some(), "claude_code field names");
+        assert!(
+            cc_entry.get("cache_creation_input_tokens").is_some(),
+            "claude_code field names"
+        );
 
         let cx_entry = &providers["codex"].as_array().unwrap()[0]["usage_per_models"][0];
         assert_eq!(cx_entry["input_tokens"].as_u64().unwrap(), 200);
-        assert!(cx_entry.get("reasoning_output_tokens").is_some(), "codex field names");
+        assert!(
+            cx_entry.get("reasoning_output_tokens").is_some(),
+            "codex field names"
+        );
     }
 
     #[test]
@@ -2072,9 +2352,9 @@ mod tests {
         assert!(parse_duration_secs("0").is_err());
         assert!(parse_duration_secs("").is_err());
         assert!(parse_duration_secs("abc").is_err());
-        assert!(parse_duration_secs("10x").is_err());   // unknown unit
-        assert!(parse_duration_secs("1h30").is_err());  // trailing digits, no unit
-        assert!(parse_duration_secs("-5").is_err());    // non-positive
+        assert!(parse_duration_secs("10x").is_err()); // unknown unit
+        assert!(parse_duration_secs("1h30").is_err()); // trailing digits, no unit
+        assert!(parse_duration_secs("-5").is_err()); // non-positive
     }
 
     #[test]
@@ -2083,16 +2363,29 @@ mod tests {
         // the local (KST) midnight of its local date, matching the local CLI's
         // tz-aware day buckets — not the UTC midnight.
         let kst: chrono_tz::Tz = "Asia/Seoul".parse().unwrap();
-        let ts_ms = chrono::NaiveDate::from_ymd_opt(2023, 11, 6).unwrap()
-            .and_hms_opt(20, 0, 0).unwrap().and_utc().timestamp() * 1000; // 2023-11-07 05:00 KST
+        let ts_ms = chrono::NaiveDate::from_ymd_opt(2023, 11, 6)
+            .unwrap()
+            .and_hms_opt(20, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp()
+            * 1000; // 2023-11-07 05:00 KST
 
         let b = bucket_start_sec(ts_ms, 86400, Some(&kst), chrono::Weekday::Mon);
-        let local = chrono::DateTime::from_timestamp(b, 0).unwrap().with_timezone(&kst);
-        assert_eq!(local.format("%Y-%m-%d %H:%M:%S").to_string(), "2023-11-07 00:00:00");
+        let local = chrono::DateTime::from_timestamp(b, 0)
+            .unwrap()
+            .with_timezone(&kst);
+        assert_eq!(
+            local.format("%Y-%m-%d %H:%M:%S").to_string(),
+            "2023-11-07 00:00:00"
+        );
 
         // UTC-aligned bucketing would land it on the previous (Nov 6) day.
         let b_utc = bucket_start_sec(ts_ms, 86400, None, chrono::Weekday::Mon);
-        assert_ne!(b, b_utc, "tz-aware day bucket must differ from UTC bucket here");
+        assert_ne!(
+            b, b_utc,
+            "tz-aware day bucket must differ from UTC bucket here"
+        );
     }
 
     #[test]
@@ -2101,12 +2394,22 @@ mod tests {
         // Weekly buckets floor to the start_of_week local midnight.
         let kst: chrono_tz::Tz = "Asia/Seoul".parse().unwrap();
         // 2023-11-08 is a Wednesday; Monday-start week begins 2023-11-06.
-        let ts_ms = chrono::NaiveDate::from_ymd_opt(2023, 11, 8).unwrap()
-            .and_hms_opt(3, 0, 0).unwrap().and_utc().timestamp() * 1000;
+        let ts_ms = chrono::NaiveDate::from_ymd_opt(2023, 11, 8)
+            .unwrap()
+            .and_hms_opt(3, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp()
+            * 1000;
 
         let b = bucket_start_sec(ts_ms, 604800, Some(&kst), chrono::Weekday::Mon);
-        let local = chrono::DateTime::from_timestamp(b, 0).unwrap().with_timezone(&kst);
-        assert_eq!(local.format("%Y-%m-%d %H:%M:%S").to_string(), "2023-11-06 00:00:00");
+        let local = chrono::DateTime::from_timestamp(b, 0)
+            .unwrap()
+            .with_timezone(&kst);
+        assert_eq!(
+            local.format("%Y-%m-%d %H:%M:%S").to_string(),
+            "2023-11-06 00:00:00"
+        );
         assert_eq!(local.weekday(), chrono::Weekday::Mon);
     }
 
@@ -2116,21 +2419,41 @@ mod tests {
         // A whole-day multiple (2d) floors the local day index by 2, anchored at
         // the 1970-01-01 local midnight — and the bucket start is local midnight.
         let kst: chrono_tz::Tz = "Asia/Seoul".parse().unwrap();
-        let ts_ms = NaiveDate::from_ymd_opt(2023, 11, 9).unwrap()
-            .and_hms_opt(3, 0, 0).unwrap().and_utc().timestamp() * 1000;
+        let ts_ms = NaiveDate::from_ymd_opt(2023, 11, 9)
+            .unwrap()
+            .and_hms_opt(3, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp()
+            * 1000;
 
         let b = bucket_start_sec(ts_ms, 172800, Some(&kst), chrono::Weekday::Mon);
-        let local = chrono::DateTime::from_timestamp(b, 0).unwrap().with_timezone(&kst);
-        assert_eq!(local.time().to_string(), "00:00:00", "bucket must start at local midnight");
+        let local = chrono::DateTime::from_timestamp(b, 0)
+            .unwrap()
+            .with_timezone(&kst);
+        assert_eq!(
+            local.time().to_string(),
+            "00:00:00",
+            "bucket must start at local midnight"
+        );
 
         // Independently reproduce the epoch-anchored floored date.
-        let date = chrono::DateTime::from_timestamp_millis(ts_ms).unwrap().with_timezone(&kst).date_naive();
+        let date = chrono::DateTime::from_timestamp_millis(ts_ms)
+            .unwrap()
+            .with_timezone(&kst)
+            .date_naive();
         let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
         let di = (date - epoch).num_days();
         let expect_date = epoch + Duration::days(di.div_euclid(2) * 2);
-        let expect = kst.from_local_datetime(&expect_date.and_hms_opt(0, 0, 0).unwrap()).unwrap().timestamp();
+        let expect = kst
+            .from_local_datetime(&expect_date.and_hms_opt(0, 0, 0).unwrap())
+            .unwrap()
+            .timestamp();
         assert_eq!(b, expect);
-        assert!(b <= ts_ms / 1000 && ts_ms / 1000 < b + 172800 + 3600, "event within its 2-day window");
+        assert!(
+            b <= ts_ms / 1000 && ts_ms / 1000 < b + 172800 + 3600,
+            "event within its 2-day window"
+        );
     }
 
     #[test]
@@ -2139,20 +2462,29 @@ mod tests {
         // (toki bucket_start_ms, fix-toki 888ec2a test_bucket_start_ms_kst_cross_parity).
         // Event: 2026-03-11T05:00:00Z (= KST 03-11 14:00 Wed). start_of_week=Monday.
         let kst: chrono_tz::Tz = "Asia/Seoul".parse().unwrap();
-        let ts_ms = chrono::NaiveDate::from_ymd_opt(2026, 3, 11).unwrap()
-            .and_hms_opt(5, 0, 0).unwrap().and_utc().timestamp() * 1000;
+        let ts_ms = chrono::NaiveDate::from_ymd_opt(2026, 3, 11)
+            .unwrap()
+            .and_hms_opt(5, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp()
+            * 1000;
         let mon = chrono::Weekday::Mon;
         let cases: [(&str, i64, Option<&chrono_tz::Tz>, i64); 7] = [
-            ("1d tz",    86400,   Some(&kst), 1773154800), // KST 03-11 00:00
-            ("2d tz",    172800,  Some(&kst), 1773068400), // KST 03-10 00:00
-            ("1w tz",    604800,  Some(&kst), 1772982000), // KST 03-09 00:00 (Mon)
-            ("30d tz",   2592000, Some(&kst), 1772895600), // KST 03-08 00:00
-            ("27h",      97200,   Some(&kst), 1773122400), // epoch-aligned
-            ("1d no-tz", 86400,   None,       1773187200), // UTC 03-11 00:00
-            ("1w no-tz", 604800,  None,       1772668800), // UTC 03-05 00:00 (pure epoch)
+            ("1d tz", 86400, Some(&kst), 1773154800),  // KST 03-11 00:00
+            ("2d tz", 172800, Some(&kst), 1773068400), // KST 03-10 00:00
+            ("1w tz", 604800, Some(&kst), 1772982000), // KST 03-09 00:00 (Mon)
+            ("30d tz", 2592000, Some(&kst), 1772895600), // KST 03-08 00:00
+            ("27h", 97200, Some(&kst), 1773122400),    // epoch-aligned
+            ("1d no-tz", 86400, None, 1773187200),     // UTC 03-11 00:00
+            ("1w no-tz", 604800, None, 1772668800),    // UTC 03-05 00:00 (pure epoch)
         ];
         for (label, step, tz, expect) in cases {
-            assert_eq!(bucket_start_sec(ts_ms, step, tz, mon), expect, "parity mismatch: {label}");
+            assert_eq!(
+                bucket_start_sec(ts_ms, step, tz, mon),
+                expect,
+                "parity mismatch: {label}"
+            );
         }
     }
 
@@ -2161,8 +2493,13 @@ mod tests {
         // 27h is not a whole-day multiple → epoch-aligned even with a tz.
         let kst: chrono_tz::Tz = "Asia/Seoul".parse().unwrap();
         let step_secs = 27 * 3600; // 97200
-        let ts_ms = chrono::NaiveDate::from_ymd_opt(2023, 11, 9).unwrap()
-            .and_hms_opt(3, 0, 0).unwrap().and_utc().timestamp() * 1000;
+        let ts_ms = chrono::NaiveDate::from_ymd_opt(2023, 11, 9)
+            .unwrap()
+            .and_hms_opt(3, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp()
+            * 1000;
 
         let b = bucket_start_sec(ts_ms, step_secs, Some(&kst), chrono::Weekday::Mon);
         let expect = (ts_ms / (step_secs * 1000)) * (step_secs * 1000) / 1000;
@@ -2177,8 +2514,13 @@ mod tests {
         // midnight never exists; the day bucket must anchor to the first valid
         // local instant (01:00 = 2018-11-04T03:00:00Z), never an epoch fallback.
         let sp: chrono_tz::Tz = "America/Sao_Paulo".parse().unwrap();
-        let ts_ms = chrono::NaiveDate::from_ymd_opt(2018, 11, 4).unwrap()
-            .and_hms_opt(13, 0, 0).unwrap().and_utc().timestamp() * 1000;
+        let ts_ms = chrono::NaiveDate::from_ymd_opt(2018, 11, 4)
+            .unwrap()
+            .and_hms_opt(13, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp()
+            * 1000;
 
         let b = bucket_start_sec(ts_ms, 86400, Some(&sp), chrono::Weekday::Mon);
         assert_eq!(
@@ -2198,14 +2540,31 @@ mod tests {
 
         let pricing = crate::pricing::PricingTable::new(std::collections::HashMap::new());
         let out = aggregate_events_to_toki_json(
-            &[cc, cx], 60, 1_700_000_000_000, 1_700_000_060_000,
-            false, false, "model", None, &pricing, None, None, true,
-        ).unwrap();
+            &[cc, cx],
+            60,
+            1_700_000_000_000,
+            1_700_000_060_000,
+            false,
+            false,
+            "model",
+            None,
+            &pricing,
+            None,
+            None,
+            true,
+        )
+        .unwrap();
 
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
         let providers = v["providers"].as_object().unwrap();
-        assert!(providers.contains_key("claude_code"), "missing claude_code key: {providers:?}");
-        assert!(providers.contains_key("codex"), "missing codex key: {providers:?}");
+        assert!(
+            providers.contains_key("claude_code"),
+            "missing claude_code key: {providers:?}"
+        );
+        assert!(
+            providers.contains_key("codex"),
+            "missing codex key: {providers:?}"
+        );
         // codex entries carry codex-specific token field names
         let codex_entry = &providers["codex"].as_array().unwrap()[0]["usage_per_models"][0];
         assert!(codex_entry.get("reasoning_output_tokens").is_some());
@@ -2214,8 +2573,20 @@ mod tests {
     #[test]
     fn test_aggregate_groups_by_project() {
         let events = vec![
-            make_event("device-a", "claude-3-opus", "/proj-x", 1_700_000_000_000, 100),
-            make_event("device-a", "claude-3-opus", "/proj-y", 1_700_000_000_000, 50),
+            make_event(
+                "device-a",
+                "claude-3-opus",
+                "/proj-x",
+                1_700_000_000_000,
+                100,
+            ),
+            make_event(
+                "device-a",
+                "claude-3-opus",
+                "/proj-y",
+                1_700_000_000_000,
+                50,
+            ),
         ];
         let pricing = crate::pricing::PricingTable::new(std::collections::HashMap::from([(
             "claude-3-opus".to_string(),
@@ -2227,9 +2598,20 @@ mod tests {
             },
         )]));
         let out = aggregate_events_to_toki_json(
-            &events, 60, 1_700_000_000_000, 1_700_000_060_000,
-            false, false, "project", None, &pricing, None, None, true,
-        ).unwrap();
+            &events,
+            60,
+            1_700_000_000_000,
+            1_700_000_060_000,
+            false,
+            false,
+            "project",
+            None,
+            &pricing,
+            None,
+            None,
+            true,
+        )
+        .unwrap();
         let periods = parse_periods(&out);
         assert_eq!(periods.len(), 2, "two projects, same model → two entries");
         let mut costs: Vec<f64> = periods
@@ -2237,6 +2619,10 @@ mod tests {
             .map(|(_, models)| models[0]["cost_usd"].as_f64().unwrap())
             .collect();
         costs.sort_by(f64::total_cmp);
-        assert_eq!(costs, vec![50.0, 100.0], "costs use the event model, not project label");
+        assert_eq!(
+            costs,
+            vec![50.0, 100.0],
+            "costs use the event model, not project label"
+        );
     }
 }

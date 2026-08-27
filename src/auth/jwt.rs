@@ -54,7 +54,11 @@ impl JwtManager {
     }
 
     fn iss_claim(&self) -> Option<String> {
-        if self.issuer.is_empty() { None } else { Some(self.issuer.clone()) }
+        if self.issuer.is_empty() {
+            None
+        } else {
+            Some(self.issuer.clone())
+        }
     }
 
     pub fn issue_access_token(&self, user_id: &str) -> Result<String> {
@@ -72,7 +76,11 @@ impl JwtManager {
             .context("failed to issue access token")
     }
 
-    pub fn issue_refresh_token(&self, user_id: &str, device_id: Option<&str>) -> Result<(String, Claims)> {
+    pub fn issue_refresh_token(
+        &self,
+        user_id: &str,
+        device_id: Option<&str>,
+    ) -> Result<(String, Claims)> {
         let now = Utc::now().timestamp();
         let claims = Claims {
             sub: user_id.to_owned(),
@@ -134,27 +142,24 @@ impl JwtManager {
             &new_claims.sub,
             device_id,
             new_claims.exp,
-        ).await?;
+        )
+        .await?;
 
         Ok((access, refresh))
     }
 
     /// Store a freshly issued refresh token in DB (called on first login).
     pub async fn store_refresh_token(&self, db: &dyn DatabaseRepo, claims: &Claims) -> Result<()> {
-        db.store_refresh_token(
-            &claims.jti,
-            &claims.sub,
-            claims.did.as_deref(),
-            claims.exp,
-        ).await
+        db.store_refresh_token(&claims.jti, &claims.sub, claims.did.as_deref(), claims.exp)
+            .await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
     use crate::db::sqlite::SqliteRepo;
+    use tempfile::NamedTempFile;
 
     fn mgr() -> JwtManager {
         JwtManager::new("test-secret-key-1234567890abcdef", 3600, 86400 * 30)
@@ -227,7 +232,9 @@ mod tests {
     #[tokio::test]
     async fn test_rotate_valid() {
         let tmp = NamedTempFile::new().unwrap();
-        let db = SqliteRepo::open(tmp.path().to_str().unwrap()).await.unwrap();
+        let db = SqliteRepo::open(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
 
         insert_test_user(&db, "user-1").await;
 
@@ -247,7 +254,9 @@ mod tests {
     #[tokio::test]
     async fn test_rotate_not_stored_fails() {
         let tmp = NamedTempFile::new().unwrap();
-        let db = SqliteRepo::open(tmp.path().to_str().unwrap()).await.unwrap();
+        let db = SqliteRepo::open(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
         insert_test_user(&db, "user-1").await;
 
         let m = mgr();
